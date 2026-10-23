@@ -2,6 +2,7 @@
 
 //! HP Clock: alternativa minima a HP Click per DesignJet PostScript.
 
+mod anteprima;
 mod config;
 mod file;
 mod gui;

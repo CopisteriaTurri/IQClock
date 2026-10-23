@@ -8,6 +8,7 @@ Il RIP lo fa la stampante, quindi non serve il motore di HP Click.
 ## Uso
 
 - **Interfaccia**: `hpclock.exe` (oppure trascina i file sull'eseguibile).
+  Tenere `pdfium.dll` nella stessa cartella: senza, i PDF non hanno l'anteprima.
 - **Riga di comando** (su Windows l'output è visibile solo dalla build di debug):
   ```
   hpclock stampa tavola.pdf --copie 2 --rotolo 1 --grigi
@@ -60,8 +61,8 @@ Il `prtMarkerSuppliesLevel` standard non è implementato dalla stampante.
 
 ## Limiti del prototipo
 
-- Anteprima PDF solo come sagoma in scala sul rotolo (formato e numero di pagine);
-  JPEG e TIFF si vedono davvero. Per il rendering PDF serve pdfium (`pdfium.dll`).
+- L'anteprima mostra le prime 4 pagine (PDF con pdfium, JPEG e TIFF); PostScript e
+  HP-GL/2 restano senza anteprima.
 - Niente nesting, ridimensionamento o rotazione automatica: decide la stampante.
 - Le immagini sono disegnate supponendo 300 dpi.
 - Nessun controllo che il job sia stato effettivamente stampato: "inviato" vuol dire
@@ -70,7 +71,15 @@ Il `prtMarkerSuppliesLevel` standard non è implementato dalla stampante.
 ## Compilare
 
 ```
+./scarica-pdfium.sh                                    # pdfium in pdfium/ (non è in git)
 cargo build --release                                  # Linux
 cargo build --release --target x86_64-pc-windows-gnu   # Windows (serve mingw64-gcc)
 cargo test
 ```
+
+pdfium viene da [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries),
+release `chromium/7881`: è la versione dell'API per cui è compilato `pdfium-render` 0.9
+(feature `pdfium_latest`). Aggiornando il crate va aggiornata anche `VERSIONE` nello script.
+Per distribuire su Windows: `hpclock.exe` + `pdfium/win-x64/pdfium.dll` +
+`pdfium/LICENSE` nella stessa cartella. In debug l'app trova pdfium anche in
+`pdfium/<piattaforma>` del progetto.

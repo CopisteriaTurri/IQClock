@@ -9,6 +9,7 @@ eframe = { version = "0.37.0", default-features = false, features = ["default_fo
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "tiff", "png"] }
 imagesize = "0.15.0"
 lopdf = "0.46.0"
+pdfium-render = "0.9.4"
 rfd = "0.17.2"
 
 [profile.release]
