@@ -1,0 +1,103 @@
+//! Comunicazione con la stampante via socket raw (porta 9100, "JetDirect").
+
+use std::fs::File;
+use std::io::{BufReader, Read, Write};
+use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::path::Path;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+
+use crate::pjl::{self, Formato, OpzioniJob};
+
+const TIMEOUT_CONNESSIONE: Duration = Duration::from_secs(5);
+/// La stampante può rallentare la ricezione mentre elabora: timeout generoso.
+const TIMEOUT_SCRITTURA: Duration = Duration::from_secs(120);
+
+fn connetti(host: &str, porta: u16) -> Result<TcpStream> {
+    let indirizzo = (host, porta)
+        .to_socket_addrs()
+        .with_context(|| format!("indirizzo non valido: {host}"))?
+        .next()
+        .with_context(|| format!("nessun indirizzo per {host}"))?;
+    TcpStream::connect_timeout(&indirizzo, TIMEOUT_CONNESSIONE)
+        .with_context(|| format!("stampante non raggiungibile su {indirizzo}"))
+}
+
+/// Scrive il job completo (intestazione PJL + file + chiusura) su `dest`,
+/// chiamando `avanzamento` con la frazione già scritta (0.0..=1.0).
+pub fn scrivi_job(
+    dest: &mut impl Write,
+    percorso: &Path,
+    formato: Formato,
+    opz: &OpzioniJob,
+    mut avanzamento: impl FnMut(f32),
+) -> Result<()> {
+    let totale = std::fs::metadata(percorso)?.len().max(1);
+    let mut file = BufReader::new(File::open(percorso)?);
+    dest.write_all(&pjl::intestazione(opz, formato))?;
+
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut scritti = 0u64;
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        dest.write_all(&buf[..n])?;
+        scritti += n as u64;
+        avanzamento(scritti as f32 / totale as f32);
+    }
+
+    dest.write_all(&pjl::chiusura(opz))?;
+    dest.flush()?;
+    Ok(())
+}
+
+pub fn invia(
+    host: &str,
+    porta: u16,
+    percorso: &Path,
+    formato: Formato,
+    opz: &OpzioniJob,
+    avanzamento: impl FnMut(f32),
+) -> Result<()> {
+    let mut sock = connetti(host, porta)?;
+    sock.set_write_timeout(Some(TIMEOUT_SCRITTURA))?;
+    scrivi_job(&mut sock, percorso, formato, opz, avanzamento).context("invio interrotto")?;
+    // Chiude il lato di scrittura: per la stampante il job è finito.
+    let _ = sock.shutdown(Shutdown::Write);
+    Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use std::net::TcpListener;
+    use std::thread;
+
+    #[test]
+    fn invio_a_finta_stampante() {
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let porta = server.local_addr().unwrap().port();
+        let ricevuto = thread::spawn(move || {
+            let (mut s, _) = server.accept().unwrap();
+            let mut v = Vec::new();
+            s.read_to_end(&mut v).unwrap();
+            v
+        });
+
+        let p = std::env::temp_dir().join(format!("hpclock-invio-{}.pdf", std::process::id()));
+        std::fs::write(&p, b"%PDF-1.4 finto").unwrap();
+        let opz = OpzioniJob { nome: "prova".into(), ..Default::default() };
+        let mut ultimo = 0.0;
+        invia("127.0.0.1", porta, &p, Formato::Pdf, &opz, |f| ultimo = f).unwrap();
+        std::fs::remove_file(&p).unwrap();
+
+        let v = String::from_utf8(ricevuto.join().unwrap()).unwrap();
+        assert!(v.starts_with("\x1b%-12345X@PJL JOB NAME=\"prova\""));
+        assert!(v.contains("@PJL ENTER LANGUAGE=PDF\r\n%PDF-1.4 finto\x1b%-12345X@PJL EOJ"));
+        assert!(v.ends_with("\x1b%-12345X"));
+        assert_eq!(ultimo, 1.0);
+    }
+}
