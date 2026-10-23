@@ -6,10 +6,11 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
 use eframe::egui::{
-    self, Align, Align2, Color32, ColorImage, CornerRadius, FontId, Layout, Pos2, Rect, RichText,
+    self, Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText,
     Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, Vec2,
 };
 
+use crate::anteprima::{Anteprime, PAGINE_MAX, Pagina};
 use crate::config::Config;
 use crate::file::{self, InfoFile};
 use crate::pjl::{self, OpzioniJob, Sorgente};
@@ -29,24 +30,39 @@ enum StatoJob {
 }
 
 struct Documento {
+    /// Identificativo stabile: gli eventi dai thread non usano la posizione
+    /// nella lista, che cambia quando si rimuove un file.
+    id: u64,
     percorso: PathBuf,
     nome: String,
     info: InfoFile,
     copie: u32,
     stato: StatoJob,
-    miniatura: Option<TextureHandle>,
+    /// Prime pagine renderizzate con le loro misure in mm, se note
+    /// (vuoto finché non arrivano, o se l'anteprima non è disponibile).
+    pagine: Vec<(TextureHandle, Option<(f64, f64)>)>,
+}
+
+impl Documento {
+    /// Misure della pagina `n` in mm: quelle date da pdfium, altrimenti quelle
+    /// della prima pagina lette all'apertura del file.
+    fn mm_pagina(&self, n: usize) -> Option<(f64, f64)> {
+        self.pagine.get(n).and_then(|(_, mm)| *mm).or(self.info.mm)
+    }
 }
 
 enum Evento {
-    Avanzamento(usize, f32),
-    Finito(usize, Result<(), String>),
+    Avanzamento(u64, f32),
+    Finito(u64, Result<(), String>),
     Stato(Result<StatoStampante, String>),
-    Miniatura(usize, ColorImage),
+    Pagine(u64, Vec<Pagina>),
 }
 
 pub struct App {
     config: Config,
     documenti: Vec<Documento>,
+    prossimo_id: u64,
+    anteprime: Anteprime,
     selezionato: Option<usize>,
     sorgente: Sorgente,
     scala_di_grigi: bool,
@@ -67,10 +83,17 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, config: Config, iniziali: Vec<PathBuf>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
         let (tx, rx) = channel();
+        let (tx_pagine, ctx_pagine) = (tx.clone(), cc.egui_ctx.clone());
+        let (anteprime, errore_pdfium) = Anteprime::avvia(move |id, pagine| {
+            let _ = tx_pagine.send(Evento::Pagine(id, pagine));
+            ctx_pagine.request_repaint();
+        });
         let mut app = Self {
             larghezza_rotolo: config.larghezza_rotolo_mm,
             config,
             documenti: Vec::new(),
+            prossimo_id: 0,
+            anteprime,
             selezionato: None,
             sorgente: Sorgente::Stampante,
             scala_di_grigi: false,
@@ -78,49 +101,38 @@ impl App {
             extra_pjl: String::new(),
             stato_stampante: None,
             verifica_in_corso: false,
-            avvisi: Vec::new(),
+            avvisi: errore_pdfium.into_iter().collect(),
             foto: std::env::var_os("HPCLOCK_FOTO").map(|p| (PathBuf::from(p), 0)),
             tx,
             rx,
         };
         for p in iniziali {
-            app.aggiungi(p, &cc.egui_ctx);
+            app.aggiungi(p);
         }
         app.verifica_stampante(&cc.egui_ctx);
         app
     }
 
-    fn aggiungi(&mut self, percorso: PathBuf, ctx: &egui::Context) {
+    fn aggiungi(&mut self, percorso: PathBuf) {
         let nome = percorso.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         match file::analizza(&percorso) {
             Ok(info) => {
-                let indice = self.documenti.len();
-                if matches!(info.formato, pjl::Formato::Jpeg | pjl::Formato::Tiff) {
-                    self.carica_miniatura(indice, percorso.clone(), ctx);
-                }
+                let id = self.prossimo_id;
+                self.prossimo_id += 1;
+                self.anteprime.richiedi(id, percorso.clone(), info.formato);
                 self.documenti.push(Documento {
+                    id,
                     percorso,
                     nome,
                     info,
                     copie: 1,
                     stato: StatoJob::Pronto,
-                    miniatura: None,
+                    pagine: Vec::new(),
                 });
-                self.selezionato = Some(indice);
+                self.selezionato = Some(self.documenti.len() - 1);
             }
             Err(e) => self.avvisi.push(format!("{nome}: {e}")),
         }
-    }
-
-    fn carica_miniatura(&self, indice: usize, percorso: PathBuf, ctx: &egui::Context) {
-        let (tx, ctx) = (self.tx.clone(), ctx.clone());
-        thread::spawn(move || {
-            let Ok(img) = image::open(&percorso) else { return };
-            let img = img.thumbnail(1024, 1024).to_rgba8();
-            let size = [img.width() as usize, img.height() as usize];
-            let _ = tx.send(Evento::Miniatura(indice, ColorImage::from_rgba_unmultiplied(size, &img)));
-            ctx.request_repaint();
-        });
     }
 
     fn verifica_stampante(&mut self, ctx: &egui::Context) {
@@ -153,21 +165,15 @@ impl App {
     fn stampa(&mut self, ctx: &egui::Context) {
         let coda: Vec<_> = self
             .documenti
-            .iter_mut()
-            .enumerate()
-            .filter(|(_, d)| matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_)))
-            .map(|(i, d)| {
+            .iter()
+            .filter(|d| matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_)))
+            .map(|d| (d.id, d.percorso.clone(), d.info.formato, self.opzioni(d)))
+            .collect();
+        for d in &mut self.documenti {
+            if matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_)) {
                 d.stato = StatoJob::InInvio(0.0);
-                i
-            })
-            .collect();
-        let coda: Vec<_> = coda
-            .into_iter()
-            .map(|i| {
-                let d = &self.documenti[i];
-                (i, d.percorso.clone(), d.info.formato, self.opzioni(d))
-            })
-            .collect();
+            }
+        }
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         let (host, porta) = (self.config.host.clone(), self.config.porta);
         thread::spawn(move || {
@@ -207,19 +213,32 @@ impl App {
     fn gestisci_eventi(&mut self, ctx: &egui::Context) {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
-                Evento::Avanzamento(i, f) => self.documenti[i].stato = StatoJob::InInvio(f),
-                Evento::Finito(i, Ok(())) => self.documenti[i].stato = StatoJob::Inviato,
-                Evento::Finito(i, Err(e)) => self.documenti[i].stato = StatoJob::Errore(e),
+                Evento::Avanzamento(id, f) => self.imposta_stato(id, StatoJob::InInvio(f)),
+                Evento::Finito(id, Ok(())) => self.imposta_stato(id, StatoJob::Inviato),
+                Evento::Finito(id, Err(e)) => self.imposta_stato(id, StatoJob::Errore(e)),
                 Evento::Stato(r) => {
                     self.stato_stampante = Some(r);
                     self.verifica_in_corso = false;
                 }
-                Evento::Miniatura(i, img) => {
-                    if let Some(d) = self.documenti.get_mut(i) {
-                        d.miniatura = Some(ctx.load_texture(&d.nome, img, TextureOptions::LINEAR));
+                Evento::Pagine(id, pagine) => {
+                    if let Some(d) = self.documenti.iter_mut().find(|d| d.id == id) {
+                        d.pagine = pagine
+                            .into_iter()
+                            .enumerate()
+                            .map(|(n, p)| {
+                                let tex = ctx.load_texture(format!("{}-{n}", d.id), p.immagine, TextureOptions::LINEAR);
+                                (tex, p.mm)
+                            })
+                            .collect();
                     }
                 }
             }
+        }
+    }
+
+    fn imposta_stato(&mut self, id: u64, stato: StatoJob) {
+        if let Some(d) = self.documenti.iter_mut().find(|d| d.id == id) {
+            d.stato = stato;
         }
     }
 
@@ -227,7 +246,7 @@ impl App {
         let caduti: Vec<PathBuf> =
             ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
         for p in caduti {
-            self.aggiungi(p, ctx);
+            self.aggiungi(p);
         }
     }
 
@@ -387,7 +406,7 @@ impl App {
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 90.0), Sense::hover());
-                        disegna_pagina(ui, rect, d);
+                        disegna_pagina(ui, rect, d, 0);
                         ui.label(RichText::new(&d.nome).small().strong());
                         ui.label(RichText::new(format!("{} · {}", d.info.formato.etichetta(), file::dimensione_leggibile(d.info.byte))).small());
                         match &d.stato {
@@ -421,7 +440,7 @@ impl App {
                     .pick_files()
             {
                 for f in files {
-                    self.aggiungi(f, ui.ctx());
+                    self.aggiungi(f);
                 }
             }
         });
@@ -447,40 +466,44 @@ impl App {
             return;
         };
 
-        // Il rotolo occupa la larghezza disponibile; le pagine sono in scala sopra.
+        // Il rotolo occupa la larghezza disponibile; le pagine, ognuna col suo
+        // formato, sono in scala una sotto l'altra.
         let margine = 30.0;
-        let scala = (area.width() - 2.0 * margine) / self.larghezza_rotolo as f32;
-        let (l_mm, a_mm) = d.info.mm.unwrap_or((self.larghezza_rotolo * 0.7, self.larghezza_rotolo));
-        let pagina = Vec2::new(l_mm as f32, a_mm as f32) * scala;
-        let pagine_visibili = d.info.pagine.min(4);
-        let lunghezza = (pagina.y + 8.0) * pagine_visibili as f32;
+        let spazio_tra_pagine = 8.0;
+        let rotolo_mm = self.larghezza_rotolo;
+        let scala = (area.width() - 2.0 * margine) / rotolo_mm as f32;
+        let pagine_visibili = d.info.pagine.min(PAGINE_MAX);
+        let misure: Vec<(f64, f64)> = (0..pagine_visibili)
+            .map(|n| d.mm_pagina(n).unwrap_or((rotolo_mm * 0.7, rotolo_mm)))
+            .collect();
+        let lunghezza: f32 = misure.iter().map(|(_, a)| *a as f32 * scala + spazio_tra_pagine).sum();
         let alto_disponibile = area.height() - 2.0 * margine - 24.0;
         // Se il rotolo è troppo lungo per la finestra riduco tutto in proporzione.
         let rid = (alto_disponibile / lunghezza).min(1.0);
         let rotolo = Rect::from_min_size(
-            Pos2::new(area.center().x - self.larghezza_rotolo as f32 * scala * rid / 2.0, area.top() + margine),
-            Vec2::new(self.larghezza_rotolo as f32 * scala * rid, lunghezza * rid),
+            Pos2::new(area.center().x - rotolo_mm as f32 * scala * rid / 2.0, area.top() + margine),
+            Vec2::new(rotolo_mm as f32 * scala * rid, lunghezza * rid),
         );
         let p = ui.painter();
         p.rect_filled(rotolo, 0.0, Color32::from_gray(250));
         p.rect_stroke(rotolo, 0.0, Stroke::new(1.0, Color32::from_gray(160)), StrokeKind::Outside);
 
-        for n in 0..pagine_visibili {
-            let r = Rect::from_min_size(
-                rotolo.left_top() + Vec2::new(0.0, (pagina.y + 8.0) * rid * n as f32),
-                pagina * rid,
-            );
-            disegna_pagina(ui, r, d);
+        let mut y = rotolo.top();
+        for (n, (l, a)) in misure.iter().enumerate() {
+            let dim = Vec2::new(*l as f32, *a as f32) * scala * rid;
+            disegna_pagina(ui, Rect::from_min_size(Pos2::new(rotolo.left(), y), dim), d, n);
+            y += dim.y + spazio_tra_pagine * rid;
         }
 
         let mut nota = format!("{} — {}", d.nome, d.info.dettagli);
         if d.info.pagine > pagine_visibili {
             nota.push_str(&format!(" (mostrate {pagine_visibili})"));
         }
-        if l_mm > self.larghezza_rotolo + 0.5 && a_mm > self.larghezza_rotolo + 0.5 {
-            nota.push_str("  — attenzione: non entra nel rotolo: la stampante la ridimensionerà o taglierà");
-        } else if l_mm > self.larghezza_rotolo + 0.5 {
-            nota.push_str("  — attenzione: più larga del rotolo: va ruotata (impostazione della stampante)");
+        let tolleranza = rotolo_mm + 0.5;
+        if misure.iter().any(|(l, a)| l.min(*a) > tolleranza) {
+            nota.push_str("  — attenzione: una pagina non entra nel rotolo, la stampante la ridimensionerà o taglierà");
+        } else if misure.iter().any(|(l, _)| *l > tolleranza) {
+            nota.push_str("  — attenzione: una pagina è più larga del rotolo, va ruotata (impostazione della stampante)");
         }
         ui.painter().text(
             Pos2::new(area.center().x, area.bottom() - 16.0),
@@ -516,10 +539,14 @@ fn barra_inchiostro(ui: &mut egui::Ui, c: &Cartuccia) {
     });
 }
 
-/// Pagina bianca con bordo; dentro l'immagine se c'è, altrimenti il formato.
-fn disegna_pagina(ui: &egui::Ui, spazio: Rect, d: &Documento) {
-    let (l, a) = d.info.mm.unwrap_or((210.0, 297.0));
-    let rapporto = (l / a) as f32;
+/// Pagina `n` del documento: l'immagine renderizzata se c'è, altrimenti una
+/// pagina bianca con il formato, centrata in `spazio` con le sue proporzioni.
+fn disegna_pagina(ui: &egui::Ui, spazio: Rect, d: &Documento, n: usize) {
+    let tex = d.pagine.get(n).map(|(t, _)| t);
+    let rapporto = match tex {
+        Some(t) => t.aspect_ratio(),
+        None => d.mm_pagina(n).map(|(l, a)| (l / a) as f32).unwrap_or(210.0 / 297.0),
+    };
     let dim = if spazio.width() / spazio.height() > rapporto {
         Vec2::new(spazio.height() * rapporto, spazio.height())
     } else {
@@ -529,7 +556,7 @@ fn disegna_pagina(ui: &egui::Ui, spazio: Rect, d: &Documento) {
     let p = ui.painter();
     p.rect_filled(r, 0.0, Color32::WHITE);
     p.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::from_gray(150)), StrokeKind::Inside);
-    if let Some(tex) = &d.miniatura {
+    if let Some(tex) = tex {
         p.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
     } else {
         p.text(r.center(), Align2::CENTER_CENTER, d.info.formato.etichetta(), FontId::proportional((r.height() / 6.0).clamp(9.0, 28.0)), Color32::from_gray(150));
