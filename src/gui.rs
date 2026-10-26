@@ -72,7 +72,7 @@ pub struct App {
     stato_stampante: Option<Result<StatoStampante, String>>,
     verifica_in_corso: bool,
     avvisi: Vec<String>,
-    /// Con `HPCLOCK_FOTO=file.png` salva un'immagine della finestra e chiude
+    /// Con `IQCLOCK_FOTO=file.png` salva un'immagine della finestra e chiude
     /// (per documentazione e controlli visivi).
     foto: Option<(PathBuf, u32)>,
     tx: Sender<Evento>,
@@ -102,7 +102,7 @@ impl App {
             stato_stampante: None,
             verifica_in_corso: false,
             avvisi: errore_pdfium.into_iter().collect(),
-            foto: std::env::var_os("HPCLOCK_FOTO").map(|p| (PathBuf::from(p), 0)),
+            foto: std::env::var_os("IQCLOCK_FOTO").map(|p| (PathBuf::from(p), 0)),
             tx,
             rx,
         };

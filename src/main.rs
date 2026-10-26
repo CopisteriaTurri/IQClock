@@ -1,6 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-//! HP Clock: alternativa minima a HP Click per DesignJet PostScript.
+//! IQClock: alternativa minima a HP Click per DesignJet PostScript.
 
 mod anteprima;
 mod config;
@@ -20,9 +20,9 @@ use pjl::{OpzioniJob, Sorgente};
 
 const USO: &str = "\
 Senza argomenti (o con dei file) apre l'interfaccia. Da riga di comando:
-  hpclock stampa FILE... [--host IP] [--copie N] [--rotolo 1|2|auto] [--grigi] [--prn OUT]
-  hpclock stato [--host IP]
-  hpclock snmp OID [--host IP]      (diagnostica: elenca le voci sotto OID)";
+  iqclock stampa FILE... [--host IP] [--copie N] [--rotolo 1|2|auto] [--grigi] [--prn OUT]
+  iqclock stato [--host IP]
+  iqclock snmp OID [--host IP]      (diagnostica: elenca le voci sotto OID)";
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -42,14 +42,14 @@ fn avvia_gui(file: Vec<PathBuf>) -> Result<()> {
     let config = Config::carica();
     let opzioni = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("HP Clock")
+            .with_title("IQClock")
             .with_inner_size([1200.0, 760.0])
             .with_min_inner_size([800.0, 500.0])
             .with_drag_and_drop(true),
         ..Default::default()
     };
     eframe::run_native(
-        "HP Clock",
+        "IQClock",
         opzioni,
         Box::new(move |cc| Ok(Box::new(gui::App::new(cc, config, file)))),
     )

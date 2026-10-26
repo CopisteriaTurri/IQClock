@@ -126,7 +126,7 @@ mod test {
             eprintln!("pdfium assente: test saltato");
             return;
         };
-        let pdf = std::env::temp_dir().join(format!("hpclock-a1-{}.pdf", std::process::id()));
+        let pdf = std::env::temp_dir().join(format!("iqclock-a1-{}.pdf", std::process::id()));
         // PDF minimo: una pagina A1 (1684 × 2384 pt) vuota.
         let mut doc = lopdf::Document::with_version("1.5");
         let pagine_id = doc.new_object_id();
