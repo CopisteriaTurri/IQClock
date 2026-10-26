@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    tags: ['v*']
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,6 +26,13 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hpclock-${{ runner.os }}
+          path: |
+            target/release/hpclock
+            target/release/hpclock.exe
+          if-no-files-found: ignore
 
   audit:
     runs-on: ubuntu-latest
@@ -34,3 +41,18 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  release:
+    needs: [build, audit]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Crea la release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mv hpclock-Linux/hpclock hpclock-linux-x64
+          mv hpclock-Windows/hpclock.exe hpclock-win-x64.exe
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes hpclock-linux-x64 hpclock-win-x64.exe
