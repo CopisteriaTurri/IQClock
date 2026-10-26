@@ -83,3 +83,7 @@ release `chromium/7881`: è la versione dell'API per cui è compilato `pdfium-re
 Per distribuire su Windows: `hpclock.exe` + `pdfium/win-x64/pdfium.dll` +
 `pdfium/LICENSE` nella stessa cartella. In debug l'app trova pdfium anche in
 `pdfium/<piattaforma>` del progetto.
+
+## Licenza
+
+GPL-3.0, vedi [LICENSE](LICENSE).
