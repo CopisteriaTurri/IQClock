@@ -1,5 +1,5 @@
 //! Impostazioni persistenti in un file `chiave=valore`
-//! (`%APPDATA%\hpclock\config.txt` su Windows, `~/.config/hpclock/config.txt` altrove).
+//! (`%APPDATA%\iqclock\config.txt` su Windows, `~/.config/iqclock/config.txt` altrove).
 
 use std::path::PathBuf;
 
@@ -23,7 +23,7 @@ fn percorso() -> Option<PathBuf> {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
     })?;
-    Some(base.join("hpclock").join("config.txt"))
+    Some(base.join("iqclock").join("config.txt"))
 }
 
 impl Config {

@@ -28,10 +28,10 @@ jobs:
       - run: cargo build --release
       - uses: actions/upload-artifact@v4
         with:
-          name: hpclock-${{ runner.os }}
+          name: iqclock-${{ runner.os }}
           path: |
-            target/release/hpclock
-            target/release/hpclock.exe
+            target/release/iqclock
+            target/release/iqclock.exe
           if-no-files-found: ignore
 
   audit:
@@ -53,6 +53,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mv hpclock-Linux/hpclock hpclock-linux-x64
-          mv hpclock-Windows/hpclock.exe hpclock-win-x64.exe
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes hpclock-linux-x64 hpclock-win-x64.exe
+          mv iqclock-Linux/iqclock iqclock-linux-x64
+          mv iqclock-Windows/iqclock.exe iqclock-win-x64.exe
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes iqclock-linux-x64 iqclock-win-x64.exe

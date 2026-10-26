@@ -87,7 +87,7 @@ mod test {
             v
         });
 
-        let p = std::env::temp_dir().join(format!("hpclock-invio-{}.pdf", std::process::id()));
+        let p = std::env::temp_dir().join(format!("iqclock-invio-{}.pdf", std::process::id()));
         std::fs::write(&p, b"%PDF-1.4 finto").unwrap();
         let opz = OpzioniJob { nome: "prova".into(), ..Default::default() };
         let mut ultimo = 0.0;

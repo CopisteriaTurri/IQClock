@@ -145,7 +145,7 @@ mod test {
 
     #[test]
     fn riconosce_dai_byte() {
-        let dir = std::env::temp_dir().join(format!("hpclock-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("iqclock-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let casi: [(&str, &[u8], Option<Formato>); 5] = [
             ("a.bin", b"%PDF-1.7\n", Some(Formato::Pdf)),

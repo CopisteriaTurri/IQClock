@@ -1,23 +1,27 @@
-# HP Clock
+# IQClock
 
 Alternativa minima a HP Click per la DesignJet T2600 PostScript (e in generale per i
 DesignJet con interprete PostScript/PDF). Trascini i file, scegli le opzioni, premi
 **Stampa**: il file viene mandato così com'è alla porta 9100 con un'intestazione PJL.
 Il RIP lo fa la stampante, quindi non serve il motore di HP Click.
 
+Progetto indipendente, non affiliato né approvato da HP. "HP" e "DesignJet" sono marchi
+dei rispettivi proprietari e qui compaiono solo per indicare la compatibilità. Il software
+è fornito senza alcuna garanzia.
+
 ## Uso
 
-- **Interfaccia**: `hpclock.exe` (oppure trascina i file sull'eseguibile).
+- **Interfaccia**: `iqclock.exe` (oppure trascina i file sull'eseguibile).
   Tenere `pdfium.dll` nella stessa cartella: senza, i PDF non hanno l'anteprima.
 - **Riga di comando** (su Windows l'output è visibile solo dalla build di debug):
   ```
-  hpclock stampa tavola.pdf --copie 2 --rotolo 1 --grigi
-  hpclock stampa tavola.pdf --prn prova.prn     # scrive il job su file senza stampare
-  hpclock stato                                  # stato, inchiostri, carta
-  hpclock snmp 1.3.6.1.2.1.43                    # diagnostica SNMP
+  iqclock stampa tavola.pdf --copie 2 --rotolo 1 --grigi
+  iqclock stampa tavola.pdf --prn prova.prn     # scrive il job su file senza stampare
+  iqclock stato                                  # stato, inchiostri, carta
+  iqclock snmp 1.3.6.1.2.1.43                    # diagnostica SNMP
   ```
 
-Le impostazioni (IP, porta, larghezza rotolo) stanno in `%APPDATA%\hpclock\config.txt`.
+Le impostazioni (IP, porta, larghezza rotolo) stanno in `%APPDATA%\iqclock\config.txt`.
 Di default: `192.168.10.72:9100`, rotolo 36".
 
 ## Cosa viene mandato alla stampante
@@ -80,7 +84,7 @@ cargo test
 pdfium viene da [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries),
 release `chromium/7881`: è la versione dell'API per cui è compilato `pdfium-render` 0.9
 (feature `pdfium_latest`). Aggiornando il crate va aggiornata anche `VERSIONE` nello script.
-Per distribuire su Windows: `hpclock.exe` + `pdfium/win-x64/pdfium.dll` +
+Per distribuire su Windows: `iqclock.exe` + `pdfium/win-x64/pdfium.dll` +
 `pdfium/LICENSE` nella stessa cartella. In debug l'app trova pdfium anche in
 `pdfium/<piattaforma>` del progetto.
 

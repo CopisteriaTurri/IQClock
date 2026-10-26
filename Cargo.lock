@@ -1142,19 +1142,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
-name = "hpclock"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "eframe",
- "image",
- "imagesize",
- "lopdf",
- "pdfium-render",
- "rfd",
-]
-
-[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1227,6 +1214,19 @@ checksum = "3b5cf4372d022092674a83b8febf5865f7a573cc0c5baec5e49c879b6a20978f"
 dependencies = [
  "block-padding",
  "hybrid-array",
+]
+
+[[package]]
+name = "iqclock"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "eframe",
+ "image",
+ "imagesize",
+ "lopdf",
+ "pdfium-render",
+ "rfd",
 ]
 
 [[package]]
