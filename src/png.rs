@@ -4,8 +4,8 @@
 //! appiattito sul bianco della carta e riscritto in TIFF RGB 8 bit senza perdita
 //! (LZW con predittore orizzontale). I DPI dichiarati nel chunk `pHYs` finiscono
 //! nei tag di risoluzione del TIFF (`XResolution`/`YResolution`, `ResolutionUnit` =
-//! inch); se il PNG non li dichiara si usano i 300 dpi presunti come nel resto
-//! dell'app.
+//! inch); se il PNG non li dichiara o sono assurdi si usano i 300 dpi presunti
+//! come nel resto dell'app.
 //!
 //! Il TIFF viene scritto in un file temporaneo, cancellato quando il job è finito.
 
@@ -88,7 +88,7 @@ pub fn png_a_tiff(percorso: &Path) -> Result<TiffTemporaneo> {
     let immagine =
         lettore.decode().with_context(|| format!("lettura di {}", percorso.display()))?;
     let (larghezza, altezza, rgb) = su_bianco(immagine);
-    let (dpi_x, dpi_y) = dpi(percorso).unwrap_or((DPI_IMMAGINI, DPI_IMMAGINI));
+    let (dpi_x, dpi_y) = crate::file::dpi_sensati(dpi(percorso)).unwrap_or((DPI_IMMAGINI, DPI_IMMAGINI));
 
     let dest = std::env::temp_dir().join(format!(
         "iqclock-{}-{}.tiff",

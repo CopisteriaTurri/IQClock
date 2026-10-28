@@ -73,8 +73,9 @@ Il `prtMarkerSuppliesLevel` standard non è implementato dalla stampante.
 - L'anteprima mostra le prime 4 pagine (PDF con pdfium, JPEG, TIFF e PNG); PostScript
   e HP-GL/2 restano senza anteprima.
 - Niente nesting, ridimensionamento o rotazione automatica: decide la stampante.
-- Le immagini JPEG e TIFF sono misurate supponendo 300 dpi; per i PNG valgono quelli
-  dichiarati nel file.
+- Le dimensioni in mm delle immagini derivano dai DPI dichiarati nel file
+  (EXIF/JFIF per JPEG, tag di risoluzione per TIFF, chunk `pHYs` per PNG);
+  se mancano o sono assurdi si presumono 300 dpi, segnalati come «presunti» nella lista.
 - Nessun controllo che il job sia stato effettivamente stampato: "inviato" vuol dire
   che la stampante ha ricevuto tutti i byte.
 

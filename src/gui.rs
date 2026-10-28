@@ -409,6 +409,9 @@ impl App {
                         disegna_pagina(ui, rect, d, 0);
                         ui.label(RichText::new(&d.nome).small().strong());
                         ui.label(RichText::new(format!("{} · {}", d.info.formato.etichetta(), file::dimensione_leggibile(d.info.byte))).small());
+                        if !d.info.dettagli.is_empty() {
+                            ui.label(RichText::new(&d.info.dettagli).small().color(Color32::from_gray(90)));
+                        }
                         match &d.stato {
                             StatoJob::Pronto => {}
                             StatoJob::InInvio(f) => {
