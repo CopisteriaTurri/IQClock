@@ -135,7 +135,11 @@ fn riga_di_comando_stato(args: &[String]) -> Result<()> {
         println!("Inchiostro {p}  {} {}", c.colore.unwrap_or(""), c.nome);
     }
     for i in &s.ingressi {
-        println!("Carta:    {} — {}", i.nome, i.descrizione());
+        println!("Carta:    {} — {}", i.nome, i.descrizione_lunga());
+    }
+    match s.larghezza_rotolo_mm() {
+        Some((nome, mm)) => println!("Rotolo:   {mm:.0} mm (rilevato da {nome})"),
+        None => println!("Rotolo:   non rilevato (MIB senza dimensioni o SNMP non raggiungibile)"),
     }
     Ok(())
 }
