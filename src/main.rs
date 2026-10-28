@@ -7,6 +7,7 @@ mod config;
 mod file;
 mod gui;
 mod pjl;
+mod png;
 mod snmp;
 mod stampante;
 mod stato;

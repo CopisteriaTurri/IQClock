@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use crate::pjl::{self, Formato, OpzioniJob};
+use crate::png;
 
 const TIMEOUT_CONNESSIONE: Duration = Duration::from_secs(5);
 /// La stampante può rallentare la ricezione mentre elabora: timeout generoso.
@@ -26,6 +27,9 @@ fn connetti(host: &str, porta: u16) -> Result<TcpStream> {
 
 /// Scrive il job completo (intestazione PJL + file + chiusura) su `dest`,
 /// chiamando `avanzamento` con la frazione già scritta (0.0..=1.0).
+///
+/// I PNG non vengono mandati così come sono: la stampante non li legge, quindi
+/// si convertono in TIFF (vedi `png.rs`) e si invia quello.
 pub fn scrivi_job(
     dest: &mut impl Write,
     percorso: &Path,
@@ -33,6 +37,11 @@ pub fn scrivi_job(
     opz: &OpzioniJob,
     mut avanzamento: impl FnMut(f32),
 ) -> Result<()> {
+    if formato == Formato::Png {
+        let tiff = png::png_a_tiff(percorso)?;
+        return scrivi_job(dest, tiff.percorso(), Formato::Tiff, opz, avanzamento);
+    }
+
     let totale = std::fs::metadata(percorso)?.len().max(1);
     let mut file = BufReader::new(File::open(percorso)?);
     dest.write_all(&pjl::intestazione(opz, formato))?;
@@ -62,6 +71,12 @@ pub fn invia(
     opz: &OpzioniJob,
     avanzamento: impl FnMut(f32),
 ) -> Result<()> {
+    // Il PNG si converte prima di connettersi, così la stampante non resta col
+    // socket aperto e senza dati per tutta la conversione.
+    if formato == Formato::Png {
+        let tiff = png::png_a_tiff(percorso)?;
+        return invia(host, porta, tiff.percorso(), Formato::Tiff, opz, avanzamento);
+    }
     let mut sock = connetti(host, porta)?;
     sock.set_write_timeout(Some(TIMEOUT_SCRITTURA))?;
     scrivi_job(&mut sock, percorso, formato, opz, avanzamento).context("invio interrotto")?;
@@ -75,6 +90,25 @@ mod test {
     use super::*;
     use std::net::TcpListener;
     use std::thread;
+
+    #[test]
+    fn i_png_partono_come_tiff() {
+        let p = std::env::temp_dir().join(format!("iqclock-png-{}.png", std::process::id()));
+        image::save_buffer(&p, &[10, 20, 30, 40, 50, 60], 2, 1, image::ColorType::Rgb8).unwrap();
+        let opz = OpzioniJob { nome: "logo".into(), ..Default::default() };
+        let mut job = Vec::new();
+        scrivi_job(&mut job, &p, Formato::Png, &opz, |_| {}).unwrap();
+        std::fs::remove_file(&p).unwrap();
+
+        let testa = String::from_utf8_lossy(&job[..job.len().min(256)]).replace('\x1b', "<ESC>");
+        assert!(testa.contains("@PJL JOB NAME=\"logo\""), "{testa}");
+        assert!(!testa.contains("ENTER LANGUAGE"), "i TIFF non hanno ENTER LANGUAGE: {testa}");
+        // Dopo l'intestazione arrivano i byte del TIFF (little endian).
+        assert!(job.windows(4).any(|w| w == b"II*\0"), "manca la firma TIFF nel job");
+        assert!(job.ends_with(pjl::UEL));
+        let testo = String::from_utf8_lossy(&job[job.len() - 120..]);
+        assert!(testo.contains("@PJL EOJ NAME=\"logo\""));
+    }
 
     #[test]
     fn invio_a_finta_stampante() {
