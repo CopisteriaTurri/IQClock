@@ -32,7 +32,7 @@ Di default: `192.168.10.72:9100`, rotolo 36".
 @PJL SET MEDIASOURCE=ROLL1        (solo se scelto)
 @PJL SET RENDERMODE=COLOR|GRAYSCALE
 @PJL SET CUTTER=ON|OFF            (solo se scelto)
-@PJL ENTER LANGUAGE=PDF           (POSTSCRIPT, HPGL2; omesso per TIFF/JPEG)
+@PJL ENTER LANGUAGE=PDF           (POSTSCRIPT, HPGL2; omesso per TIFF/JPEG/PNG)
 ...file...
 <ESC>%-12345X@PJL EOJ NAME="tavola.pdf"
 <ESC>%-12345X
@@ -44,6 +44,11 @@ Di default: `192.168.10.72:9100`, rotolo 36".
 | MEDIASOURCE=ROLL1/ROLL2/AUTO | tabella PJL dei DesignJet XL 3600 | no |
 | CUTTER=ON/OFF | driver CUPS per DesignJet, non documentato da HP | no |
 | `@PJL INFO STATUS` | manuale PJL | **non supportato**: risponde `"?"` |
+
+I PNG vengono convertiti prima dell'invio: la stampante non li legge dal canale raw,
+quindi il file viene riscritto in TIFF RGB 8 bit (LZW), appiattendo la trasparenza sul
+bianco della carta e mantenendo i DPI del chunk `pHYs` (300 se assenti). Il TIFF vive
+in un file temporaneo, cancellato quando il job è finito.
 
 Prima di fidarsi delle opzioni, conviene stampare una volta da HP Click o dal driver
 Windows "su file" e confrontare l'intestazione PJL che usano.
@@ -65,10 +70,11 @@ Il `prtMarkerSuppliesLevel` standard non è implementato dalla stampante.
 
 ## Limiti del prototipo
 
-- L'anteprima mostra le prime 4 pagine (PDF con pdfium, JPEG e TIFF); PostScript e
-  HP-GL/2 restano senza anteprima.
+- L'anteprima mostra le prime 4 pagine (PDF con pdfium, JPEG, TIFF e PNG); PostScript
+  e HP-GL/2 restano senza anteprima.
 - Niente nesting, ridimensionamento o rotazione automatica: decide la stampante.
-- Le immagini sono disegnate supponendo 300 dpi.
+- Le immagini JPEG e TIFF sono misurate supponendo 300 dpi; per i PNG valgono quelli
+  dichiarati nel file.
 - Nessun controllo che il job sia stato effettivamente stampato: "inviato" vuol dire
   che la stampante ha ricevuto tutti i byte.
 
