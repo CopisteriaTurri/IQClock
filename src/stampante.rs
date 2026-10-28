@@ -71,6 +71,12 @@ pub fn invia(
     opz: &OpzioniJob,
     avanzamento: impl FnMut(f32),
 ) -> Result<()> {
+    // Il PNG si converte prima di connettersi, così la stampante non resta col
+    // socket aperto e senza dati per tutta la conversione.
+    if formato == Formato::Png {
+        let tiff = png::png_a_tiff(percorso)?;
+        return invia(host, porta, tiff.percorso(), Formato::Tiff, opz, avanzamento);
+    }
     let mut sock = connetti(host, porta)?;
     sock.set_write_timeout(Some(TIMEOUT_SCRITTURA))?;
     scrivi_job(&mut sock, percorso, formato, opz, avanzamento).context("invio interrotto")?;
@@ -86,7 +92,7 @@ mod test {
     use std::thread;
 
     #[test]
-    fn i_png_parteno_come_tiff() {
+    fn i_png_partono_come_tiff() {
         let p = std::env::temp_dir().join(format!("iqclock-png-{}.png", std::process::id()));
         image::save_buffer(&p, &[10, 20, 30, 40, 50, 60], 2, 1, image::ColorType::Rgb8).unwrap();
         let opz = OpzioniJob { nome: "logo".into(), ..Default::default() };

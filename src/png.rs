@@ -2,9 +2,10 @@
 //!
 //! La T2600 non legge i PNG sul canale raw (porta 9100): il file viene decodificato,
 //! appiattito sul bianco della carta e riscritto in TIFF RGB 8 bit senza perdita
-//! (LZW). I DPI dichiarati nel chunk `pHYs` finiscono nei tag di risoluzione del
-//! TIFF (`XResolution`/`YResolution`, `ResolutionUnit` = inch); se il PNG non li
-//! dichiara si usano i 300 dpi presunti come nel resto dell'app.
+//! (LZW con predittore orizzontale). I DPI dichiarati nel chunk `pHYs` finiscono
+//! nei tag di risoluzione del TIFF (`XResolution`/`YResolution`, `ResolutionUnit` =
+//! inch); se il PNG non li dichiara si usano i 300 dpi presunti come nel resto
+//! dell'app.
 //!
 //! Il TIFF viene scritto in un file temporaneo, cancellato quando il job è finito.
 
@@ -15,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use image::DynamicImage;
-use tiff::encoder::{Compression, Rational, TiffEncoder, colortype};
+use tiff::encoder::{Compression, Predictor, Rational, TiffEncoder, colortype};
 use tiff::tags::ResolutionUnit;
 
 use crate::file::DPI_IMMAGINI;
@@ -81,8 +82,11 @@ impl Drop for TiffTemporaneo {
 /// Converte il PNG in un TIFF RGB 8 bit su bianco, in un file temporaneo.
 pub fn png_a_tiff(percorso: &Path) -> Result<TiffTemporaneo> {
     static CONTATORE: AtomicU64 = AtomicU64::new(0);
-    let immagine = image::open(percorso)
-        .with_context(|| format!("lettura di {}", percorso.display()))?;
+    // Senza limiti: quelli di default di `image` (512 MiB) bocciano già un A0 a 300 dpi.
+    let mut lettore = image::ImageReader::open(percorso)?;
+    lettore.no_limits();
+    let immagine =
+        lettore.decode().with_context(|| format!("lettura di {}", percorso.display()))?;
     let (larghezza, altezza, rgb) = su_bianco(immagine);
     let (dpi_x, dpi_y) = dpi(percorso).unwrap_or((DPI_IMMAGINI, DPI_IMMAGINI));
 
@@ -93,7 +97,8 @@ pub fn png_a_tiff(percorso: &Path) -> Result<TiffTemporaneo> {
     ));
     let scrivi = || -> Result<()> {
         let mut tiff = TiffEncoder::new(BufWriter::new(File::create(&dest)?))?
-            .with_compression(Compression::Lzw);
+            .with_compression(Compression::Lzw)
+            .with_predictor(Predictor::Horizontal);
         let mut img = tiff.new_image::<colortype::RGB8>(larghezza, altezza)?;
         img.resolution_unit(ResolutionUnit::Inch);
         img.x_resolution(razionale(dpi_x));
@@ -110,10 +115,10 @@ pub fn png_a_tiff(percorso: &Path) -> Result<TiffTemporaneo> {
 
 /// RGB a 8 bit con l'eventuale trasparenza appiattita sul bianco della carta.
 ///
-/// `to_rgba8` riduce anche i PNG a 16 bit a 8 bit per canale, che è quanto
-/// serve alla stampa.
+/// `into_rgba8` riduce anche i PNG a 16 bit a 8 bit per canale, che è quanto
+/// serve alla stampa (e non copia l'immagine se è già RGBA a 8 bit).
 fn su_bianco(immagine: DynamicImage) -> (u32, u32, Vec<u8>) {
-    let rgba = immagine.to_rgba8();
+    let rgba = immagine.into_rgba8();
     let (larghezza, altezza) = rgba.dimensions();
     let mut rgb = Vec::with_capacity((larghezza * altezza * 3) as usize);
     for p in rgba.pixels() {
