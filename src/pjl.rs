@@ -7,6 +7,9 @@
 //! - MEDIASOURCE=ROLL1..ROLL6/AUTO: tabella PJL dei DesignJet recenti (XL 3600).
 //! - CUTTER=ON/OFF: visto in driver CUPS per DesignJet, **non documentato** nel
 //!   manuale: per questo è disattivato di default.
+//! - Allineamento sul rotolo (sinistra/centro/destra): nessuna variabile PJL
+//!   verificata sulla T2600, quindi `Allineamento` vive solo nella GUI e
+//!   nell'anteprima e `intestazione` non lo manda.
 
 use std::fmt::Write as _;
 
@@ -46,6 +49,41 @@ impl Formato {
             Formato::Jpeg => "JPEG",
             Formato::Png => "PNG",
             Formato::Hpgl2 => "HP-GL/2",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Allineamento {
+    /// Il contenuto sta a sinistra del rotolo.
+    #[default]
+    Sinistra,
+    Centrato,
+    Destra,
+}
+
+impl Allineamento {
+    pub const TUTTI: [Allineamento; 3] = [Allineamento::Sinistra, Allineamento::Centrato, Allineamento::Destra];
+
+    pub fn etichetta(self) -> &'static str {
+        match self {
+            Allineamento::Sinistra => "Sinistra",
+            Allineamento::Centrato => "Centro",
+            Allineamento::Destra => "Destra",
+        }
+    }
+
+    /// Ascissa del bordo sinistro di un contenuto largo `larghezza_contenuto`
+    /// dentro un rotolo che inizia a `bordo_sinistro` e vale `larghezza_rotolo`.
+    /// Se il contenuto è più largo del rotolo resta a sinistra.
+    /// (Quando si farà il nesting della issue #8, l'allineamento del blocco
+    /// userà questo stesso enum.)
+    pub fn x(self, bordo_sinistro: f32, larghezza_rotolo: f32, larghezza_contenuto: f32) -> f32 {
+        let scarto = (larghezza_rotolo - larghezza_contenuto).max(0.0);
+        match self {
+            Allineamento::Sinistra => bordo_sinistro,
+            Allineamento::Centrato => bordo_sinistro + scarto / 2.0,
+            Allineamento::Destra => bordo_sinistro + scarto,
         }
     }
 }
@@ -194,5 +232,22 @@ mod test {
     fn chiusura_termina_con_uel() {
         let c = chiusura(&OpzioniJob::default());
         assert!(c.starts_with(UEL) && c.ends_with(UEL));
+    }
+
+    #[test]
+    fn allineamento_default_sinistra() {
+        assert_eq!(Allineamento::default(), Allineamento::Sinistra);
+        assert_eq!(Allineamento::Sinistra.etichetta(), "Sinistra");
+    }
+
+    #[test]
+    fn allineamento_sposta_solo_se_ci_sta() {
+        // Rotolo da x=10 largo 100, contenuto largo 40.
+        assert_eq!(Allineamento::Sinistra.x(10.0, 100.0, 40.0), 10.0);
+        assert_eq!(Allineamento::Centrato.x(10.0, 100.0, 40.0), 40.0);
+        assert_eq!(Allineamento::Destra.x(10.0, 100.0, 40.0), 70.0);
+        // Contenuto più largo del rotolo: resta a sinistra.
+        assert_eq!(Allineamento::Centrato.x(10.0, 100.0, 120.0), 10.0);
+        assert_eq!(Allineamento::Destra.x(10.0, 100.0, 120.0), 10.0);
     }
 }

@@ -13,7 +13,7 @@ use eframe::egui::{
 use crate::anteprima::{Anteprime, PAGINE_MAX, Pagina};
 use crate::config::Config;
 use crate::file::{self, InfoFile};
-use crate::pjl::{self, OpzioniJob, Sorgente};
+use crate::pjl::{self, Allineamento, OpzioniJob, Sorgente};
 use crate::stampante;
 use crate::stato::{self, Cartuccia, StatoStampante};
 
@@ -65,6 +65,7 @@ pub struct App {
     anteprime: Anteprime,
     selezionato: Option<usize>,
     sorgente: Sorgente,
+    allineamento: Allineamento,
     scala_di_grigi: bool,
     taglierina: Option<bool>,
     extra_pjl: String,
@@ -96,6 +97,7 @@ impl App {
             anteprime,
             selezionato: None,
             sorgente: Sorgente::Stampante,
+            allineamento: Allineamento::default(),
             scala_di_grigi: false,
             taglierina: None,
             extra_pjl: String::new(),
@@ -323,6 +325,16 @@ impl App {
             .on_hover_text("Larghezza del rotolo, usata solo per l'anteprima");
 
         ui.add_space(6.0);
+        ui.label(RichText::new("ALLINEAMENTO SUL ROTOLO").small().strong());
+        ui.horizontal(|ui| {
+            for a in Allineamento::TUTTI {
+                ui.selectable_value(&mut self.allineamento, a, a.etichetta());
+            }
+        })
+        .response
+        .on_hover_text("Solo anteprima: nessuna opzione PJL verificata sulla T2600");
+
+        ui.add_space(6.0);
         ui.label(RichText::new("COLORE").small().strong());
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.scala_di_grigi, false, "Colore");
@@ -491,7 +503,8 @@ impl App {
         let mut y = rotolo.top();
         for (n, (l, a)) in misure.iter().enumerate() {
             let dim = Vec2::new(*l as f32, *a as f32) * scala * rid;
-            disegna_pagina(ui, Rect::from_min_size(Pos2::new(rotolo.left(), y), dim), d, n);
+            let x = self.allineamento.x(rotolo.left(), rotolo.width(), dim.x);
+            disegna_pagina(ui, Rect::from_min_size(Pos2::new(x, y), dim), d, n);
             y += dim.y + spazio_tra_pagine * rid;
         }
 
