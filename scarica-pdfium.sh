@@ -1,12 +1,19 @@
 #!/bin/sh
 # Scarica pdfium (bblanchon/pdfium-binaries) nella versione per cui è compilato
 # pdfium-render (feature pdfium_latest = 7881) in pdfium/linux-x64 e pdfium/win-x64.
+# Uso: ./scarica-pdfium.sh [piattaforma...]  (es. ./scarica-pdfium.sh linux-x64
+# per la CI Linux; senza argomenti scarica entrambe).
 set -eu
 VERSIONE=7881
 cd "$(dirname "$0")"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-for piattaforma in linux-x64 win-x64; do
+if [ "$#" -gt 0 ]; then
+    piattaforme="$*"
+else
+    piattaforme="linux-x64 win-x64"
+fi
+for piattaforma in $piattaforme; do
     curl -fsSL -o "$tmp/$piattaforma.tgz" \
         "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F$VERSIONE/pdfium-$piattaforma.tgz"
     mkdir -p "pdfium/$piattaforma"
