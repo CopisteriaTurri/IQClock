@@ -111,6 +111,73 @@ mod test {
     }
 
     #[test]
+    fn file_grande_arriva_integro() {
+        // Più del buffer interno da 256 KiB: verifica streaming a chunk.
+        let contenuto: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let p = std::env::temp_dir().join(format!("iqclock-grande-{}.pdf", std::process::id()));
+        std::fs::write(&p, &contenuto).unwrap();
+        let opz = OpzioniJob { nome: "grande".into(), ..Default::default() };
+        let mut passi = Vec::new();
+        let mut job = Vec::new();
+        scrivi_job(&mut job, &p, Formato::Pdf, &opz, |f| passi.push(f)).unwrap();
+        std::fs::remove_file(&p).unwrap();
+
+        let testa = pjl::intestazione(&opz, Formato::Pdf);
+        let coda = pjl::chiusura(&opz);
+        assert!(job.starts_with(&testa));
+        assert!(job.ends_with(&coda));
+        assert_eq!(&job[testa.len()..job.len() - coda.len()], &contenuto);
+        assert!(passi.len() > 2, "l'avanzamento deve scattare più volte");
+        assert!(passi.windows(2).all(|w| w[0] <= w[1]), "avanzamento monotono");
+        assert_eq!(passi.last(), Some(&1.0));
+    }
+
+    #[test]
+    fn connessione_chiusa_a_meta_da_errore_leggibile() {
+        // Finta stampante che legge solo l'intestazione e chiude di colpo
+        // (con dati non letti in coda: RST): l'invio deve fallire di sicuro.
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let porta = server.local_addr().unwrap().port();
+        thread::spawn(move || {
+            let (mut s, _) = server.accept().unwrap();
+            // Legge solo l'intestazione, poi chiude di colpo senza leggere il
+            // resto: chiudere con dati non letti in coda manda un RST.
+            let mut testa = [0u8; 512];
+            let _ = s.read_exact(&mut testa);
+            // `s` droppato qui.
+        });
+
+        let p = std::env::temp_dir().join(format!("iqclock-rst-{}.pdf", std::process::id()));
+        std::fs::write(&p, vec![0xABu8; 16 * 1024 * 1024]).unwrap();
+        let opz = OpzioniJob { nome: "rst".into(), ..Default::default() };
+        let err = invia("127.0.0.1", porta, &p, Formato::Pdf, &opz, |_| {}).unwrap_err();
+        std::fs::remove_file(&p).unwrap();
+        assert!(format!("{err:#}").contains("invio interrotto"), "{err:#}");
+    }
+
+    #[test]
+    fn porta_chiusa_da_errore_leggibile() {
+        // Porta libera ma senza nessuno in ascolto: rifiuto immediato.
+        let porta = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let p = std::env::temp_dir().join(format!("iqclock-rifiuto-{}.pdf", std::process::id()));
+        std::fs::write(&p, b"%PDF-1.4 finto").unwrap();
+        let opz = OpzioniJob::default();
+        let err = invia("127.0.0.1", porta, &p, Formato::Pdf, &opz, |_| {}).unwrap_err();
+        std::fs::remove_file(&p).unwrap();
+        assert!(format!("{err:#}").contains("stampante non raggiungibile"), "{err:#}");
+    }
+
+    #[test]
+    fn host_invalido_da_errore_leggibile() {
+        let p = std::env::temp_dir().join(format!("iqclock-host-{}.pdf", std::process::id()));
+        std::fs::write(&p, b"%PDF-1.4 finto").unwrap();
+        let opz = OpzioniJob::default();
+        let err = invia("!!host_invalido!!", 9100, &p, Formato::Pdf, &opz, |_| {}).unwrap_err();
+        std::fs::remove_file(&p).unwrap();
+        assert!(format!("{err:#}").contains("indirizzo non valido"), "{err:#}");
+    }
+
+    #[test]
     fn invio_a_finta_stampante() {
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let porta = server.local_addr().unwrap().port();

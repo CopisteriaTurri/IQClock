@@ -187,7 +187,11 @@ pub struct Client {
 
 impl Client {
     pub fn new(host: &str, comunita: &str) -> Result<Self> {
-        let indirizzo = (host, 161)
+        Self::new_con_porta(host, 161, comunita)
+    }
+
+    pub fn new_con_porta(host: &str, porta: u16, comunita: &str) -> Result<Self> {
+        let indirizzo = (host, porta)
             .to_socket_addrs()?
             .next()
             .with_context(|| format!("nessun indirizzo per {host}"))?;
