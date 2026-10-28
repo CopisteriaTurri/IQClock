@@ -8,6 +8,7 @@ mod file;
 mod gui;
 mod pjl;
 mod png;
+mod rotazione;
 mod snmp;
 mod stampante;
 mod stato;
@@ -18,10 +19,11 @@ use anyhow::{Context, Result, bail};
 
 use config::Config;
 use pjl::{OpzioniJob, Sorgente};
+use rotazione::Rotazione;
 
 const USO: &str = "\
 Senza argomenti (o con dei file) apre l'interfaccia. Da riga di comando:
-  iqclock stampa FILE... [--host IP] [--copie N] [--rotolo 1|2|auto] [--grigi] [--prn OUT]
+  iqclock stampa FILE... [--host IP] [--copie N] [--rotolo 1|2|auto] [--rotazione auto|si|no] [--grigi] [--prn OUT]
   iqclock stato [--host IP]
   iqclock snmp OID [--host IP]      (diagnostica: elenca le voci sotto OID)";
 
@@ -89,6 +91,10 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
         Some(a) => bail!("--rotolo vuole 1, 2 o auto (non {a})"),
     };
     let scala_di_grigi = prendi_flag(&mut args, "--grigi");
+    let rotazione = match prendi(&mut args, "--rotazione")?.as_deref() {
+        None => config.rotazione,
+        Some(s) => Rotazione::parse(s).ok_or_else(|| anyhow::anyhow!("--rotazione vuole auto, si o no (non {s})"))?,
+    };
     let prn = prendi(&mut args, "--prn")?.map(PathBuf::from);
     if args.is_empty() {
         bail!("nessun file da stampare\n{USO}");
@@ -104,6 +110,7 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
             copie,
             sorgente,
             scala_di_grigi,
+            rotazione,
             ..Default::default()
         };
         match &prn {

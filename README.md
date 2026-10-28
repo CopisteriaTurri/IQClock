@@ -15,14 +15,14 @@ dei rispettivi proprietari e qui compaiono solo per indicare la compatibilità. 
   Tenere `pdfium.dll` nella stessa cartella: senza, i PDF non hanno l'anteprima.
 - **Riga di comando** (su Windows l'output è visibile solo dalla build di debug):
   ```
-  iqclock stampa tavola.pdf --copie 2 --rotolo 1 --grigi
-  iqclock stampa tavola.pdf --prn prova.prn     # scrive il job su file senza stampare
+   iqclock stampa tavola.pdf --copie 2 --rotolo 1 --grigi --rotazione auto
+   iqclock stampa tavola.pdf --prn prova.prn     # scrive il job su file senza stampare
   iqclock stato                                  # stato, inchiostri, carta
   iqclock snmp 1.3.6.1.2.1.43                    # diagnostica SNMP
   ```
 
-Le impostazioni (IP, porta, larghezza rotolo) stanno in `%APPDATA%\iqclock\config.txt`.
-Di default: `192.168.10.72:9100`, rotolo 36".
+Le impostazioni (IP, porta, larghezza rotolo, rotazione) stanno in `%APPDATA%\iqclock\config.txt`.
+Di default: `192.168.10.72:9100`, rotolo 36", rotazione automatica.
 
 ## Cosa viene mandato alla stampante
 
@@ -31,6 +31,7 @@ Di default: `192.168.10.72:9100`, rotolo 36".
 @PJL SET COPIES=2
 @PJL SET MEDIASOURCE=ROLL1        (solo se scelto)
 @PJL SET RENDERMODE=COLOR|GRAYSCALE
+@PJL SET AUTOROTATE=ON|OFF          (ON di default: ruota di 90° se conviene)
 @PJL SET CUTTER=ON|OFF            (solo se scelto)
 @PJL ENTER LANGUAGE=PDF           (POSTSCRIPT, HPGL2; omesso per TIFF/JPEG/PNG)
 ...file...
@@ -42,6 +43,7 @@ Di default: `192.168.10.72:9100`, rotolo 36".
 |---|---|---|
 | UEL, JOB/EOJ, ENTER LANGUAGE, COPIES, RENDERMODE | HP PJL Technical Reference Manual (2003) | no |
 | MEDIASOURCE=ROLL1/ROLL2/AUTO | tabella PJL dei DesignJet XL 3600 | no |
+| AUTOROTATE=ON/OFF | tabella PJL dei DesignJet recenti (T830) | no |
 | CUTTER=ON/OFF | driver CUPS per DesignJet, non documentato da HP | no |
 | `@PJL INFO STATUS` | manuale PJL | **non supportato**: risponde `"?"` |
 
@@ -72,7 +74,9 @@ Il `prtMarkerSuppliesLevel` standard non è implementato dalla stampante.
 
 - L'anteprima mostra le prime 4 pagine (PDF con pdfium, JPEG, TIFF e PNG); PostScript
   e HP-GL/2 restano senza anteprima.
-- Niente nesting, ridimensionamento o rotazione automatica: decide la stampante.
+- Niente nesting o ridimensionamento: decide la stampante. La rotazione automatica
+  (`AUTOROTATE=ON`, disattivabile) chiede alla stampante di ruotare di 90° quando il
+  foglio ruotato entra nel rotolo e consuma meno carta; l'anteprima mostra la previsione.
 - Le immagini JPEG e TIFF sono misurate supponendo 300 dpi; per i PNG valgono quelli
   dichiarati nel file.
 - Nessun controllo che il job sia stato effettivamente stampato: "inviato" vuol dire

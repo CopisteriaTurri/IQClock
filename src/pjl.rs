@@ -4,11 +4,16 @@
 //! - HP "Printer Job Language Technical Reference Manual" (2003): UEL, JOB/EOJ,
 //!   ENTER LANGUAGE, COPIES, RENDERMODE. Righe terminate da CR LF.
 //!   (`INFO STATUS` sulla T2600 risponde solo `"?"`: lo stato si legge via SNMP.)
-//! - MEDIASOURCE=ROLL1..ROLL6/AUTO: tabella PJL dei DesignJet recenti (XL 3600).
+//! - MEDIASOURCE=ROLL1..ROLL6/AUTO e AUTOROTATE=ON/OFF: tabella PJL dei DesignJet
+//!   recenti (T830, XL 3600). Sulla T2600 la rotazione automatica esiste nel
+//!   pannello ("Gestione job > Autorotate"), ma il PJL va verificato con una
+//!   stampa di confronto da HP Click o dal driver (vedi README).
 //! - CUTTER=ON/OFF: visto in driver CUPS per DesignJet, **non documentato** nel
 //!   manuale: per questo è disattivato di default.
 
 use std::fmt::Write as _;
+
+use crate::rotazione::Rotazione;
 
 /// Universal Exit Language: deve aprire e chiudere ogni job PJL.
 pub const UEL: &[u8] = b"\x1b%-12345X";
@@ -92,6 +97,7 @@ pub struct OpzioniJob {
     pub copie: u32,
     pub sorgente: Sorgente,
     pub scala_di_grigi: bool,
+    pub rotazione: Rotazione,
     /// `None` = non mandare CUTTER (comando non documentato).
     pub taglierina: Option<bool>,
     /// Righe `@PJL ...` aggiuntive, una per riga, mandate così come sono.
@@ -105,6 +111,7 @@ impl Default for OpzioniJob {
             copie: 1,
             sorgente: Sorgente::Stampante,
             scala_di_grigi: false,
+            rotazione: Rotazione::Auto,
             taglierina: None,
             extra: String::new(),
         }
@@ -130,6 +137,7 @@ pub fn intestazione(opz: &OpzioniJob, formato: Formato) -> Vec<u8> {
     }
     let resa = if opz.scala_di_grigi { "GRAYSCALE" } else { "COLOR" };
     let _ = write!(s, "@PJL SET RENDERMODE={resa}\r\n");
+    let _ = write!(s, "@PJL SET AUTOROTATE={}\r\n", opz.rotazione.valore_pjl());
     if let Some(t) = opz.taglierina {
         let _ = write!(s, "@PJL SET CUTTER={}\r\n", if t { "ON" } else { "OFF" });
     }
@@ -166,6 +174,7 @@ mod test {
             "\x1b%-12345X@PJL JOB NAME=\"tavola A1\"\r\n\
              @PJL SET COPIES=1\r\n\
              @PJL SET RENDERMODE=COLOR\r\n\
+             @PJL SET AUTOROTATE=ON\r\n\
              @PJL ENTER LANGUAGE=PDF\r\n"
         );
     }
@@ -177,6 +186,7 @@ mod test {
             copie: 3,
             sorgente: Sorgente::Rotolo2,
             scala_di_grigi: true,
+            rotazione: Rotazione::No,
             taglierina: Some(false),
             extra: "@PJL SET MIRROR=OFF\nroba non pjl\n".into(),
         };
@@ -184,6 +194,7 @@ mod test {
         assert!(h.contains("@PJL SET COPIES=3\r\n"));
         assert!(h.contains("@PJL SET MEDIASOURCE=ROLL2\r\n"));
         assert!(h.contains("@PJL SET RENDERMODE=GRAYSCALE\r\n"));
+        assert!(h.contains("@PJL SET AUTOROTATE=OFF\r\n"));
         assert!(h.contains("@PJL SET CUTTER=OFF\r\n"));
         assert!(h.contains("@PJL SET MIRROR=OFF\r\n"));
         assert!(!h.contains("roba"));

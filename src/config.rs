@@ -3,17 +3,20 @@
 
 use std::path::PathBuf;
 
+use crate::rotazione::Rotazione;
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub host: String,
     pub porta: u16,
     pub larghezza_rotolo_mm: f64,
+    pub rotazione: Rotazione,
 }
 
 impl Default for Config {
     fn default() -> Self {
         // IP della T2600 nei log di HP Click.
-        Self { host: "192.168.10.72".into(), porta: 9100, larghezza_rotolo_mm: 914.0 }
+        Self { host: "192.168.10.72".into(), porta: 9100, larghezza_rotolo_mm: 914.0, rotazione: Rotazione::Auto }
     }
 }
 
@@ -37,6 +40,7 @@ impl Config {
                 "host" => c.host = v.trim().to_string(),
                 "porta" => c.porta = v.trim().parse().unwrap_or(c.porta),
                 "rotolo_mm" => c.larghezza_rotolo_mm = v.trim().parse().unwrap_or(c.larghezza_rotolo_mm),
+                "rotazione" => c.rotazione = Rotazione::parse(v).unwrap_or(c.rotazione),
                 _ => {}
             }
         }
@@ -50,7 +54,17 @@ impl Config {
         }
         let _ = std::fs::write(
             p,
-            format!("host={}\nporta={}\nrotolo_mm={}\n", self.host, self.porta, self.larghezza_rotolo_mm),
+            format!(
+                "host={}\nporta={}\nrotolo_mm={}\nrotazione={}\n",
+                self.host,
+                self.porta,
+                self.larghezza_rotolo_mm,
+                match self.rotazione {
+                    Rotazione::Auto => "auto",
+                    Rotazione::Si => "si",
+                    Rotazione::No => "no",
+                },
+            ),
         );
     }
 }

@@ -14,6 +14,7 @@ use crate::anteprima::{Anteprime, PAGINE_MAX, Pagina};
 use crate::config::Config;
 use crate::file::{self, InfoFile};
 use crate::pjl::{self, OpzioniJob, Sorgente};
+use crate::rotazione::{self, Rotazione, TOLLERANZA_MM};
 use crate::stampante;
 use crate::stato::{self, Cartuccia, StatoStampante};
 
@@ -69,6 +70,7 @@ pub struct App {
     taglierina: Option<bool>,
     extra_pjl: String,
     larghezza_rotolo: f64,
+    rotazione: Rotazione,
     stato_stampante: Option<Result<StatoStampante, String>>,
     verifica_in_corso: bool,
     avvisi: Vec<String>,
@@ -90,6 +92,7 @@ impl App {
         });
         let mut app = Self {
             larghezza_rotolo: config.larghezza_rotolo_mm,
+            rotazione: config.rotazione,
             config,
             documenti: Vec::new(),
             prossimo_id: 0,
@@ -155,6 +158,7 @@ impl App {
             copie: doc.copie,
             sorgente: self.sorgente,
             scala_di_grigi: self.scala_di_grigi,
+            rotazione: self.rotazione,
             taglierina: self.taglierina,
             extra: self.extra_pjl.clone(),
         }
@@ -320,7 +324,20 @@ impl App {
                 }
             })
             .response
-            .on_hover_text("Larghezza del rotolo, usata solo per l'anteprima");
+            .on_hover_text("Larghezza del rotolo: guida l'anteprima e la previsione di rotazione");
+        ui.add_space(6.0);
+        ui.label(RichText::new("ROTAZIONE").small().strong());
+        ui.horizontal(|ui| {
+            for m in Rotazione::TUTTE {
+                ui.selectable_value(&mut self.rotazione, m, m.etichetta());
+            }
+        })
+        .response
+        .on_hover_text(
+            "Automatica: la stampante ruota di 90° quando il foglio ruotato entra nel rotolo \
+             e consuma meno carta. Sì: chiede sempre la rotazione (vale solo se entra). \
+             @PJL SET AUTOROTATE, da verificare sulla T2600",
+        );
 
         ui.add_space(6.0);
         ui.label(RichText::new("COLORE").small().strong());
@@ -408,7 +425,14 @@ impl App {
                         let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 90.0), Sense::hover());
                         disegna_pagina(ui, rect, d, 0);
                         ui.label(RichText::new(&d.nome).small().strong());
-                        ui.label(RichText::new(format!("{} · {}", d.info.formato.etichetta(), file::dimensione_leggibile(d.info.byte))).small());
+                        let mut didascalia =
+                            format!("{} · {}", d.info.formato.etichetta(), file::dimensione_leggibile(d.info.byte));
+                        if d.mm_pagina(0)
+                            .is_some_and(|(l, a)| rotazione::ruotata(l, a, self.larghezza_rotolo, self.rotazione))
+                        {
+                            didascalia.push_str(" · 90°");
+                        }
+                        ui.label(RichText::new(didascalia).small());
                         match &d.stato {
                             StatoJob::Pronto => {}
                             StatoJob::InInvio(f) => {
@@ -473,10 +497,26 @@ impl App {
         let rotolo_mm = self.larghezza_rotolo;
         let scala = (area.width() - 2.0 * margine) / rotolo_mm as f32;
         let pagine_visibili = d.info.pagine.min(PAGINE_MAX);
-        let misure: Vec<(f64, f64)> = (0..pagine_visibili)
-            .map(|n| d.mm_pagina(n).unwrap_or((rotolo_mm * 0.7, rotolo_mm)))
+        // Dimensioni effettive di stampa: le pagine ruotate occupano il
+        // rotolo con larghezza e consumo di carta scambiati.
+        let tol = rotolo_mm + TOLLERANZA_MM;
+        let mut non_entra = false;
+        let mut ruotata_per_entrare = false;
+        let mut converrebbe = false;
+        let mut richiesta_negata = false;
+        let misure: Vec<(f64, f64, bool)> = (0..pagine_visibili)
+            .map(|n| {
+                let (l, a) = d.mm_pagina(n).unwrap_or((rotolo_mm * 0.7, rotolo_mm));
+                let ruotata = rotazione::ruotata(l, a, rotolo_mm, self.rotazione);
+                let (le, ae) = rotazione::dimensioni_stampa(l, a, rotolo_mm, self.rotazione);
+                non_entra |= le > tol;
+                ruotata_per_entrare |= ruotata && l > tol && a <= tol;
+                converrebbe |= !ruotata && rotazione::conviene_ruotare(l, a, rotolo_mm);
+                richiesta_negata |= self.rotazione == Rotazione::Si && !ruotata;
+                (le, ae, ruotata)
+            })
             .collect();
-        let lunghezza: f32 = misure.iter().map(|(_, a)| *a as f32 * scala + spazio_tra_pagine).sum();
+        let lunghezza: f32 = misure.iter().map(|(_, a, _)| *a as f32 * scala + spazio_tra_pagine).sum();
         let alto_disponibile = area.height() - 2.0 * margine - 24.0;
         // Se il rotolo è troppo lungo per la finestra riduco tutto in proporzione.
         let rid = (alto_disponibile / lunghezza).min(1.0);
@@ -489,9 +529,19 @@ impl App {
         p.rect_stroke(rotolo, 0.0, Stroke::new(1.0, Color32::from_gray(160)), StrokeKind::Outside);
 
         let mut y = rotolo.top();
-        for (n, (l, a)) in misure.iter().enumerate() {
+        for (n, (l, a, ruotata)) in misure.iter().enumerate() {
             let dim = Vec2::new(*l as f32, *a as f32) * scala * rid;
-            disegna_pagina(ui, Rect::from_min_size(Pos2::new(rotolo.left(), y), dim), d, n);
+            let r = Rect::from_min_size(Pos2::new(rotolo.left(), y), dim);
+            disegna_pagina(ui, r, d, n);
+            if *ruotata {
+                p.text(
+                    r.left_top() + Vec2::new(4.0, 1.0),
+                    Align2::LEFT_TOP,
+                    "90°",
+                    FontId::proportional(11.0),
+                    Color32::from_gray(90),
+                );
+            }
             y += dim.y + spazio_tra_pagine * rid;
         }
 
@@ -499,11 +549,20 @@ impl App {
         if d.info.pagine > pagine_visibili {
             nota.push_str(&format!(" (mostrate {pagine_visibili})"));
         }
-        let tolleranza = rotolo_mm + 0.5;
-        if misure.iter().any(|(l, a)| l.min(*a) > tolleranza) {
-            nota.push_str("  — attenzione: una pagina non entra nel rotolo, la stampante la ridimensionerà o taglierà");
-        } else if misure.iter().any(|(l, _)| *l > tolleranza) {
-            nota.push_str("  — attenzione: una pagina è più larga del rotolo, va ruotata (impostazione della stampante)");
+        if non_entra {
+            nota.push_str("  — attenzione: una pagina non entra nel rotolo nemmeno ruotata, la stampante la ridimensionerà o taglierà");
+        } else if misure.iter().any(|(_, _, r)| *r) {
+            if self.rotazione == Rotazione::Si {
+                nota.push_str("  — ruotata di 90° su richiesta (la stampante ruota solo se entra e risparmia carta)");
+            } else if ruotata_per_entrare {
+                nota.push_str("  — ruotata di 90° per entrare nel rotolo");
+            } else {
+                nota.push_str("  — ruotata di 90° per risparmiare carta");
+            }
+        } else if richiesta_negata {
+            nota.push_str("  — rotazione richiesta ma il foglio ruotato non entra nel rotolo: stampa senza ruotare");
+        } else if self.rotazione == Rotazione::No && converrebbe {
+            nota.push_str("  — con la rotazione automatica risparmieresti carta (o il foglio entrerebbe nel rotolo)");
         }
         ui.painter().text(
             Pos2::new(area.center().x, area.bottom() - 16.0),
@@ -620,6 +679,7 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.config.larghezza_rotolo_mm = self.larghezza_rotolo;
+        self.config.rotazione = self.rotazione;
         self.config.salva();
     }
 }
