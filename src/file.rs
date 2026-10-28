@@ -7,13 +7,15 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::pjl::Formato;
+use crate::png;
 
 #[derive(Clone, Debug)]
 pub struct InfoFile {
     pub formato: Formato,
     pub byte: u64,
     pub pagine: usize,
-    /// Dimensioni della prima pagina in mm (per le immagini: supponendo 300 dpi).
+    /// Dimensioni della prima pagina in mm (per le immagini: dai DPI del PNG,
+    /// altrimenti supponendo 300 dpi).
     pub mm: Option<(f64, f64)>,
     /// Es. "3 pagine · 594 × 841 mm (A1)" oppure "4961 × 7016 px".
     pub dettagli: String,
@@ -40,10 +42,12 @@ pub fn riconosci(percorso: &Path) -> Result<Formato> {
         Formato::Tiff
     } else if testa.starts_with(&[0xFF, 0xD8, 0xFF]) {
         Formato::Jpeg
+    } else if testa.starts_with(png::FIRMA) {
+        Formato::Png
     } else if matches!(est.as_str(), "plt" | "hpgl" | "hpg" | "hp2" | "prn") {
         Formato::Hpgl2
     } else {
-        bail!("formato non supportato (servono PDF, PS, TIFF, JPEG o HP-GL/2)")
+        bail!("formato non supportato (servono PDF, PNG, PS, TIFF, JPEG o HP-GL/2)")
     })
 }
 
@@ -64,10 +68,12 @@ pub fn analizza(percorso: &Path) -> Result<InfoFile> {
             }
             Err(e) => info.dettagli = format!("PDF illeggibile: {e}"),
         },
-        Formato::Tiff | Formato::Jpeg => {
+        Formato::Tiff | Formato::Jpeg | Formato::Png => {
             if let Ok(d) = imagesize::size(percorso) {
-                let px_mm = 25.4 / DPI_IMMAGINI;
-                info.mm = Some((d.width as f64 * px_mm, d.height as f64 * px_mm));
+                // I PNG dichiarano i DPI nel chunk pHYs; per gli altri si presume.
+                let dichiarati = if formato == Formato::Png { png::dpi(percorso) } else { None };
+                let (dpi_x, dpi_y) = dichiarati.unwrap_or((DPI_IMMAGINI, DPI_IMMAGINI));
+                info.mm = Some((d.width as f64 * 25.4 / dpi_x, d.height as f64 * 25.4 / dpi_y));
                 info.dettagli = format!("{} × {} px", d.width, d.height);
             }
         }
@@ -147,12 +153,13 @@ mod test {
     fn riconosce_dai_byte() {
         let dir = std::env::temp_dir().join(format!("iqclock-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let casi: [(&str, &[u8], Option<Formato>); 5] = [
+        let casi: [(&str, &[u8], Option<Formato>); 6] = [
             ("a.bin", b"%PDF-1.7\n", Some(Formato::Pdf)),
             ("b.bin", b"%!PS-Adobe-3.0", Some(Formato::PostScript)),
             ("c.bin", b"II*\0xxxx", Some(Formato::Tiff)),
             ("d.plt", b"IN;SP1;", Some(Formato::Hpgl2)),
-            ("e.txt", b"ciao", None),
+            ("e.png", png::FIRMA, Some(Formato::Png)),
+            ("f.txt", b"ciao", None),
         ];
         for (nome, dati, atteso) in casi {
             let p = dir.join(nome);
