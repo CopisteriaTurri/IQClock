@@ -46,9 +46,9 @@ Di default: `192.168.10.72:9100`, rotolo 36".
 | `@PJL INFO STATUS` | manuale PJL | **non supportato**: risponde `"?"` |
 
 I PNG vengono convertiti prima dell'invio: la stampante non li legge dal canale raw,
-quindi il file viene riscritto in TIFF RGB 8 bit (LZW), appiattendo la trasparenza sul
-bianco della carta e mantenendo i DPI del chunk `pHYs` (300 se assenti). Il TIFF vive
-in un file temporaneo, cancellato quando il job è finito.
+quindi il file viene riscritto in TIFF RGB 8 bit (LZW con predittore), appiattendo la
+trasparenza sul bianco della carta e mantenendo i DPI del chunk `pHYs` (300 se
+assenti). Il TIFF vive in un file temporaneo, cancellato quando il job è finito.
 
 Prima di fidarsi delle opzioni, conviene stampare una volta da HP Click o dal driver
 Windows "su file" e confrontare l'intestazione PJL che usano.
