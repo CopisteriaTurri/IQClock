@@ -45,7 +45,7 @@ impl Anteprime {
                         Ok(p) => pagine_pdf(p, &percorso).unwrap_or_default(),
                         Err(_) => Vec::new(),
                     },
-                    Formato::Jpeg | Formato::Tiff => {
+                    Formato::Jpeg | Formato::Tiff | Formato::Png => {
                         immagine(&percorso).map(|immagine| Pagina { immagine, mm: None }).into_iter().collect()
                     }
                     Formato::PostScript | Formato::Hpgl2 => Vec::new(),

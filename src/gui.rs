@@ -436,7 +436,7 @@ impl App {
             }
             if ui.button("+ Aggiungi file…").clicked()
                 && let Some(files) = rfd::FileDialog::new()
-                    .add_filter("Stampabili", &["pdf", "ps", "eps", "tif", "tiff", "jpg", "jpeg", "plt", "hpgl"])
+                    .add_filter("Stampabili", &["pdf", "ps", "eps", "tif", "tiff", "jpg", "jpeg", "png", "plt", "hpgl"])
                     .pick_files()
             {
                 for f in files {
@@ -459,7 +459,7 @@ impl App {
             ui.painter().text(
                 area.center(),
                 Align2::CENTER_CENTER,
-                "Trascina qui PDF, PostScript, TIFF, JPEG o HP-GL/2",
+                "Trascina qui PDF, PNG, PostScript, TIFF, JPEG o HP-GL/2",
                 FontId::proportional(20.0),
                 Color32::from_gray(110),
             );

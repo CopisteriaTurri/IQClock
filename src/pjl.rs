@@ -20,18 +20,21 @@ pub enum Formato {
     PostScript,
     Tiff,
     Jpeg,
+    /// Convertito in TIFF prima dell'invio (vedi `png.rs`).
+    Png,
     Hpgl2,
 }
 
 impl Formato {
     /// Nome per `@PJL ENTER LANGUAGE`. TIFF e JPEG non hanno un nome documentato:
     /// per quelli non si manda ENTER e la stampante riconosce il formato da sola.
+    /// I PNG viaggiano come TIFF, quindi nemmeno loro hanno ENTER LANGUAGE.
     pub fn linguaggio_pjl(self) -> Option<&'static str> {
         match self {
             Formato::Pdf => Some("PDF"),
             Formato::PostScript => Some("POSTSCRIPT"),
             Formato::Hpgl2 => Some("HPGL2"),
-            Formato::Tiff | Formato::Jpeg => None,
+            Formato::Tiff | Formato::Jpeg | Formato::Png => None,
         }
     }
 
@@ -41,6 +44,7 @@ impl Formato {
             Formato::PostScript => "PostScript",
             Formato::Tiff => "TIFF",
             Formato::Jpeg => "JPEG",
+            Formato::Png => "PNG",
             Formato::Hpgl2 => "HP-GL/2",
         }
     }
