@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
+use eframe::egui::load::SizedTexture;
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText,
     Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, Vec2,
@@ -14,6 +15,7 @@ use crate::anteprima::{Anteprime, PAGINE_MAX, Pagina};
 use crate::config::Config;
 use crate::file::{self, InfoFile};
 use crate::pjl::{self, OpzioniJob, Sorgente};
+use crate::rotazione::{self, TOLLERANZA_MM};
 use crate::stampante;
 use crate::stato::{self, Cartuccia, StatoStampante};
 
@@ -48,6 +50,12 @@ impl Documento {
     /// della prima pagina lette all'apertura del file.
     fn mm_pagina(&self, n: usize) -> Option<(f64, f64)> {
         self.pagine.get(n).and_then(|(_, mm)| *mm).or(self.info.mm)
+    }
+
+    /// true se la stampante ruoterà la pagina `n` di 90°. Senza misure non si
+    /// può prevedere: la pagina resta dritta.
+    fn ruotata(&self, n: usize, rotolo_mm: f64) -> bool {
+        self.mm_pagina(n).is_some_and(|(l, a)| rotazione::ruota(l, a, rotolo_mm))
     }
 }
 
@@ -320,7 +328,7 @@ impl App {
                 }
             })
             .response
-            .on_hover_text("Larghezza del rotolo, usata solo per l'anteprima");
+            .on_hover_text("Larghezza del rotolo, usata solo per l'anteprima (anche per prevedere la rotazione)");
 
         ui.add_space(6.0);
         ui.label(RichText::new("COLORE").small().strong());
@@ -406,9 +414,14 @@ impl App {
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 90.0), Sense::hover());
-                        disegna_pagina(ui, rect, d, 0);
+                        disegna_pagina(ui, rect, d, 0, false);
                         ui.label(RichText::new(&d.nome).small().strong());
-                        ui.label(RichText::new(format!("{} · {}", d.info.formato.etichetta(), file::dimensione_leggibile(d.info.byte))).small());
+                        let mut didascalia =
+                            format!("{} · {}", d.info.formato.etichetta(), file::dimensione_leggibile(d.info.byte));
+                        if (0..d.info.pagine.min(PAGINE_MAX)).any(|n| d.ruotata(n, self.larghezza_rotolo)) {
+                            didascalia.push_str(" · 90°");
+                        }
+                        ui.label(RichText::new(didascalia).small());
                         if let Some(r) = &d.info.risoluzione {
                             let testo = RichText::new(r.etichetta()).small();
                             ui.label(if r.presunta { testo.color(ARANCIO) } else { testo });
@@ -477,10 +490,16 @@ impl App {
         let rotolo_mm = self.larghezza_rotolo;
         let scala = (area.width() - 2.0 * margine) / rotolo_mm as f32;
         let pagine_visibili = d.info.pagine.min(PAGINE_MAX);
-        let misure: Vec<(f64, f64)> = (0..pagine_visibili)
-            .map(|n| d.mm_pagina(n).unwrap_or((rotolo_mm * 0.7, rotolo_mm)))
+        // Misure come escono dalla stampante: la T2600 ruota di 90° da sola
+        // quando conviene (vedi `rotazione.rs`), scambiando i due lati.
+        let misure: Vec<(f64, f64, bool)> = (0..pagine_visibili)
+            .map(|n| {
+                let (l, a) = d.mm_pagina(n).unwrap_or((rotolo_mm * 0.7, rotolo_mm));
+                let ruotata = d.ruotata(n, rotolo_mm);
+                if ruotata { (a, l, true) } else { (l, a, false) }
+            })
             .collect();
-        let lunghezza: f32 = misure.iter().map(|(_, a)| *a as f32 * scala + spazio_tra_pagine).sum();
+        let lunghezza: f32 = misure.iter().map(|(_, a, _)| *a as f32 * scala + spazio_tra_pagine).sum();
         let alto_disponibile = area.height() - 2.0 * margine - 24.0;
         // Se il rotolo è troppo lungo per la finestra riduco tutto in proporzione.
         let rid = (alto_disponibile / lunghezza).min(1.0);
@@ -493,9 +512,13 @@ impl App {
         p.rect_stroke(rotolo, 0.0, Stroke::new(1.0, Color32::from_gray(160)), StrokeKind::Outside);
 
         let mut y = rotolo.top();
-        for (n, (l, a)) in misure.iter().enumerate() {
+        for (n, (l, a, ruotata)) in misure.iter().enumerate() {
             let dim = Vec2::new(*l as f32, *a as f32) * scala * rid;
-            disegna_pagina(ui, Rect::from_min_size(Pos2::new(rotolo.left(), y), dim), d, n);
+            let r = Rect::from_min_size(Pos2::new(rotolo.left(), y), dim);
+            disegna_pagina(ui, r, d, n, *ruotata);
+            if *ruotata {
+                p.text(r.left_top() + Vec2::new(5.0, 4.0), Align2::LEFT_TOP, "90°", FontId::proportional(11.0), Color32::from_gray(90));
+            }
             y += dim.y + spazio_tra_pagine * rid;
         }
 
@@ -503,11 +526,13 @@ impl App {
         if d.info.pagine > pagine_visibili {
             nota.push_str(&format!(" (mostrate {pagine_visibili})"));
         }
-        let tolleranza = rotolo_mm + 0.5;
-        if misure.iter().any(|(l, a)| l.min(*a) > tolleranza) {
+        let tolleranza = rotolo_mm + TOLLERANZA_MM;
+        if misure.iter().any(|(l, a, _)| l.min(*a) > tolleranza) {
             nota.push_str("  — attenzione: una pagina non entra nel rotolo, la stampante la ridimensionerà o taglierà");
-        } else if misure.iter().any(|(l, _)| *l > tolleranza) {
-            nota.push_str("  — attenzione: una pagina è più larga del rotolo, va ruotata (impostazione della stampante)");
+        } else if misure.iter().any(|(_, a, r)| *r && *a > tolleranza) {
+            nota.push_str("  — la stampante ruoterà di 90° le pagine segnate, per farle entrare nel rotolo");
+        } else if misure.iter().any(|(_, _, r)| *r) {
+            nota.push_str("  — la stampante ruoterà di 90° le pagine segnate, per risparmiare carta");
         }
         ui.painter().text(
             Pos2::new(area.center().x, area.bottom() - 16.0),
@@ -545,12 +570,14 @@ fn barra_inchiostro(ui: &mut egui::Ui, c: &Cartuccia) {
 
 /// Pagina `n` del documento: l'immagine renderizzata se c'è, altrimenti una
 /// pagina bianca con il formato, centrata in `spazio` con le sue proporzioni.
-fn disegna_pagina(ui: &egui::Ui, spazio: Rect, d: &Documento, n: usize) {
+/// Con `ruotata` la pagina è girata di 90°, come la stampa la stampante.
+fn disegna_pagina(ui: &egui::Ui, spazio: Rect, d: &Documento, n: usize, ruotata: bool) {
     let tex = d.pagine.get(n).map(|(t, _)| t);
     let rapporto = match tex {
         Some(t) => t.aspect_ratio(),
         None => d.mm_pagina(n).map(|(l, a)| (l / a) as f32).unwrap_or(210.0 / 297.0),
     };
+    let rapporto = if ruotata { 1.0 / rapporto } else { rapporto };
     let dim = if spazio.width() / spazio.height() > rapporto {
         Vec2::new(spazio.height() * rapporto, spazio.height())
     } else {
@@ -561,7 +588,15 @@ fn disegna_pagina(ui: &egui::Ui, spazio: Rect, d: &Documento, n: usize) {
     p.rect_filled(r, 0.0, Color32::WHITE);
     p.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::from_gray(150)), StrokeKind::Inside);
     if let Some(tex) = tex {
-        p.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        if ruotata {
+            // L'immagine si disegna dritta in un rettangolo coi lati scambiati
+            // e si gira di 90° attorno al centro.
+            egui::Image::from_texture(SizedTexture::from_handle(tex))
+                .rotate(std::f32::consts::FRAC_PI_2, Vec2::splat(0.5))
+                .paint_at(ui, Rect::from_center_size(r.center(), Vec2::new(r.height(), r.width())));
+        } else {
+            p.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        }
     } else {
         p.text(r.center(), Align2::CENTER_CENTER, d.info.formato.etichetta(), FontId::proportional((r.height() / 6.0).clamp(9.0, 28.0)), Color32::from_gray(150));
     }
