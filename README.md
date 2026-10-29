@@ -81,6 +81,9 @@ Il `prtMarkerSuppliesLevel` standard non è implementato dalla stampante.
   risoluzione per TIFF, chunk `pHYs` per PNG); se mancano o non sono plausibili
   (0, 1, ecc.) si presumono 300 dpi. La lista indica i DPI usati e se sono presunti;
   l'anteprima e le misure in mm seguono quegli stessi DPI.
+  Provato sulla T2600 il 29/10/2026: rispetta i DPI del JPEG (solo JFIF o solo EXIF,
+  a 72 dpi), del TIFF e del PNG (150 dpi, `pHYs` portato nel TIFF convertito) e, se
+  JFIF ed EXIF non coincidono, usa l'EXIF come l'anteprima.
 - Nessun controllo che il job sia stato effettivamente stampato: "inviato" vuol dire
   che la stampante ha ricevuto tutti i byte.
 
