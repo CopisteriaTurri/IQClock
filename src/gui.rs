@@ -409,6 +409,10 @@ impl App {
                         disegna_pagina(ui, rect, d, 0);
                         ui.label(RichText::new(&d.nome).small().strong());
                         ui.label(RichText::new(format!("{} · {}", d.info.formato.etichetta(), file::dimensione_leggibile(d.info.byte))).small());
+                        if let Some(r) = &d.info.risoluzione {
+                            let testo = RichText::new(r.etichetta()).small();
+                            ui.label(if r.presunta { testo.color(ARANCIO) } else { testo });
+                        }
                         match &d.stato {
                             StatoJob::Pronto => {}
                             StatoJob::InInvio(f) => {

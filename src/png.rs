@@ -19,7 +19,7 @@ use image::DynamicImage;
 use tiff::encoder::{Compression, Predictor, Rational, TiffEncoder, colortype};
 use tiff::tags::ResolutionUnit;
 
-use crate::file::DPI_IMMAGINI;
+use crate::file::{DPI_IMMAGINI, dpi_plausibili};
 
 /// Firma di un file PNG (8 byte).
 pub const FIRMA: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
@@ -45,11 +45,11 @@ pub fn dpi(percorso: &Path) -> Option<(f64, f64)> {
                 f.read_exact(&mut dati).ok()?;
                 let x = u32::from_be_bytes(dati[0..4].try_into().ok()?);
                 let y = u32::from_be_bytes(dati[4..8].try_into().ok()?);
-                if dati[8] != 1 || x == 0 || y == 0 {
+                if dati[8] != 1 {
                     return None;
                 }
                 let px_mm = 25.4 / 1000.0;
-                return Some((x as f64 * px_mm, y as f64 * px_mm));
+                return dpi_plausibili(x as f64 * px_mm, y as f64 * px_mm);
             }
             // Il pHYs deve venire prima dei dati immagine: se non l'abbiamo
             // ancora visto, non c'è.
