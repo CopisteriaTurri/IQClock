@@ -9,6 +9,8 @@ Progetto indipendente, non affiliato né approvato da HP. "HP" e "DesignJet" son
 dei rispettivi proprietari e qui compaiono solo per indicare la compatibilità. Il software
 è fornito senza alcuna garanzia.
 
+![IQClock con una tavola A1 in anteprima e lo stato della stampante](docs/screenshot.png)
+
 ## Uso
 
 - **Interfaccia**: `iqclock.exe` (oppure trascina i file sull'eseguibile).
