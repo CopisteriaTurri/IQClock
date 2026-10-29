@@ -239,22 +239,135 @@ impl Client {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::net::SocketAddr;
+
+    // --- BER scritto a mano: i test decodificano byte indipendenti dal
+    // codificatore sotto test. ---
+
+    fn ber(tag: u8, contenuto: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        let n = contenuto.len();
+        if n < 0x80 {
+            out.push(n as u8);
+        } else {
+            let byte: Vec<u8> = n.to_be_bytes().into_iter().skip_while(|&b| b == 0).collect();
+            out.push(0x80 | byte.len() as u8);
+            out.extend(byte);
+        }
+        out.extend_from_slice(contenuto);
+        out
+    }
+
+    fn ber_intero(v: i64) -> Vec<u8> {
+        let b = v.to_be_bytes();
+        let mut i = 0;
+        while i < 7 && ((b[i] == 0 && b[i + 1] & 0x80 == 0) || (b[i] == 0xFF && b[i + 1] & 0x80 != 0)) {
+            i += 1;
+        }
+        ber(0x02, &b[i..])
+    }
+
+    fn oid_contenuto(o: &[u32]) -> Vec<u8> {
+        let mut c = vec![(o[0] * 40 + o[1]) as u8];
+        for &arco in &o[2..] {
+            let mut gruppi = vec![(arco & 0x7F) as u8];
+            let mut v = arco >> 7;
+            while v > 0 {
+                gruppi.push((v & 0x7F) as u8 | 0x80);
+                v >>= 7;
+            }
+            c.extend(gruppi.into_iter().rev());
+        }
+        c
+    }
+
+    fn ber_oid(o: &[u32]) -> Vec<u8> {
+        ber(0x06, &oid_contenuto(o))
+    }
+
+    /// GetResponse SNMPv1 completa, pronto da mandare sulla socket.
+    fn risposta(id: i32, errore: i32, varbind: &[(Vec<u32>, Vec<u8>)]) -> Vec<u8> {
+        let lista: Vec<u8> = varbind
+            .iter()
+            .map(|(o, v)| ber(0x30, &[ber_oid(o), v.clone()].concat()))
+            .collect::<Vec<Vec<u8>>>()
+            .concat();
+        let pdu = ber(
+            0xA2,
+            &[ber_intero(id.into()), ber_intero(errore.into()), ber_intero(0), ber(0x30, &lista)]
+                .concat(),
+        );
+        ber(0x30, &[ber_intero(0), ber(0x04, b"public"), pdu].concat())
+    }
+
+    fn id_richiesta(pacchetto: &[u8]) -> i32 {
+        let mut msg = Lettore(Lettore(pacchetto).atteso(0x30).unwrap());
+        msg.atteso(0x02).unwrap();
+        msg.atteso(0x04).unwrap();
+        let mut pdu = Lettore(msg.leggi().unwrap().1);
+        decodifica_intero(pdu.atteso(0x02).unwrap()) as i32
+    }
+
+    fn client_verso(indirizzo: SocketAddr) -> Client {
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sock.connect(indirizzo).unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        Client { sock, comunita: "public".into(), prossimo_id: 0 }
+    }
+
+    // --- codifica ---
 
     #[test]
     fn oid_andata_e_ritorno() {
         let o = oid("1.3.6.1.2.1.43.11.1.1.9.1.300");
         let c = codifica_oid(&o);
         assert_eq!(decodifica_oid(&c[2..]), o);
+        // Il punto iniziale è ammesso.
+        assert_eq!(oid(".1.3.6.1.2.1.1.1.0"), oid("1.3.6.1.2.1.1.1.0"));
+    }
+
+    #[test]
+    fn oid_con_archi_multibyte() {
+        assert_eq!(
+            codifica_oid(&oid("1.3.6.1.2.1.1.1.0"))[2..].to_vec(),
+            vec![0x2B, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01, 0x00]
+        );
+        // 128 = 0x81 0x00, 300 = 0x82 0x2C, 16384 = 0x81 0x80 0x00.
+        for (arco, atteso) in [
+            (128u32, vec![0x81u8, 0x00]),
+            (300, vec![0x82, 0x2C]),
+            (16384, vec![0x81, 0x80, 0x00]),
+        ] {
+            let c = codifica_oid(&oid("1.3.6.1.4.1.11.2.3.9.4.2.1.4.1.5.4.1").into_iter().chain([arco]).collect::<Vec<_>>());
+            assert_eq!(c[c.len() - atteso.len()..].to_vec(), atteso, "{arco}");
+        }
+        assert_eq!(decodifica_oid(&[]), Vec::<u32>::new());
     }
 
     #[test]
     fn interi_con_segno() {
-        for v in [0, 1, 127, 128, 255, 256, -1, -2, -129, 1 << 40] {
+        for v in [0, 1, 127, 128, 255, 256, 65535, -1, -2, -129, -32768, 1 << 40, i64::MAX, i64::MIN] {
             let c = intero(v);
             assert_eq!(decodifica_intero(&c[2..]), v, "{v}");
         }
         assert_eq!(intero(128), vec![0x02, 0x02, 0x00, 0x80]);
         assert_eq!(intero(-2), vec![0x02, 0x01, 0xFE]);
+    }
+
+    #[test]
+    fn lunghezze_ber_corte_e_lunghe() {
+        for (n, prefisso) in [
+            (0, vec![0x04, 0x00]),
+            (1, vec![0x04, 0x01]),
+            (127, vec![0x04, 0x7F]),
+            (128, vec![0x04, 0x81, 0x80]),
+            (300, vec![0x04, 0x82, 0x01, 0x2C]),
+            (70_000, vec![0x04, 0x83, 0x01, 0x11, 0x70]),
+        ] {
+            let c = tlv(0x04, &vec![0xAA; n]);
+            assert_eq!(c[..prefisso.len()].to_vec(), prefisso, "{n}");
+            assert_eq!(c.len(), prefisso.len() + n, "{n}");
+        }
     }
 
     #[test]
@@ -269,22 +382,216 @@ mod test {
     }
 
     #[test]
-    fn decodifica_get_response() {
-        let mut r = richiesta("public", 7, false, &[oid("1.3.6.1.2.1.25.3.5.1.1.1")]);
-        // La trasformo in una GetResponse con valore INTEGER 3 (idle).
-        let pos = r.iter().position(|&b| b == 0xA0).unwrap();
-        r[pos] = 0xA2;
-        let n = r.len();
-        r[n - 2..].copy_from_slice(&[0x02, 0x01]);
-        r.push(0x03);
-        // Aggiorna le lunghezze (tutte in forma corta).
-        for (i, delta) in [(1usize, 1u8), (pos + 1, 1)] {
-            r[i] += delta;
+    fn richiesta_getnext() {
+        // Stessa richiesta GET ma con PDU GetNextRequest (0xA1).
+        let mut atteso = richiesta("public", 1, false, &[oid("1.3.6.1.2.1.1.1.0")]);
+        atteso[13] = 0xA1;
+        assert_eq!(richiesta("public", 1, true, &[oid("1.3.6.1.2.1.1.1.0")]), atteso);
+    }
+
+    #[test]
+    fn richiesta_con_comunita_lunga() {
+        let r = richiesta(&"c".repeat(200), 1, false, &[oid("1.3.6.1.2.1.1.1.0")]);
+        // Lunghezza in forma lunga: 0x81 0xE9, comunità 0x81 0xC8.
+        assert_eq!(r[..9].to_vec(), vec![0x30, 0x81, 0xE9, 0x02, 0x01, 0x00, 0x04, 0x81, 0xC8]);
+        assert_eq!(r.len(), 236);
+    }
+
+    // --- decodifica ---
+
+    #[test]
+    fn decodifica_get_response_hr_printer_status() {
+        // Scritta a mano (non è una cattura dalla T2600): GetResponse per
+        // hrPrinterStatus con request-id 7, nessun errore, INTEGER 3 (idle).
+        let pacchetto = [
+            0x30, 0x2A, 0x02, 0x01, 0x00, 0x04, 0x06, b'p', b'u', b'b', b'l', b'i', b'c', 0xA2, 0x1D,
+            0x02, 0x01, 0x07, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x30, 0x12, 0x30, 0x10, 0x06, 0x0B,
+            0x2B, 0x06, 0x01, 0x02, 0x01, 0x19, 0x03, 0x05, 0x01, 0x01, 0x01, 0x02, 0x01, 0x03,
+        ];
+        assert_eq!(
+            decodifica_risposta(&pacchetto, 7).unwrap(),
+            vec![(oid("1.3.6.1.2.1.25.3.5.1.1.1"), Valore::Intero(3))]
+        );
+    }
+
+    #[test]
+    fn decodifica_tutti_i_tipi_di_valore() {
+        let r = risposta(
+            7,
+            0,
+            &[
+                (oid("1.3.6.1.2.1.1.1.0"), ber(0x04, b"HP DesignJet T2600\0")),
+                (oid("1.3.6.1.2.1.25.3.5.1.1.1"), ber_intero(-3)),
+                (oid("1.3.6.1.2.1.1.2.0"), ber(0x06, &oid_contenuto(&oid("1.3.6.1.4.1.311")))),
+                (oid("1.3.6.1.2.1.1.3.0"), ber(0x05, &[])),
+                (oid("1.3.6.1.2.1.4.20.1.1"), ber(0x40, &[192, 168, 10, 72])),
+                (oid("1.3.6.1.2.1.43.10.2.1.4.1.1"), ber(0x41, &[0x00, 0x00, 0x01, 0x2C])),
+                (oid("1.3.6.1.2.1.43.11.1.1.9.1.1"), ber(0x42, &[0x00, 0x50])),
+                (oid("1.3.6.1.2.1.1.3.0"), ber(0x43, &[0x00, 0x01])),
+            ],
+        );
+        assert_eq!(
+            decodifica_risposta(&r, 7).unwrap(),
+            vec![
+                (oid("1.3.6.1.2.1.1.1.0"), Valore::Testo(b"HP DesignJet T2600\0".to_vec())),
+                (oid("1.3.6.1.2.1.25.3.5.1.1.1"), Valore::Intero(-3)),
+                (oid("1.3.6.1.2.1.1.2.0"), Valore::Oid(oid("1.3.6.1.4.1.311"))),
+                (oid("1.3.6.1.2.1.1.3.0"), Valore::Nullo),
+                (oid("1.3.6.1.2.1.4.20.1.1"), Valore::Altro(0x40, vec![192, 168, 10, 72])),
+                (oid("1.3.6.1.2.1.43.10.2.1.4.1.1"), Valore::Intero(300)),
+                (oid("1.3.6.1.2.1.43.11.1.1.9.1.1"), Valore::Intero(80)),
+                (oid("1.3.6.1.2.1.1.3.0"), Valore::Intero(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn testo_toglie_nul_e_spazi_finali() {
+        let v = Valore::Testo(b"HP 730 130ML ( P2V63A ) \0".to_vec());
+        assert_eq!(v.testo().unwrap(), "HP 730 130ML ( P2V63A )");
+        assert_eq!(Valore::Intero(1).testo(), None);
+        assert_eq!(Valore::Intero(1).intero(), Some(1));
+        assert_eq!(Valore::Nullo.intero(), None);
+    }
+
+    #[test]
+    fn decodifica_una_risposta_con_lunghezza_lunga() {
+        let nome = vec![b'A'; 300];
+        let r = risposta(9, 0, &[(oid("1.3.6.1.2.1.43.11.1.1.6.1.1"), ber(0x04, &nome))]);
+        let voci = decodifica_risposta(&r, 9).unwrap();
+        assert_eq!(voci.len(), 1);
+        assert_eq!(voci[0].1, Valore::Testo(nome));
+    }
+
+    #[test]
+    fn rifiuta_risposte_di_altre_richieste_o_con_errori() {
+        let equivalgono = |r: Vec<u8>, id| decodifica_risposta(&r, id).unwrap_err().to_string();
+
+        let err = equivalgono(risposta(8, 0, &[]), 7);
+        assert!(err.contains("altra richiesta"), "{err}");
+
+        // noSuchName (2) in v1 = fine tabella, non un errore.
+        assert_eq!(decodifica_risposta(&risposta(7, 2, &[]), 7).unwrap(), Vec::new());
+
+        let err = equivalgono(risposta(7, 5, &[]), 7);
+        assert!(err.contains("errore SNMP 5"), "{err}");
+    }
+
+    #[test]
+    fn rifiuta_pacchetti_troncati_o_malformati() {
+        for (dati, id) in [
+            (vec![], 1i32),
+            (vec![0x30], 1),
+            (vec![0x30, 0x05, 0x02, 0x01], 1),
+            (vec![0x31, 0x00], 1),
+            (vec![0x30, 0x85, 0x00, 0x00, 0x00, 0x00, 0x00], 1),
+            (vec![0x30, 0x03, 0x02, 0x01, 0x00], 1),
+        ] {
+            let r = std::panic::catch_unwind(|| decodifica_risposta(&dati, id));
+            assert!(r.is_ok(), "panic su {dati:?}");
+            assert!(r.unwrap().is_err(), "accettato {dati:?}");
         }
-        let vb_seq = r.iter().rposition(|&b| b == 0x30).unwrap();
-        r[vb_seq + 1] += 1;
-        r[vb_seq - 1] += 1;
-        let v = decodifica_risposta(&r, 7).unwrap();
-        assert_eq!(v, vec![(oid("1.3.6.1.2.1.25.3.5.1.1.1"), Valore::Intero(3))]);
+        let err = decodifica_risposta(&[0x30, 0x85, 0, 0, 0, 0, 0], 1).unwrap_err().to_string();
+        assert!(err.contains("lunghezza BER"), "{err}");
+        let err = decodifica_risposta(&[0x30, 0x05, 0x02], 1).unwrap_err().to_string();
+        assert!(err.contains("troncata"), "{err}");
+    }
+
+    // --- trasporto: finto agente SNMP su UDP ---
+
+    #[test]
+    fn get_scarta_le_risposte_di_altre_richieste() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let indirizzo = server.local_addr().unwrap();
+        let stato = oid("1.3.6.1.2.1.25.3.5.1.1.1");
+        let varbind = (stato.clone(), ber_intero(3));
+        let atteso = (stato.clone(), Valore::Intero(3));
+        let per_l_agente = varbind;
+        let agente = std::thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            let (n, peer) = server.recv_from(&mut buf).unwrap();
+            let id = id_richiesta(&buf[..n]);
+            // Prima la risposta (in ritardo) di un'altra richiesta, poi quella giusta.
+            server
+                .send_to(&risposta(id + 1, 0, std::slice::from_ref(&per_l_agente)), peer)
+                .unwrap();
+            server.send_to(&risposta(id, 0, std::slice::from_ref(&per_l_agente)), peer).unwrap();
+        });
+
+        let mut client = client_verso(indirizzo);
+        assert_eq!(client.get(std::slice::from_ref(&stato)).unwrap(), vec![atteso]);
+        agente.join().unwrap();
+    }
+
+    #[test]
+    fn walk_si_ferma_a_fine_tabella() {
+        let base = oid("1.3.6.1.2.1.43.11.1.1.9.1");
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let indirizzo = server.local_addr().unwrap();
+        let base_agente = base.clone();
+        let agente = std::thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            for i in 1..=2u32 {
+                let (n, peer) = server.recv_from(&mut buf).unwrap();
+                let id = id_richiesta(&buf[..n]);
+                let mut o = base_agente.clone();
+                o.push(i);
+                let r = risposta(id, 0, &[(o, ber_intero(10 + i as i64))]);
+                server.send_to(&r, peer).unwrap();
+            }
+            // noSuchName: in SNMPv1 è la fine della tabella.
+            let (n, peer) = server.recv_from(&mut buf).unwrap();
+            let id = id_richiesta(&buf[..n]);
+            server.send_to(&risposta(id, 2, &[]), peer).unwrap();
+        });
+
+        let mut client = client_verso(indirizzo);
+        let voci = client.walk(&base).unwrap();
+        assert_eq!(voci.len(), 2);
+        assert_eq!(voci[0].1, Valore::Intero(11));
+        assert_eq!(voci[1].1, Valore::Intero(12));
+        let mut atteso = base.clone();
+        atteso.push(2);
+        assert_eq!(voci[1].0, atteso);
+        agente.join().unwrap();
+    }
+
+    #[test]
+    fn walk_si_ferma_su_end_of_mib_view_e_no_such_object() {
+        for tag in [0x80u8, 0x82] {
+            let base = oid("1.3.6.1.2.1.43.11.1.1.9.1");
+            let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let indirizzo = server.local_addr().unwrap();
+            let base_agente = base.clone();
+            let agente = std::thread::spawn(move || {
+                let mut buf = [0u8; 2048];
+                let (n, peer) = server.recv_from(&mut buf).unwrap();
+                let id = id_richiesta(&buf[..n]);
+                // Eccezione SNMPv2 sullo stesso OID richiesto.
+                server.send_to(&risposta(id, 0, &[(base_agente, ber(tag, &[]))]), peer).unwrap();
+            });
+
+            let mut client = client_verso(indirizzo);
+            assert!(client.walk(&base).unwrap().is_empty(), "tag {tag:#04x}");
+            agente.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn walk_si_ferma_fuori_dal_sottoalbero() {
+        let base = oid("1.3.6.1.2.1.43.11.1.1.9.1");
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let indirizzo = server.local_addr().unwrap();
+        let agente = std::thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            let (n, peer) = server.recv_from(&mut buf).unwrap();
+            let id = id_richiesta(&buf[..n]);
+            let altro = oid("1.3.6.1.2.1.1.1.0");
+            server.send_to(&risposta(id, 0, &[(altro, ber(0x04, b"x"))]), peer).unwrap();
+        });
+
+        let mut client = client_verso(indirizzo);
+        assert!(client.walk(&base).unwrap().is_empty());
+        agente.join().unwrap();
     }
 }
