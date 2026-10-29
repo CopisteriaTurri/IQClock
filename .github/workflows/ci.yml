@@ -23,6 +23,11 @@ jobs:
       - name: Dipendenze di sistema (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libgl1-mesa-dev
+      # Per i test dell'anteprima (non è in git). Niente cache: le run sui tag non
+      # possono riusare quella di altri ref, e lo scaricamento dura pochi secondi.
+      - name: Scarica pdfium
+        shell: bash
+        run: bash scarica-pdfium.sh ${{ runner.os == 'Windows' && 'win-x64' || 'linux-x64' }}
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - run: cargo build --release
