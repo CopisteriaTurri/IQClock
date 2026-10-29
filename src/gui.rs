@@ -7,8 +7,8 @@ use std::thread;
 
 use eframe::egui::load::SizedTexture;
 use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText,
-    Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, Vec2,
+    self, Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Pos2, Rect, RichText,
+    Sense, Stroke, StrokeKind, TextStyle, TextureHandle, TextureOptions, Vec2,
 };
 
 use crate::anteprima::{Anteprime, PAGINE_MAX, Pagina};
@@ -21,6 +21,45 @@ use crate::stato::{self, Cartuccia, StatoStampante};
 
 const BLU_HP: Color32 = Color32::from_rgb(0x00, 0x7D, 0xBA);
 const ARANCIO: Color32 = Color32::from_rgb(0xC0, 0x60, 0x00);
+/// Stili di testo propri dell'interfaccia, oltre a quelli standard di egui.
+const SEZIONE: &str = "Sezione";
+const AZIONE: &str = "Azione";
+const RICHIAMO: &str = "Richiamo";
+const RILASCIO: &str = "Rilascio";
+
+/// Tutte le dimensioni del testo, in un posto solo: in giro per il codice si
+/// usano solo gli stili (`TextStyle`), mai valori fissi.
+fn configura_stile(ctx: &egui::Context) {
+    use FontFamily::{Monospace, Proportional};
+    ctx.all_styles_mut(|s| {
+        s.text_styles = [
+            (TextStyle::Small, FontId::new(11.5, Proportional)),
+            (TextStyle::Body, FontId::new(14.0, Proportional)),
+            (TextStyle::Button, FontId::new(14.0, Proportional)),
+            (TextStyle::Heading, FontId::new(20.0, Proportional)),
+            (TextStyle::Monospace, FontId::new(13.0, Monospace)),
+            // Intestazioni di sezione (STAMPANTE, CARTA, …).
+            (TextStyle::Name(SEZIONE.into()), FontId::new(12.0, Proportional)),
+            // Pulsante Stampa.
+            (TextStyle::Name(AZIONE.into()), FontId::new(17.0, Proportional)),
+            // Invito ad aggiungere file nell'anteprima vuota.
+            (TextStyle::Name(RICHIAMO.into()), FontId::new(20.0, Proportional)),
+            // Sovrimpressione mentre si trascinano file.
+            (TextStyle::Name(RILASCIO.into()), FontId::new(28.0, Proportional)),
+        ]
+        .into();
+    });
+}
+
+fn stile(nome: &str) -> TextStyle {
+    TextStyle::Name(nome.into())
+}
+
+/// Intestazione di sezione nel pannello delle impostazioni.
+fn sezione(ui: &mut egui::Ui, testo: &str) {
+    ui.label(RichText::new(testo).text_style(stile(SEZIONE)).strong());
+}
+
 const LARGHEZZE_ROTOLO: [(&str, f64); 3] = [("24\" (610 mm)", 610.0), ("36\" (914 mm)", 914.0), ("44\" (1118 mm)", 1118.0)];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -90,6 +129,7 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, config: Config, iniziali: Vec<PathBuf>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
+        configura_stile(&cc.egui_ctx);
         let (tx, rx) = channel();
         let (tx_pagine, ctx_pagine) = (tx.clone(), cc.egui_ctx.clone());
         let (anteprime, errore_pdfium) = Anteprime::avvia(move |id, pagine| {
@@ -263,7 +303,7 @@ impl App {
         ui.heading("Impostazioni di stampa");
         ui.add_space(8.0);
 
-        ui.label(RichText::new("STAMPANTE").small().strong());
+        sezione(ui, "STAMPANTE");
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.config.host).desired_width(130.0));
             ui.label(":");
@@ -304,7 +344,7 @@ impl App {
         }
 
         ui.separator();
-        ui.label(RichText::new("CARTA").small().strong());
+        sezione(ui, "CARTA");
         egui::ComboBox::from_id_salt("sorgente")
             .selected_text(self.sorgente.etichetta())
             .width(200.0)
@@ -331,14 +371,14 @@ impl App {
             .on_hover_text("Larghezza del rotolo, usata solo per l'anteprima (anche per prevedere la rotazione)");
 
         ui.add_space(6.0);
-        ui.label(RichText::new("COLORE").small().strong());
+        sezione(ui, "COLORE");
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.scala_di_grigi, false, "Colore");
             ui.selectable_value(&mut self.scala_di_grigi, true, "Scala di grigi");
         });
 
         ui.add_space(6.0);
-        ui.label(RichText::new("TAGLIERINA").small().strong());
+        sezione(ui, "TAGLIERINA");
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.taglierina, None, "Stampante");
             ui.selectable_value(&mut self.taglierina, Some(true), "Sì");
@@ -349,7 +389,7 @@ impl App {
 
         if let Some(i) = self.selezionato {
             ui.add_space(6.0);
-            ui.label(RichText::new("COPIE").small().strong());
+            sezione(ui, "COPIE");
             let d = &mut self.documenti[i];
             ui.horizontal(|ui| {
                 if ui.button("−").clicked() && d.copie > 1 {
@@ -387,7 +427,7 @@ impl App {
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.add_space(10.0);
             let pronti = self.documenti.iter().filter(|d| !matches!(d.stato, StatoJob::InInvio(_) | StatoJob::Inviato)).count();
-            let pulsante = egui::Button::new(RichText::new("Stampa").color(Color32::WHITE).size(16.0))
+            let pulsante = egui::Button::new(RichText::new("Stampa").color(Color32::WHITE).text_style(stile(AZIONE)))
                 .fill(BLU_HP)
                 .corner_radius(CornerRadius::same(16))
                 .min_size(Vec2::new(ui.available_width(), 36.0));
@@ -477,7 +517,7 @@ impl App {
                 area.center(),
                 Align2::CENTER_CENTER,
                 "Trascina qui PDF, PNG, PostScript, TIFF, JPEG o HP-GL/2",
-                FontId::proportional(20.0),
+                stile(RICHIAMO).resolve(ui.style()),
                 Color32::from_gray(110),
             );
             return;
@@ -517,7 +557,7 @@ impl App {
             let r = Rect::from_min_size(Pos2::new(rotolo.left(), y), dim);
             disegna_pagina(ui, r, d, n, *ruotata);
             if *ruotata {
-                p.text(r.left_top() + Vec2::new(5.0, 4.0), Align2::LEFT_TOP, "90°", FontId::proportional(11.0), Color32::from_gray(90));
+                p.text(r.left_top() + Vec2::new(5.0, 4.0), Align2::LEFT_TOP, "90°", TextStyle::Small.resolve(ui.style()), Color32::from_gray(90));
             }
             y += dim.y + spazio_tra_pagine * rid;
         }
@@ -538,7 +578,7 @@ impl App {
             Pos2::new(area.center().x, area.bottom() - 16.0),
             Align2::CENTER_CENTER,
             nota,
-            FontId::proportional(13.0),
+            TextStyle::Body.resolve(ui.style()),
             Color32::from_gray(60),
         );
     }
@@ -555,7 +595,7 @@ fn barra_inchiostro(ui: &mut egui::Ui, c: &Cartuccia) {
     };
     ui.horizontal(|ui| {
         let nome = c.colore.unwrap_or(&c.nome);
-        ui.add_sized([100.0, 14.0], egui::Label::new(RichText::new(nome).small()).truncate())
+        ui.add_sized([100.0, ui.text_style_height(&TextStyle::Small)], egui::Label::new(RichText::new(nome).small()).truncate())
             .on_hover_text(&c.nome);
         let (r, _) = ui.allocate_exact_size(Vec2::new(90.0, 8.0), Sense::hover());
         ui.painter().rect_filled(r, 2.0, Color32::from_gray(225));
@@ -653,7 +693,7 @@ impl eframe::App for App {
             let schermo = ui.ctx().content_rect();
             let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("drop")));
             p.rect_filled(schermo, 0.0, Color32::from_rgba_unmultiplied(0, 125, 186, 60));
-            p.text(schermo.center(), Align2::CENTER_CENTER, "Rilascia per aggiungere", FontId::proportional(28.0), Color32::WHITE);
+            p.text(schermo.center(), Align2::CENTER_CENTER, "Rilascia per aggiungere", stile(RILASCIO).resolve(ui.style()), Color32::WHITE);
         }
     }
 
