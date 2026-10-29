@@ -14,5 +14,9 @@ pdfium-render = "0.9.4"
 rfd = "0.17.2"
 tiff = "0.11"
 
+[features]
+# Include pdfium nell'eseguibile (serve prima `scarica-pdfium.sh`); usata per le release.
+pdfium-incluso = []
+
 [profile.release]
 strip = true

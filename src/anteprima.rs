@@ -2,8 +2,9 @@
 //! su un thread dedicato: pdfium non è thread-safe, quindi una sola istanza lo usa.
 //!
 //! La libreria pdfium (`pdfium.dll` / `libpdfium.so`, build chromium/7881 di
-//! bblanchon/pdfium-binaries) va messa accanto all'eseguibile. Se manca, i PDF
-//! restano senza anteprima e il resto funziona.
+//! bblanchon/pdfium-binaries) può stare accanto all'eseguibile; con la feature
+//! `pdfium-incluso` (usata per le release) è dentro l'eseguibile e viene estratta
+//! nella cache utente. Se manca, i PDF restano senza anteprima e il resto funziona.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Sender, channel};
@@ -68,9 +69,13 @@ fn pagine_per_richiesta(pdfium: &Result<Pdfium, String>, percorso: &Path, format
 }
 
 /// Cerca pdfium accanto all'eseguibile, poi (in debug) in `pdfium/<piattaforma>`
-/// del progetto, infine tra le librerie di sistema.
+/// del progetto, poi quello incluso nell'eseguibile, infine tra le librerie di sistema.
 fn carica_pdfium() -> Result<Pdfium, String> {
-    carica_pdfium_in(&cartelle_pdfium(), true)
+    #[allow(unused_mut)]
+    let mut cartelle = cartelle_pdfium();
+    #[cfg(feature = "pdfium-incluso")]
+    cartelle.push(estrai_pdfium().map_err(|e| format!("estrazione di pdfium non riuscita: {e}"))?);
+    carica_pdfium_in(&cartelle, true)
 }
 
 fn cartelle_pdfium() -> Vec<PathBuf> {
@@ -79,8 +84,7 @@ fn cartelle_pdfium() -> Vec<PathBuf> {
         cartelle.push(dir);
     }
     if cfg!(debug_assertions) {
-        let piattaforma = if cfg!(windows) { "win-x64" } else { "linux-x64" };
-        cartelle.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("pdfium").join(piattaforma));
+        cartelle.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("pdfium").join(PIATTAFORMA));
     }
     cartelle
 }
@@ -118,6 +122,40 @@ fn messaggio_pdfium_mancante() -> String {
         "{} non trovata accanto all'eseguibile: anteprima dei PDF non disponibile",
         Pdfium::pdfium_platform_library_name().to_string_lossy()
     )
+}
+
+const PIATTAFORMA: &str = if cfg!(windows) { "win-x64" } else { "linux-x64" };
+
+#[cfg(all(feature = "pdfium-incluso", windows))]
+const PDFIUM_INCLUSO: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/pdfium/win-x64/pdfium.dll"));
+#[cfg(all(feature = "pdfium-incluso", not(windows)))]
+const PDFIUM_INCLUSO: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/pdfium/linux-x64/libpdfium.so"));
+
+/// Scrive la pdfium inclusa nella cache utente (`%LOCALAPPDATA%\iqclock` su Windows,
+/// `~/.cache/iqclock` altrove), se non c'è già identica, e ne restituisce la cartella.
+#[cfg(feature = "pdfium-incluso")]
+fn estrai_pdfium() -> std::io::Result<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("XDG_CACHE_HOME")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        })
+        .ok_or_else(|| std::io::Error::other("cartella di cache non trovata"))?;
+    let dir = base.join("iqclock");
+    let lib = Pdfium::pdfium_platform_library_name_at_path(&dir);
+    if std::fs::read(&lib).ok().as_deref() != Some(PDFIUM_INCLUSO) {
+        std::fs::create_dir_all(&dir)?;
+        // Prima su un file a parte: due istanze avviate insieme non vedono mai
+        // una libreria scritta a metà.
+        let tmp = dir.join(format!("pdfium-{}.tmp", std::process::id()));
+        std::fs::write(&tmp, PDFIUM_INCLUSO)?;
+        std::fs::rename(&tmp, &lib).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })?;
+    }
+    Ok(dir)
 }
 
 fn pagine_pdf(pdfium: &Pdfium, percorso: &Path) -> Result<Vec<Pagina>, PdfiumError> {

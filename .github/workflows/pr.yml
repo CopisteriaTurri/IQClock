@@ -26,5 +26,5 @@ jobs:
       # Per i test dell'anteprima (non è in git).
       - name: Scarica pdfium
         run: sh scarica-pdfium.sh linux-x64
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test
