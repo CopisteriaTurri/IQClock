@@ -13,6 +13,9 @@ dei rispettivi proprietari e qui compaiono solo per indicare la compatibilità. 
 
 ## Uso
 
+- **Download**: [ultima release](https://github.com/CopisteriaTurri/IQClock/releases/latest)
+  (`iqclock-win-x64.exe`, `iqclock-linux-x64`). pdfium non è incluso: va scaricato a parte
+  con `scarica-pdfium.sh`.
 - **Interfaccia**: `iqclock.exe` (oppure trascina i file sull'eseguibile).
   Tenere `pdfium.dll` nella stessa cartella: senza, i PDF non hanno l'anteprima.
 - **Riga di comando** (su Windows l'output è visibile solo dalla build di debug):
