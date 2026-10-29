@@ -157,12 +157,78 @@ pub fn chiusura(opz: &OpzioniJob) -> Vec<u8> {
 mod test {
     use super::*;
 
+    const FORMATI: [Formato; 6] = [
+        Formato::Pdf,
+        Formato::PostScript,
+        Formato::Tiff,
+        Formato::Jpeg,
+        Formato::Png,
+        Formato::Hpgl2,
+    ];
+
+    /// Intestazione attesa scritta seguendo il manuale PJL senza riusare il
+    /// codice sotto test: apertura con UEL e ogni riga chiusa da CR LF.
+    fn attesa_intestazione(opz: &OpzioniJob, formato: Formato) -> String {
+        let mut s = String::from("\x1b%-12345X");
+        s += &format!("@PJL JOB NAME=\"{}\"\r\n", opz.nome);
+        s += &format!("@PJL SET COPIES={}\r\n", opz.copie.max(1));
+        match opz.sorgente {
+            Sorgente::Stampante => {}
+            Sorgente::Auto => s += "@PJL SET MEDIASOURCE=AUTO\r\n",
+            Sorgente::Rotolo1 => s += "@PJL SET MEDIASOURCE=ROLL1\r\n",
+            Sorgente::Rotolo2 => s += "@PJL SET MEDIASOURCE=ROLL2\r\n",
+        }
+        s += if opz.scala_di_grigi {
+            "@PJL SET RENDERMODE=GRAYSCALE\r\n"
+        } else {
+            "@PJL SET RENDERMODE=COLOR\r\n"
+        };
+        match opz.taglierina {
+            None => {}
+            Some(true) => s += "@PJL SET CUTTER=ON\r\n",
+            Some(false) => s += "@PJL SET CUTTER=OFF\r\n",
+        }
+        for riga in opz.extra.lines().map(str::trim).filter(|r| r.starts_with("@PJL")) {
+            s += &format!("{riga}\r\n");
+        }
+        match formato {
+            Formato::Pdf => s += "@PJL ENTER LANGUAGE=PDF\r\n",
+            Formato::PostScript => s += "@PJL ENTER LANGUAGE=POSTSCRIPT\r\n",
+            Formato::Hpgl2 => s += "@PJL ENTER LANGUAGE=HPGL2\r\n",
+            Formato::Tiff | Formato::Jpeg | Formato::Png => {}
+        }
+        s
+    }
+
+    fn attesa_chiusura(nome: &str) -> String {
+        format!("\x1b%-12345X@PJL EOJ NAME=\"{nome}\"\r\n\x1b%-12345X")
+    }
+
+    fn testo(v: Vec<u8>) -> String {
+        String::from_utf8(v).expect("PJL deve essere ASCII/UTF-8")
+    }
+
+    #[test]
+    fn uel_esatto() {
+        assert_eq!(UEL, b"\x1b%-12345X".as_slice());
+    }
+
+    #[test]
+    fn opzioni_predefinite() {
+        let opz = OpzioniJob::default();
+        assert_eq!(opz.nome, "");
+        assert_eq!(opz.copie, 1);
+        assert_eq!(opz.sorgente, Sorgente::Stampante);
+        assert!(!opz.scala_di_grigi);
+        assert_eq!(opz.taglierina, None);
+        assert!(opz.extra.is_empty());
+    }
+
     #[test]
     fn intestazione_pdf_minima() {
         let opz = OpzioniJob { nome: "tavola \"A1\"".into(), ..Default::default() };
-        let h = intestazione(&opz, Formato::Pdf);
         assert_eq!(
-            String::from_utf8(h).unwrap(),
+            testo(intestazione(&opz, Formato::Pdf)),
             "\x1b%-12345X@PJL JOB NAME=\"tavola A1\"\r\n\
              @PJL SET COPIES=1\r\n\
              @PJL SET RENDERMODE=COLOR\r\n\
@@ -180,19 +246,161 @@ mod test {
             taglierina: Some(false),
             extra: "@PJL SET MIRROR=OFF\nroba non pjl\n".into(),
         };
-        let h = String::from_utf8(intestazione(&opz, Formato::Jpeg)).unwrap();
-        assert!(h.contains("@PJL SET COPIES=3\r\n"));
-        assert!(h.contains("@PJL SET MEDIASOURCE=ROLL2\r\n"));
-        assert!(h.contains("@PJL SET RENDERMODE=GRAYSCALE\r\n"));
-        assert!(h.contains("@PJL SET CUTTER=OFF\r\n"));
-        assert!(h.contains("@PJL SET MIRROR=OFF\r\n"));
-        assert!(!h.contains("roba"));
-        assert!(!h.contains("ENTER LANGUAGE"));
+        assert_eq!(
+            testo(intestazione(&opz, Formato::Jpeg)),
+            "\x1b%-12345X@PJL JOB NAME=\"x\"\r\n\
+             @PJL SET COPIES=3\r\n\
+             @PJL SET MEDIASOURCE=ROLL2\r\n\
+             @PJL SET RENDERMODE=GRAYSCALE\r\n\
+             @PJL SET CUTTER=OFF\r\n\
+             @PJL SET MIRROR=OFF\r\n"
+        );
+    }
+
+    /// Tutte le combinazioni di formato, sorgente, resa, taglierina, copie ed
+    /// extra: l'output deve combaciare byte per byte con l'atteso.
+    #[test]
+    fn tutte_le_combinazioni() {
+        let extra_da_provare = [
+            "",
+            "@PJL SET MIRROR=OFF\n",
+            "  @PJL SET A=1  \r\nroba\n\n@PJL SET B=\"2\"",
+        ];
+        for formato in FORMATI {
+            for sorgente in Sorgente::TUTTE {
+                for scala_di_grigi in [false, true] {
+                    for taglierina in [None, Some(true), Some(false)] {
+                        for copie in [0, 1, 2, 7] {
+                            for extra in extra_da_provare {
+                                let opz = OpzioniJob {
+                                    nome: "prova.pdf".into(),
+                                    copie,
+                                    sorgente,
+                                    scala_di_grigi,
+                                    taglierina,
+                                    extra: extra.into(),
+                                };
+                                let atteso = attesa_intestazione(&opz, formato);
+                                let got = testo(intestazione(&opz, formato));
+                                assert_eq!(
+                                    got, atteso,
+                                    "{formato:?} {sorgente:?} grigi={scala_di_grigi} \
+                                     cutter={taglierina:?} copie={copie} extra={extra:?}"
+                                );
+                                assert!(!got.ends_with('\r'), "CR finale: {got:?}");
+                                for (i, b) in got.bytes().enumerate() {
+                                    if b == b'\n' {
+                                        assert!(
+                                            i > 0 && got.as_bytes()[i - 1] == b'\r',
+                                            "riga senza CR: {got:?} ({formato:?})"
+                                        );
+                                    }
+                                }
+                                for coppia in got.as_bytes().windows(2) {
+                                    assert!(
+                                        !(coppia[0] == b'\r' && coppia[1] != b'\n'),
+                                        "CR non seguito da LF: {got:?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn copie_zero_diventa_uno() {
+        let opz = OpzioniJob { copie: 0, ..Default::default() };
+        assert!(testo(intestazione(&opz, Formato::Pdf)).contains("@PJL SET COPIES=1\r\n"));
+    }
+
+    #[test]
+    fn linguaggio_per_formato() {
+        assert_eq!(Formato::Pdf.linguaggio_pjl(), Some("PDF"));
+        assert_eq!(Formato::PostScript.linguaggio_pjl(), Some("POSTSCRIPT"));
+        assert_eq!(Formato::Hpgl2.linguaggio_pjl(), Some("HPGL2"));
+        assert_eq!(Formato::Tiff.linguaggio_pjl(), None);
+        assert_eq!(Formato::Jpeg.linguaggio_pjl(), None);
+        assert_eq!(Formato::Png.linguaggio_pjl(), None);
+    }
+
+    #[test]
+    fn enter_language_solo_dove_documentato() {
+        for formato in FORMATI {
+            let h = testo(intestazione(&OpzioniJob::default(), formato));
+            let atteso = match formato.linguaggio_pjl() {
+                Some(l) => format!("@PJL ENTER LANGUAGE={l}\r\n"),
+                None => String::new(),
+            };
+            assert!(h.ends_with(&atteso), "{formato:?}");
+            assert_eq!(h.matches("ENTER LANGUAGE").count(), usize::from(!atteso.is_empty()));
+        }
+    }
+
+    #[test]
+    fn nome_job_pulito() {
+        let opz = OpzioniJob {
+            nome: "fat\"tura\r\n2026\t\0.pdf".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            testo(intestazione(&opz, Formato::Tiff)),
+            "\x1b%-12345X@PJL JOB NAME=\"fattura2026.pdf\"\r\n\
+             @PJL SET COPIES=1\r\n\
+             @PJL SET RENDERMODE=COLOR\r\n"
+        );
+        assert_eq!(testo(chiusura(&opz)), attesa_chiusura("fattura2026.pdf"));
+    }
+
+    #[test]
+    fn nome_job_troncato_a_80_caratteri() {
+        let h = testo(intestazione(
+            &OpzioniJob { nome: "x".repeat(120), ..Default::default() },
+            Formato::Pdf,
+        ));
+        assert!(h.contains(&format!("@PJL JOB NAME=\"{}\"\r\n", "x".repeat(80))), "{h:?}");
+        assert!(!h.contains("x".repeat(81).as_str()));
+    }
+
+    #[test]
+    fn nome_job_multibyte_troncato_per_caratteri() {
+        let h = testo(intestazione(
+            &OpzioniJob { nome: "\u{e0}".repeat(100), ..Default::default() },
+            Formato::Pdf,
+        ));
+        assert!(h.contains(&format!("@PJL JOB NAME=\"{}\"\r\n", "\u{e0}".repeat(80))), "{h:?}");
+    }
+
+    #[test]
+    fn chiusura_byte_per_byte() {
+        let opz = OpzioniJob { nome: "disegno \"1\".pdf".into(), ..Default::default() };
+        assert_eq!(
+            testo(chiusura(&opz)),
+            "\x1b%-12345X@PJL EOJ NAME=\"disegno 1.pdf\"\r\n\x1b%-12345X"
+        );
+    }
+
+    #[test]
+    fn chiusura_ignora_le_altre_opzioni() {
+        let opz = OpzioniJob {
+            nome: "x.pdf".into(),
+            copie: 9,
+            sorgente: Sorgente::Rotolo1,
+            scala_di_grigi: true,
+            taglierina: Some(true),
+            extra: "@PJL SET FOO=1".into(),
+        };
+        assert_eq!(testo(chiusura(&opz)), attesa_chiusura("x.pdf"));
+        let solo_nome = OpzioniJob { nome: "x.pdf".into(), ..Default::default() };
+        assert_eq!(chiusura(&opz), chiusura(&solo_nome));
     }
 
     #[test]
     fn chiusura_termina_con_uel() {
         let c = chiusura(&OpzioniJob::default());
         assert!(c.starts_with(UEL) && c.ends_with(UEL));
+        assert_eq!(testo(c), attesa_chiusura(""));
     }
 }
