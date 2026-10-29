@@ -71,7 +71,8 @@ impl StatoStampante {
         };
         match self.dispositivo {
             Some(3) => format!("{base} — con avvisi"),
-            Some(5) if self.stampante.is_some() => format!("{base} — errore"),
+            // Se la base viene già da hrDeviceStatus, l'errore è già detto.
+            Some(5) if matches!(self.stampante, Some(3..=5)) => format!("{base} — errore"),
             _ => base.to_string(),
         }
     }
@@ -145,187 +146,35 @@ pub fn leggi_da(host: &str, porta: u16) -> Result<StatoStampante> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::snmp::test::{avvia_agente, ber, ber_intero};
     use std::collections::BTreeMap;
     use std::net::UdpSocket;
     use std::thread;
     use std::time::Duration;
 
-    // --- Mini-codec BER solo per il finto agente. Duplicato volutamente:
-    // così non si toccano i privati di snmp.rs. ---
-
-    fn tlv(tag: u8, contenuto: &[u8]) -> Vec<u8> {
-        let mut o = vec![tag];
-        if contenuto.len() < 0x80 {
-            o.push(contenuto.len() as u8);
-        } else {
-            let b: Vec<u8> =
-                contenuto.len().to_be_bytes().into_iter().skip_while(|&x| x == 0).collect();
-            o.push(0x80 | b.len() as u8);
-            o.extend_from_slice(&b);
-        }
-        o.extend_from_slice(contenuto);
-        o
+    fn testo(s: &str) -> Vec<u8> {
+        ber(0x04, s.as_bytes())
     }
 
-    fn grezzo_intero(v: i64) -> Vec<u8> {
-        let b = v.to_be_bytes();
-        let mut i = 0;
-        while i < 7 && ((b[i] == 0 && b[i + 1] & 0x80 == 0) || (b[i] == 0xFF && b[i + 1] & 0x80 != 0))
-        {
-            i += 1;
-        }
-        b[i..].to_vec()
-    }
-
-    fn codifica_oid(oid: &[u32]) -> Vec<u8> {
-        let mut c = vec![(oid[0] * 40 + oid[1]) as u8];
-        for &arco in &oid[2..] {
-            let mut g = vec![(arco & 0x7F) as u8];
-            let mut v = arco >> 7;
-            while v > 0 {
-                g.push((v & 0x7F) as u8 | 0x80);
-                v >>= 7;
-            }
-            c.extend(g.into_iter().rev());
-        }
-        tlv(0x06, &c)
-    }
-
-    fn decodifica_intero(c: &[u8]) -> i64 {
-        let iniziale = if c.first().is_some_and(|b| b & 0x80 != 0) { -1 } else { 0 };
-        c.iter().fold(iniziale, |a, &b| a << 8 | b as i64)
-    }
-
-    fn decodifica_oid(c: &[u8]) -> Vec<u32> {
-        let Some((&primo, resto)) = c.split_first() else { return Vec::new() };
-        let mut o = vec![(primo / 40) as u32, (primo % 40) as u32];
-        let mut v = 0u32;
-        for &b in resto {
-            v = v << 7 | (b & 0x7F) as u32;
-            if b & 0x80 == 0 {
-                o.push(v);
-                v = 0;
-            }
-        }
-        o
-    }
-
-    struct L<'a>(&'a [u8]);
-
-    impl<'a> L<'a> {
-        fn un(&mut self) -> (u8, &'a [u8]) {
-            let d = self.0;
-            let tag = d[0];
-            let (n, s) = if d[1] & 0x80 == 0 {
-                (d[1] as usize, 2)
-            } else {
-                let k = (d[1] & 0x7F) as usize;
-                (d[2..2 + k].iter().fold(0usize, |a, &b| a << 8 | b as usize), 2 + k)
-            };
-            self.0 = &d[s + n..];
-            (tag, &d[s..s + n])
-        }
-    }
-
-    /// (id, è_getnext, oids) dalla richiesta del client.
-    fn leggi_richiesta(d: &[u8]) -> (i64, bool, Vec<Vec<u32>>) {
-        let mut m = L(d);
-        let (_, c) = m.un();
-        let mut m = L(c);
-        let _ = m.un(); // versione
-        let _ = m.un(); // comunità
-        let (pdu, pc) = m.un();
-        let mut p = L(pc);
-        let (_, idc) = p.un();
-        let _ = p.un();
-        let _ = p.un();
-        let (_, vbc) = p.un();
-        let mut v = L(vbc);
-        let mut oids = Vec::new();
-        while !v.0.is_empty() {
-            let (_, s) = v.un();
-            let mut s = L(s);
-            let (_, oc) = s.un();
-            oids.push(decodifica_oid(oc));
-        }
-        (decodifica_intero(idc), pdu == 0xA1, oids)
-    }
-
-    fn risposta(id: i64, errore: i64, voci: &[(Vec<u32>, u8, Vec<u8>)]) -> Vec<u8> {
-        let vb: Vec<u8> = voci
-            .iter()
-            .flat_map(|(o, t, c)| tlv(0x30, &[codifica_oid(o), tlv(*t, c)].concat()))
-            .collect();
-        let pdu =
-            [tlv(0x02, &grezzo_intero(id)), tlv(0x02, &grezzo_intero(errore)), tlv(0x02, &[0]), tlv(0x30, &vb)]
-                .concat();
-        tlv(0x30, &[tlv(0x02, &[0]), tlv(0x04, b"public"), tlv(0xA2, &pdu)].concat())
-    }
-
-    /// Agente SNMP finto su 127.0.0.1: risponde da una tabella OID →
-    /// (tag, valore). GETNEXT restituisce la prima chiave maggiore (le walk
-    /// del client scartano da sole ciò che esce dalla base); OID ignoti →
-    /// errore 2 come un agente vero. Il thread muore da solo dopo 0,5 s
-    /// di inattività: niente join nei test.
-    fn avvia_agente(tabella: BTreeMap<Vec<u32>, (u8, Vec<u8>)>) -> u16 {
-        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let porta = sock.local_addr().unwrap().port();
-        thread::spawn(move || {
-            sock.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
-            let mut buf = vec![0u8; 65535];
-            for _ in 0..400 {
-                let (n, da) = match sock.recv_from(&mut buf) {
-                    Ok(r) => r,
-                    Err(_) => break,
-                };
-                let (id, next, oids) = leggi_richiesta(&buf[..n]);
-                let r = if next {
-                    tabella
-                        .range::<[u32], _>((
-                            std::ops::Bound::Excluded(oids[0].as_slice()),
-                            std::ops::Bound::Unbounded,
-                        ))
-                        .next()
-                        .map(|(o, (t, c))| risposta(id, 0, &[(o.clone(), *t, c.clone())]))
-                        .unwrap_or_else(|| risposta(id, 2, &[]))
-                } else {
-                    let voci: Vec<_> = oids
-                        .iter()
-                        .filter_map(|o| tabella.get(o).map(|(t, c)| (o.clone(), *t, c.clone())))
-                        .collect();
-                    if voci.len() == oids.len() {
-                        risposta(id, 0, &voci)
-                    } else {
-                        risposta(id, 2, &[])
-                    }
-                };
-                let _ = sock.send_to(&r, da);
-            }
-        });
-        porta
+    fn sotto(base: &str, indice: &str) -> Vec<u32> {
+        snmp::oid(&format!("{base}.{indice}"))
     }
 
     /// Tabella che imita la T2600: modello, stati, due cartucce (una nota con
     /// livello, una ignota senza livello), rotolo in uso e manuale vuoto.
-    fn tabella_base(stampante: i64, dispositivo: i64) -> BTreeMap<Vec<u32>, (u8, Vec<u8>)> {
-        let mut t: BTreeMap<Vec<u32>, (u8, Vec<u8>)> = BTreeMap::new();
-        t.insert(snmp::oid(MODELLO), (0x04, b"HP DesignJet T2600".to_vec()));
-        t.insert(snmp::oid(STATO_STAMPANTE), (0x02, grezzo_intero(stampante)));
-        t.insert(snmp::oid(STATO_DISPOSITIVO), (0x02, grezzo_intero(dispositivo)));
-        t.insert(
-            snmp::oid(&format!("{NOMI_CARTUCCE}.1")),
-            (0x04, b"HP 730 300ML ( P2V62A )".to_vec()),
-        );
-        t.insert(
-            snmp::oid(&format!("{NOMI_CARTUCCE}.2")),
-            (0x04, b"HP 730 300ML ( P2V99A )".to_vec()),
-        );
-        t.insert(snmp::oid(&format!("{LIVELLI_HP}.1.1.0")), (0x02, grezzo_intero(87)));
-        t.insert(snmp::oid(&format!("{NOMI_INGRESSI}.1")), (0x04, b"ROLL".to_vec()));
-        t.insert(snmp::oid(&format!("{NOMI_INGRESSI}.2")), (0x04, b"MANUAL FEED".to_vec()));
-        t.insert(snmp::oid(&format!("{STATI_INGRESSI}.1")), (0x02, grezzo_intero(6)));
-        t.insert(snmp::oid(&format!("{STATI_INGRESSI}.2")), (0x02, grezzo_intero(21)));
-        t
+    fn tabella_base(stampante: i64, dispositivo: i64) -> BTreeMap<Vec<u32>, Vec<u8>> {
+        BTreeMap::from([
+            (snmp::oid(MODELLO), testo("HP DesignJet T2600")),
+            (snmp::oid(STATO_STAMPANTE), ber_intero(stampante)),
+            (snmp::oid(STATO_DISPOSITIVO), ber_intero(dispositivo)),
+            (sotto(NOMI_CARTUCCE, "1"), testo("HP 730 300ML ( P2V62A )")),
+            (sotto(NOMI_CARTUCCE, "2"), testo("HP 730 300ML ( P2V99A )")),
+            (sotto(LIVELLI_HP, "1.1.0"), ber_intero(87)),
+            (sotto(NOMI_INGRESSI, "1"), testo("ROLL")),
+            (sotto(NOMI_INGRESSI, "2"), testo("MANUAL FEED")),
+            (sotto(STATI_INGRESSI, "1"), ber_intero(6)),
+            (sotto(STATI_INGRESSI, "2"), ber_intero(21)),
+        ])
     }
 
     #[test]
@@ -348,8 +197,18 @@ mod test {
     #[test]
     fn legge_stato_errore() {
         let s = leggi_da("127.0.0.1", avvia_agente(tabella_base(1, 5))).unwrap();
-        assert_eq!(s.descrizione(), "ferma (errore) — errore");
+        assert_eq!(s.descrizione(), "ferma (errore)");
         assert!(!s.ok());
+    }
+
+    #[test]
+    fn inchiostro_esaurito_e_livelli_fuori_scala() {
+        let mut t = tabella_base(3, 2);
+        t.insert(sotto(LIVELLI_HP, "1.1.0"), ber_intero(0));
+        t.insert(sotto(LIVELLI_HP, "2.1.0"), ber_intero(150));
+        let s = leggi_da("127.0.0.1", avvia_agente(t)).unwrap();
+        assert_eq!(s.cartucce[0].percentuale, Some(0));
+        assert_eq!(s.cartucce[1].percentuale, None, "oltre 100 non è una percentuale");
     }
 
     #[test]

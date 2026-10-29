@@ -91,6 +91,23 @@ mod test {
     use std::net::TcpListener;
     use std::thread;
 
+    /// File temporaneo cancellato anche se il test fallisce a metà.
+    struct FileTemp(std::path::PathBuf);
+
+    impl FileTemp {
+        fn nuovo(nome: &str, contenuto: &[u8]) -> Self {
+            let p = std::env::temp_dir().join(format!("iqclock-{nome}-{}.pdf", std::process::id()));
+            std::fs::write(&p, contenuto).unwrap();
+            Self(p)
+        }
+    }
+
+    impl Drop for FileTemp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
     #[test]
     fn i_png_partono_come_tiff() {
         let p = std::env::temp_dir().join(format!("iqclock-png-{}.png", std::process::id()));
@@ -114,13 +131,11 @@ mod test {
     fn file_grande_arriva_integro() {
         // Più del buffer interno da 256 KiB: verifica streaming a chunk.
         let contenuto: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
-        let p = std::env::temp_dir().join(format!("iqclock-grande-{}.pdf", std::process::id()));
-        std::fs::write(&p, &contenuto).unwrap();
+        let p = FileTemp::nuovo("grande", &contenuto);
         let opz = OpzioniJob { nome: "grande".into(), ..Default::default() };
         let mut passi = Vec::new();
         let mut job = Vec::new();
-        scrivi_job(&mut job, &p, Formato::Pdf, &opz, |f| passi.push(f)).unwrap();
-        std::fs::remove_file(&p).unwrap();
+        scrivi_job(&mut job, &p.0, Formato::Pdf, &opz, |f| passi.push(f)).unwrap();
 
         let testa = pjl::intestazione(&opz, Formato::Pdf);
         let coda = pjl::chiusura(&opz);
@@ -134,8 +149,8 @@ mod test {
 
     #[test]
     fn connessione_chiusa_a_meta_da_errore_leggibile() {
-        // Finta stampante che legge solo l'intestazione e chiude di colpo
-        // (con dati non letti in coda: RST): l'invio deve fallire di sicuro.
+        // Finta stampante che legge solo l'intestazione e chiude di colpo:
+        // l'invio deve fallire, non risultare riuscito.
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let porta = server.local_addr().unwrap().port();
         thread::spawn(move || {
@@ -147,11 +162,9 @@ mod test {
             // `s` droppato qui.
         });
 
-        let p = std::env::temp_dir().join(format!("iqclock-rst-{}.pdf", std::process::id()));
-        std::fs::write(&p, vec![0xABu8; 16 * 1024 * 1024]).unwrap();
+        let p = FileTemp::nuovo("rst", &vec![0xABu8; 16 * 1024 * 1024]);
         let opz = OpzioniJob { nome: "rst".into(), ..Default::default() };
-        let err = invia("127.0.0.1", porta, &p, Formato::Pdf, &opz, |_| {}).unwrap_err();
-        std::fs::remove_file(&p).unwrap();
+        let err = invia("127.0.0.1", porta, &p.0, Formato::Pdf, &opz, |_| {}).unwrap_err();
         assert!(format!("{err:#}").contains("invio interrotto"), "{err:#}");
     }
 
@@ -159,21 +172,18 @@ mod test {
     fn porta_chiusa_da_errore_leggibile() {
         // Porta libera ma senza nessuno in ascolto: rifiuto immediato.
         let porta = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let p = std::env::temp_dir().join(format!("iqclock-rifiuto-{}.pdf", std::process::id()));
-        std::fs::write(&p, b"%PDF-1.4 finto").unwrap();
+        let p = FileTemp::nuovo("rifiuto", b"%PDF-1.4 finto");
         let opz = OpzioniJob::default();
-        let err = invia("127.0.0.1", porta, &p, Formato::Pdf, &opz, |_| {}).unwrap_err();
-        std::fs::remove_file(&p).unwrap();
+        let err = invia("127.0.0.1", porta, &p.0, Formato::Pdf, &opz, |_| {}).unwrap_err();
         assert!(format!("{err:#}").contains("stampante non raggiungibile"), "{err:#}");
     }
 
     #[test]
     fn host_invalido_da_errore_leggibile() {
-        let p = std::env::temp_dir().join(format!("iqclock-host-{}.pdf", std::process::id()));
-        std::fs::write(&p, b"%PDF-1.4 finto").unwrap();
+        // .invalid è riservato (RFC 6761): non si risolve su nessuna rete.
+        let p = FileTemp::nuovo("host", b"%PDF-1.4 finto");
         let opz = OpzioniJob::default();
-        let err = invia("!!host_invalido!!", 9100, &p, Formato::Pdf, &opz, |_| {}).unwrap_err();
-        std::fs::remove_file(&p).unwrap();
+        let err = invia("stampante.invalid", 9100, &p.0, Formato::Pdf, &opz, |_| {}).unwrap_err();
         assert!(format!("{err:#}").contains("indirizzo non valido"), "{err:#}");
     }
 
