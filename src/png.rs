@@ -137,7 +137,7 @@ fn razionale(dpi: f64) -> Rational {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use super::*;
     use image::{ImageBuffer, Rgb, RgbaImage};
     use tiff::decoder::Decoder;
@@ -175,7 +175,7 @@ mod test {
     }
 
     /// Inserisce un chunk `pHYs` subito dopo IHDR (come fa chi dichiara i DPI).
-    fn con_phys(png: &[u8], pixel_per_metro: u32) -> Vec<u8> {
+    pub(crate) fn con_phys(png: &[u8], pixel_per_metro: u32) -> Vec<u8> {
         let fine_ihdr = 8 + 4 + 4 + 13 + 4;
         assert_eq!(&png[12..16], b"IHDR");
         let mut corpo = b"pHYs".to_vec();
