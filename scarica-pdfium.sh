@@ -20,6 +20,7 @@ for piattaforma in $piattaforme; do
     case $piattaforma in
         linux-x64) tar xzf "$tmp/$piattaforma.tgz" -C "$tmp" lib/libpdfium.so && mv "$tmp/lib/libpdfium.so" "pdfium/$piattaforma/" ;;
         win-x64) tar xzf "$tmp/$piattaforma.tgz" -C "$tmp" bin/pdfium.dll LICENSE && mv "$tmp/bin/pdfium.dll" "pdfium/$piattaforma/" && mv "$tmp/LICENSE" pdfium/LICENSE ;;
+        *) echo "piattaforma non supportata: $piattaforma" >&2; exit 1 ;;
     esac
 done
 echo "pdfium $VERSIONE scaricato in pdfium/"

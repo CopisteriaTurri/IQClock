@@ -150,18 +150,9 @@ mod test {
     use super::*;
     use lopdf::dictionary;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Mutex, MutexGuard};
     use std::time::Duration;
 
     static CONTATORE: AtomicU64 = AtomicU64::new(0);
-    /// pdfium non è thread-safe e ammette un solo binding per processo: i test che
-    /// lo usano si alternano su questo lock invece di renderizzare in parallelo.
-    static PDFIUM_TEST: Mutex<()> = Mutex::new(());
-
-    fn pdfium_seriale() -> MutexGuard<'static, ()> {
-        PDFIUM_TEST.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     fn file_temp(suffisso: &str) -> PathBuf {
         let n = CONTATORE.fetch_add(1, Ordering::SeqCst);
         std::env::temp_dir().join(format!("iqclock-test-{}-{n}{suffisso}", std::process::id()))
@@ -195,10 +186,12 @@ mod test {
     }
 
     /// Pdfium caricato davvero, oppure `None` con avviso (sviluppo locale senza
-    /// `scarica-pdfium.sh`; in CI la libreria c'è e il test gira per intero).
+    /// `scarica-pdfium.sh`). In CI la libreria deve esserci: lì l'assenza è un
+    /// errore, altrimenti i test di rendering passerebbero senza girare.
     fn pdfium_o_salta() -> Option<Pdfium> {
         match carica_pdfium() {
             Ok(p) => Some(p),
+            Err(e) if std::env::var_os("CI").is_some() => panic!("pdfium non caricato in CI: {e}"),
             Err(e) => {
                 eprintln!("pdfium assente ({e}): test saltato");
                 None
@@ -208,7 +201,6 @@ mod test {
 
     #[test]
     fn rende_un_pdf_a1() {
-        let _guard = pdfium_seriale();
         let Some(pdfium) = pdfium_o_salta() else { return };
         // Una pagina A1 (1684 × 2384 pt) vuota.
         let pdf = crea_pdf(&[(1684, 2384)]);
@@ -225,7 +217,6 @@ mod test {
 
     #[test]
     fn mostra_solo_le_prime_quattro_pagine() {
-        let _guard = pdfium_seriale();
         let Some(pdfium) = pdfium_o_salta() else { return };
         // Sei pagine A4 vuote: l'anteprima ne mostra al massimo PAGINE_MAX.
         let pdf = crea_pdf(&[(595, 842); 6]);
@@ -236,7 +227,6 @@ mod test {
 
     #[test]
     fn pdf_corrotto_e_inesistente_danno_errore() {
-        let _guard = pdfium_seriale();
         let Some(pdfium) = pdfium_o_salta() else { return };
         let corrotto = file_temp(".pdf");
         std::fs::write(&corrotto, b"%PDF-1.5\nnon un pdf vero").unwrap();
@@ -308,7 +298,6 @@ mod test {
     /// l'app resta utilizzabile anche se la libreria manca.
     #[test]
     fn il_thread_consegna_le_immagini() {
-        let _guard = pdfium_seriale();
         let png = png_valido(60, 40);
         let (tx, rx) = std::sync::mpsc::channel();
         let (anteprime, _) = Anteprime::avvia(move |id, pagine| {
