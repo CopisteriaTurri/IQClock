@@ -14,10 +14,10 @@ dei rispettivi proprietari e qui compaiono solo per indicare la compatibilità. 
 ## Uso
 
 - **Download**: [ultima release](https://github.com/CopisteriaTurri/IQClock/releases/latest)
-  (`iqclock-win-x64.exe`, `iqclock-linux-x64`). pdfium non è incluso: va scaricato a parte
-  con `scarica-pdfium.sh`.
+  (`iqclock-win-x64.exe`, `iqclock-linux-x64`). pdfium è già dentro l'eseguibile: al primo
+  avvio viene estratto in `%LOCALAPPDATA%\iqclock` (`~/.cache/iqclock` su Linux).
 - **Interfaccia**: `iqclock.exe` (oppure trascina i file sull'eseguibile).
-  Tenere `pdfium.dll` nella stessa cartella: senza, i PDF non hanno l'anteprima.
+  Una `pdfium.dll` messa nella stessa cartella ha la precedenza su quella inclusa.
 - **Riga di comando** (su Windows l'output è visibile solo dalla build di debug):
   ```
   iqclock stampa tavola.pdf --copie 2 --rotolo 1 --grigi
@@ -96,17 +96,18 @@ Il `prtMarkerSuppliesLevel` standard non è implementato dalla stampante.
 
 ```
 ./scarica-pdfium.sh                                    # pdfium in pdfium/ (non è in git)
-cargo build --release                                  # Linux
-cargo build --release --target x86_64-pc-windows-gnu   # Windows (serve mingw64-gcc)
+cargo build --release --features pdfium-incluso       # Linux
+cargo build --release --features pdfium-incluso --target x86_64-pc-windows-gnu   # Windows (serve mingw64-gcc)
 cargo test
 ```
 
 pdfium viene da [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries),
 release `chromium/7881`: è la versione dell'API per cui è compilato `pdfium-render` 0.9
 (feature `pdfium_latest`). Aggiornando il crate va aggiornata anche `VERSIONE` nello script.
-Per distribuire su Windows: `iqclock.exe` + `pdfium/win-x64/pdfium.dll` +
-`pdfium/LICENSE` nella stessa cartella. In debug l'app trova pdfium anche in
-`pdfium/<piattaforma>` del progetto.
+Con la feature `pdfium-incluso` (quella delle release) la libreria finisce
+nell'eseguibile, che pesa circa 7 MB in più; la licenza di pdfium va distribuita insieme
+(`LICENSE-pdfium.txt` nella release). Senza la feature pdfium va messa accanto
+all'eseguibile; in debug l'app la trova anche in `pdfium/<piattaforma>` del progetto.
 
 ## Licenza
 

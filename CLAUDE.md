@@ -8,4 +8,4 @@
 - Per rilasciare: `git tag vX.Y.Z && git push origin vX.Y.Z`. Non pushare tag `v*` se non per fare una release.
 - I push diretti a `main` non sono verificati: prima di pushare lancia in locale `cargo clippy --all-targets -- -D warnings` e `cargo test`.
 - Dependabot (`.github/dependabot.yml`) è mensile; le sue PR passano dal workflow `pr.yml`.
-- I binari in release non includono pdfium: serve `scarica-pdfium.sh` (cartella `pdfium/`, ignorata da git).
+- I binari in release includono pdfium (feature `pdfium-incluso`, estratto nella cache utente al primo avvio): la CI lancia `scarica-pdfium.sh` prima di compilare (cartella `pdfium/`, ignorata da git). Senza `pdfium/` la feature non compila.
