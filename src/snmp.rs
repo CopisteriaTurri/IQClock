@@ -187,7 +187,11 @@ pub struct Client {
 
 impl Client {
     pub fn new(host: &str, comunita: &str) -> Result<Self> {
-        let indirizzo = (host, 161)
+        Self::new_con_porta(host, 161, comunita)
+    }
+
+    pub fn new_con_porta(host: &str, porta: u16, comunita: &str) -> Result<Self> {
+        let indirizzo = (host, porta)
             .to_socket_addrs()?
             .next()
             .with_context(|| format!("nessun indirizzo per {host}"))?;
@@ -237,14 +241,16 @@ impl Client {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use super::*;
+    use std::collections::BTreeMap;
     use std::net::SocketAddr;
+    use std::ops::Bound::{Excluded, Unbounded};
 
     // --- BER scritto a mano: i test decodificano byte indipendenti dal
     // codificatore sotto test. ---
 
-    fn ber(tag: u8, contenuto: &[u8]) -> Vec<u8> {
+    pub(crate) fn ber(tag: u8, contenuto: &[u8]) -> Vec<u8> {
         let mut out = vec![tag];
         let n = contenuto.len();
         if n < 0x80 {
@@ -258,7 +264,7 @@ mod test {
         out
     }
 
-    fn ber_intero(v: i64) -> Vec<u8> {
+    pub(crate) fn ber_intero(v: i64) -> Vec<u8> {
         let b = v.to_be_bytes();
         let mut i = 0;
         while i < 7 && ((b[i] == 0 && b[i + 1] & 0x80 == 0) || (b[i] == 0xFF && b[i + 1] & 0x80 != 0)) {
@@ -313,6 +319,58 @@ mod test {
         sock.connect(indirizzo).unwrap();
         sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         Client { sock, comunita: "public".into(), prossimo_id: 0 }
+    }
+
+    /// (id, è GETNEXT, OID) di una richiesta del client.
+    fn leggi_richiesta(pacchetto: &[u8]) -> (i32, bool, Vec<Vec<u32>>) {
+        let mut msg = Lettore(Lettore(pacchetto).atteso(0x30).unwrap());
+        msg.atteso(0x02).unwrap();
+        msg.atteso(0x04).unwrap();
+        let (tipo, pdu) = msg.leggi().unwrap();
+        let mut pdu = Lettore(pdu);
+        let id = decodifica_intero(pdu.atteso(0x02).unwrap()) as i32;
+        pdu.atteso(0x02).unwrap();
+        pdu.atteso(0x02).unwrap();
+        let mut lista = Lettore(pdu.atteso(0x30).unwrap());
+        let mut oids = Vec::new();
+        while !lista.0.is_empty() {
+            let mut vb = Lettore(lista.atteso(0x30).unwrap());
+            oids.push(decodifica_oid(vb.atteso(0x06).unwrap()));
+        }
+        (id, tipo == 0xA1, oids)
+    }
+
+    /// Agente SNMP finto su 127.0.0.1 che risponde da una tabella OID →
+    /// valore BER. GETNEXT dà la prima chiave maggiore (le walk scartano da
+    /// sole ciò che esce dalla base); OID ignoti → noSuchName come un agente
+    /// vero. Il thread muore dopo 5 s senza richieste: niente join nei test.
+    pub(crate) fn avvia_agente(tabella: BTreeMap<Vec<u32>, Vec<u8>>) -> u16 {
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let porta = sock.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut buf = vec![0u8; 65535];
+            while let Ok((n, peer)) = sock.recv_from(&mut buf) {
+                let (id, getnext, oids) = leggi_richiesta(&buf[..n]);
+                let voci: Option<Vec<_>> = oids
+                    .iter()
+                    .map(|o| {
+                        if getnext {
+                            tabella.range::<[u32], _>((Excluded(o.as_slice()), Unbounded)).next()
+                        } else {
+                            tabella.get_key_value(o)
+                        }
+                        .map(|(o, v)| (o.clone(), v.clone()))
+                    })
+                    .collect();
+                let r = match voci {
+                    Some(v) => risposta(id, 0, &v),
+                    None => risposta(id, 2, &[]),
+                };
+                let _ = sock.send_to(&r, peer);
+            }
+        });
+        porta
     }
 
     // --- codifica ---
