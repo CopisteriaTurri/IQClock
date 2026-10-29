@@ -20,18 +20,21 @@ pub enum Formato {
     PostScript,
     Tiff,
     Jpeg,
+    /// Convertito in TIFF prima dell'invio (vedi `png.rs`).
+    Png,
     Hpgl2,
 }
 
 impl Formato {
     /// Nome per `@PJL ENTER LANGUAGE`. TIFF e JPEG non hanno un nome documentato:
     /// per quelli non si manda ENTER e la stampante riconosce il formato da sola.
+    /// I PNG viaggiano come TIFF, quindi nemmeno loro hanno ENTER LANGUAGE.
     pub fn linguaggio_pjl(self) -> Option<&'static str> {
         match self {
             Formato::Pdf => Some("PDF"),
             Formato::PostScript => Some("POSTSCRIPT"),
             Formato::Hpgl2 => Some("HPGL2"),
-            Formato::Tiff | Formato::Jpeg => None,
+            Formato::Tiff | Formato::Jpeg | Formato::Png => None,
         }
     }
 
@@ -41,6 +44,7 @@ impl Formato {
             Formato::PostScript => "PostScript",
             Formato::Tiff => "TIFF",
             Formato::Jpeg => "JPEG",
+            Formato::Png => "PNG",
             Formato::Hpgl2 => "HP-GL/2",
         }
     }
@@ -153,11 +157,12 @@ pub fn chiusura(opz: &OpzioniJob) -> Vec<u8> {
 mod test {
     use super::*;
 
-    const FORMATI: [Formato; 5] = [
+    const FORMATI: [Formato; 6] = [
         Formato::Pdf,
         Formato::PostScript,
         Formato::Tiff,
         Formato::Jpeg,
+        Formato::Png,
         Formato::Hpgl2,
     ];
 
@@ -190,7 +195,7 @@ mod test {
             Formato::Pdf => s += "@PJL ENTER LANGUAGE=PDF\r\n",
             Formato::PostScript => s += "@PJL ENTER LANGUAGE=POSTSCRIPT\r\n",
             Formato::Hpgl2 => s += "@PJL ENTER LANGUAGE=HPGL2\r\n",
-            Formato::Tiff | Formato::Jpeg => {}
+            Formato::Tiff | Formato::Jpeg | Formato::Png => {}
         }
         s
     }
@@ -318,6 +323,7 @@ mod test {
         assert_eq!(Formato::Hpgl2.linguaggio_pjl(), Some("HPGL2"));
         assert_eq!(Formato::Tiff.linguaggio_pjl(), None);
         assert_eq!(Formato::Jpeg.linguaggio_pjl(), None);
+        assert_eq!(Formato::Png.linguaggio_pjl(), None);
     }
 
     #[test]

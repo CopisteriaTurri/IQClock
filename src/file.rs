@@ -7,13 +7,15 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::pjl::Formato;
+use crate::png;
 
 #[derive(Clone, Debug)]
 pub struct InfoFile {
     pub formato: Formato,
     pub byte: u64,
     pub pagine: usize,
-    /// Dimensioni della prima pagina in mm (per le immagini: supponendo 300 dpi).
+    /// Dimensioni della prima pagina in mm (per le immagini: dai DPI del PNG,
+    /// altrimenti supponendo 300 dpi).
     pub mm: Option<(f64, f64)>,
     /// Es. "3 pagine · 594 × 841 mm (A1)" oppure "4961 × 7016 px".
     pub dettagli: String,
@@ -40,10 +42,12 @@ pub fn riconosci(percorso: &Path) -> Result<Formato> {
         Formato::Tiff
     } else if testa.starts_with(&[0xFF, 0xD8, 0xFF]) {
         Formato::Jpeg
+    } else if testa.starts_with(png::FIRMA) {
+        Formato::Png
     } else if matches!(est.as_str(), "plt" | "hpgl" | "hpg" | "hp2" | "prn") {
         Formato::Hpgl2
     } else {
-        bail!("formato non supportato (servono PDF, PS, TIFF, JPEG o HP-GL/2)")
+        bail!("formato non supportato (servono PDF, PNG, PS, TIFF, JPEG o HP-GL/2)")
     })
 }
 
@@ -64,10 +68,12 @@ pub fn analizza(percorso: &Path) -> Result<InfoFile> {
             }
             Err(e) => info.dettagli = format!("PDF illeggibile: {e}"),
         },
-        Formato::Tiff | Formato::Jpeg => {
+        Formato::Tiff | Formato::Jpeg | Formato::Png => {
             if let Ok(d) = imagesize::size(percorso) {
-                let px_mm = 25.4 / DPI_IMMAGINI;
-                info.mm = Some((d.width as f64 * px_mm, d.height as f64 * px_mm));
+                // I PNG dichiarano i DPI nel chunk pHYs; per gli altri si presume.
+                let dichiarati = if formato == Formato::Png { png::dpi(percorso) } else { None };
+                let (dpi_x, dpi_y) = dichiarati.unwrap_or((DPI_IMMAGINI, DPI_IMMAGINI));
+                info.mm = Some((d.width as f64 * 25.4 / dpi_x, d.height as f64 * 25.4 / dpi_y));
                 info.dettagli = format!("{} × {} px", d.width, d.height);
             }
         }
@@ -115,7 +121,8 @@ fn dimensioni_pagina_mm(doc: &lopdf::Document, pagina: lopdf::ObjectId) -> Optio
         let Some(padre) = nodo.get(b"Parent").ok().and_then(|o| o.as_reference().ok()) else {
             break;
         };
-        nodo = doc.get_dictionary(padre).ok()?;
+        let Ok(padre) = doc.get_dictionary(padre) else { break };
+        nodo = padre;
     }
     let (l, a) = lati?;
     let pt_mm = 25.4 / 72.0;
@@ -253,7 +260,7 @@ mod test {
     #[test]
     fn riconosce_dai_byte_ignorando_l_estensione() {
         let dir = cartella("byte");
-        let casi: [(&str, &[u8], Option<Formato>); 8] = [
+        let casi: [(&str, &[u8], Option<Formato>); 9] = [
             ("a.pdf", b"%PDF-1.7\n", Some(Formato::Pdf)),
             ("b.pdf", b"%!PS-Adobe-3.0", Some(Formato::PostScript)),
             ("c.pdf", b"II*\0xxxx", Some(Formato::Tiff)),
@@ -262,6 +269,7 @@ mod test {
             ("f.plt", b"IN;SP1;", Some(Formato::Hpgl2)),
             ("g.txt", b"ciao", None),
             ("h.pdf", b"", None),
+            ("i.pdf", png::FIRMA, Some(Formato::Png)),
         ];
         for (nome, dati, atteso) in casi {
             let p = scrivi(&dir, nome, dati);
@@ -281,20 +289,15 @@ mod test {
     }
 
     #[test]
-    fn rifiuta_file_mancanti_e_png() {
+    fn rifiuta_file_mancanti_e_sconosciuti() {
         let dir = cartella("rifiuti");
         let mancante = dir.join("non-esiste.pdf");
         assert!(riconosci(&mancante).is_err());
 
-        // Il supporto PNG è la issue #15: per ora deve essere rifiutato con un
-        // messaggio che dica quali formati servono.
-        let png = dir.join("foto.png");
-        image::RgbImage::from_pixel(8, 8, image::Rgb([0, 0, 255]))
-            .save_with_format(&png, image::ImageFormat::Png)
-            .unwrap();
-        let err = riconosci(&png).unwrap_err().to_string();
+        let ignoto = scrivi(&dir, "dati.bin", b"\x00\x01\x02\x03");
+        let err = riconosci(&ignoto).unwrap_err().to_string();
         assert!(err.contains("formato non supportato"), "{err}");
-        assert!(analizza(&png).is_err());
+        assert!(analizza(&ignoto).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -404,6 +407,40 @@ mod test {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Riscrive il /Parent della prima pagina; `None` = la pagina stessa.
+    fn con_parent(dati: &[u8], padre: Option<lopdf::ObjectId>) -> Vec<u8> {
+        let mut doc = Document::load_mem(dati).unwrap();
+        let id = *doc.get_pages().values().next().unwrap();
+        let d = doc.get_object_mut(id).unwrap().as_dict_mut().unwrap();
+        d.set("Parent", Object::Reference(padre.unwrap_or(id)));
+        let mut out = Vec::new();
+        doc.save_to(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn pdf_parent_mancante_tiene_il_media_box_della_pagina() {
+        let dir = cartella("pdf-parent-rotto");
+        let dati = con_parent(&pdf(&[pagina(pt(210.0), pt(297.0))], None), Some((999, 0)));
+        let info = analizza_bytes(&dir, "rotto.pdf", &dati);
+        assert_eq!(info.dettagli, "1 pagina · 210 × 297 mm (A4)");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pdf_parent_ciclico_non_si_blocca() {
+        let dir = cartella("pdf-parent-ciclico");
+        let dati = con_parent(&pdf(&[pagina(pt(210.0), pt(297.0))], None), None);
+        let info = analizza_bytes(&dir, "ciclo.pdf", &dati);
+        assert_eq!(info.dettagli, "1 pagina · 210 × 297 mm (A4)");
+
+        let senza_media_box = PaginaTest { media_box: None, ruota: None };
+        let dati = con_parent(&pdf(&[senza_media_box], None), None);
+        let info = analizza_bytes(&dir, "ciclo-vuoto.pdf", &dati);
+        assert_eq!(info.mm, None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn pdf_multipagina_usa_la_prima() {
         let dir = cartella("pdf-pagine");
@@ -466,12 +503,13 @@ mod test {
     // ---- immagini e altri formati ----
 
     #[test]
-    fn immagini_jpeg_e_tiff() {
+    fn immagini_jpeg_tiff_e_png() {
         let dir = cartella("immagini");
         let rgb = image::RgbImage::from_pixel(40, 30, image::Rgb([10, 200, 10]));
         for (nome, formato, atteso) in [
             ("foto.jpg", image::ImageFormat::Jpeg, Formato::Jpeg),
             ("scansione.tif", image::ImageFormat::Tiff, Formato::Tiff),
+            ("foto.png", image::ImageFormat::Png, Formato::Png),
         ] {
             let p = dir.join(nome);
             rgb.save_with_format(&p, formato).unwrap();

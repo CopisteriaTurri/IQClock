@@ -400,9 +400,9 @@ mod test {
     // --- decodifica ---
 
     #[test]
-    fn decodifica_una_risposta_della_t2600() {
-        // Forma della GetResponse che la T2600 manda per hrPrinterStatus:
-        // request-id 7, nessun errore, INTEGER 3 (idle).
+    fn decodifica_get_response_hr_printer_status() {
+        // Scritta a mano (non è una cattura dalla T2600): GetResponse per
+        // hrPrinterStatus con request-id 7, nessun errore, INTEGER 3 (idle).
         let pacchetto = [
             0x30, 0x2A, 0x02, 0x01, 0x00, 0x04, 0x06, b'p', b'u', b'b', b'l', b'i', b'c', 0xA2, 0x1D,
             0x02, 0x01, 0x07, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x30, 0x12, 0x30, 0x10, 0x06, 0x0B,
