@@ -82,8 +82,10 @@ Il `prtMarkerSuppliesLevel` standard non è implementato dalla stampante.
   ruota il foglio quando così entra nel rotolo o consuma meno carta, e l'anteprima
   mostra già le pagine come usciranno. Il PJL non la controlla: provato il 29/10/2026,
   `@PJL SET AUTOROTATE=OFF` viene ignorato e `ON` non cambia niente.
-- Le immagini JPEG e TIFF sono misurate supponendo 300 dpi; per i PNG valgono quelli
-  dichiarati nel file.
+- Per le immagini si usano i DPI dichiarati dal file (EXIF/JFIF per JPEG, tag di
+  risoluzione per TIFF, chunk `pHYs` per PNG); se mancano o non sono plausibili
+  (0, 1, ecc.) si presumono 300 dpi. La lista indica i DPI usati e se sono presunti;
+  l'anteprima e le misure in mm seguono quegli stessi DPI.
 - Nessun controllo che il job sia stato effettivamente stampato: "inviato" vuol dire
   che la stampante ha ricevuto tutti i byte.
 

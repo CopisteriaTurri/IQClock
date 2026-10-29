@@ -1,7 +1,7 @@
 //! Riconoscimento dei file trascinati e informazioni per la lista.
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -14,16 +14,45 @@ pub struct InfoFile {
     pub formato: Formato,
     pub byte: u64,
     pub pagine: usize,
-    /// Dimensioni della prima pagina in mm (per le immagini: dai DPI del PNG,
-    /// altrimenti supponendo 300 dpi).
+    /// Dimensioni della prima pagina in mm (per le immagini: ricavate dai DPI
+    /// dichiarati dal file, o da quelli presunti se mancano).
     pub mm: Option<(f64, f64)>,
-    /// Es. "3 pagine · 594 × 841 mm (A1)" oppure "4961 × 7016 px".
+    /// DPI usati per le immagini e se sono presunti; `None` per gli altri formati.
+    pub risoluzione: Option<Risoluzione>,
+    /// Es. "3 pagine · 594 × 841 mm (A1)" oppure
+    /// "4961 × 7016 px · 300 dpi (presunti) · 420 × 594 mm (A2)".
     pub dettagli: String,
     /// Fogli A4 equivalenti delle pagine del PDF, arrotondati per eccesso:
     /// le pagine ISO valgono il loro formato (A3 = 2, A0 = 16, A5 = 0,5), le
     /// altre la loro area. `None` per gli altri formati o se le misure di una
     /// pagina non si leggono.
     pub fogli_a4: Option<u32>,
+}
+
+/// Risoluzione usata per un'immagine, in punti per pollice.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Risoluzione {
+    pub x: f64,
+    pub y: f64,
+    /// true se il file non dichiarava DPI utilizzabili e si sono usati quelli presunti.
+    pub presunta: bool,
+}
+
+impl Risoluzione {
+    /// "300 dpi (presunti)", "300 dpi" oppure "150 × 300 dpi".
+    pub fn etichetta(&self) -> String {
+        if self.presunta {
+            format!("{} dpi (presunti)", valore_dpi(self.x))
+        } else if (self.x - self.y).abs() < 0.5 {
+            format!("{} dpi", valore_dpi(self.x))
+        } else {
+            format!("{} × {} dpi", valore_dpi(self.x), valore_dpi(self.y))
+        }
+    }
+}
+
+fn valore_dpi(dpi: f64) -> String {
+    if (dpi - dpi.round()).abs() < 0.05 { format!("{dpi:.0}") } else { format!("{dpi:.1}") }
 }
 
 /// Risoluzione presunta delle immagini senza DPI noti, per l'anteprima sul rotolo.
@@ -62,8 +91,15 @@ pub fn riconosci(percorso: &Path) -> Result<Formato> {
 pub fn analizza(percorso: &Path) -> Result<InfoFile> {
     let formato = riconosci(percorso)?;
     let byte = std::fs::metadata(percorso)?.len();
-    let mut info =
-        InfoFile { formato, byte, pagine: 1, mm: None, dettagli: String::new(), fogli_a4: None };
+    let mut info = InfoFile {
+        formato,
+        byte,
+        pagine: 1,
+        mm: None,
+        risoluzione: None,
+        dettagli: String::new(),
+        fogli_a4: None,
+    };
     match formato {
         Formato::Pdf => match leggi_pdf(percorso) {
             Ok(pdf) => {
@@ -83,16 +119,201 @@ pub fn analizza(percorso: &Path) -> Result<InfoFile> {
         },
         Formato::Tiff | Formato::Jpeg | Formato::Png => {
             if let Ok(d) = imagesize::size(percorso) {
-                // I PNG dichiarano i DPI nel chunk pHYs; per gli altri si presume.
-                let dichiarati = if formato == Formato::Png { png::dpi(percorso) } else { None };
-                let (dpi_x, dpi_y) = dichiarati.unwrap_or((DPI_IMMAGINI, DPI_IMMAGINI));
-                info.mm = Some((d.width as f64 * 25.4 / dpi_x, d.height as f64 * 25.4 / dpi_y));
-                info.dettagli = format!("{} × {} px", d.width, d.height);
+                let (x, y, presunta) = match risoluzione_dichiarata(percorso, formato) {
+                    Some((x, y)) => (x, y, false),
+                    None => (DPI_IMMAGINI, DPI_IMMAGINI, true),
+                };
+                let risoluzione = Risoluzione { x, y, presunta };
+                let (l, a) = (d.width as f64 * 25.4 / x, d.height as f64 * 25.4 / y);
+                info.mm = Some((l, a));
+                info.dettagli = format!(
+                    "{} × {} px · {} · {l:.0} × {a:.0} mm{}",
+                    d.width,
+                    d.height,
+                    risoluzione.etichetta(),
+                    formato_iso(l, a)
+                );
+                info.risoluzione = Some(risoluzione);
             }
         }
         Formato::PostScript | Formato::Hpgl2 => {}
     }
     Ok(info)
+}
+
+/// DPI dichiarati dal file, ripuliti da valori assenti o assurdi (0, 1, ecc.).
+fn risoluzione_dichiarata(percorso: &Path, formato: Formato) -> Option<(f64, f64)> {
+    let (x, y) = match formato {
+        // Il PNG dichiara i DPI nel chunk pHYs.
+        Formato::Png => png::dpi(percorso)?,
+        Formato::Jpeg => dpi_jpeg(&mut BufReader::new(File::open(percorso).ok()?))?,
+        Formato::Tiff => risoluzione_tiff(&mut BufReader::new(File::open(percorso).ok()?))?,
+        _ => return None,
+    };
+    dpi_plausibili(x, y)
+}
+
+/// Scarta i DPI che non possono essere veri: 0, 1 e valori fuori scala.
+pub(crate) fn dpi_plausibili(x: f64, y: f64) -> Option<(f64, f64)> {
+    const MINIMO: f64 = 2.0;
+    const MASSIMO: f64 = 10_000.0;
+    ((MINIMO..=MASSIMO).contains(&x) && (MINIMO..=MASSIMO).contains(&y)).then_some((x, y))
+}
+
+/// DPI dichiarati da un JPEG: prima EXIF (APP1), poi JFIF (APP0).
+fn dpi_jpeg<R: Read + Seek>(r: &mut R) -> Option<(f64, f64)> {
+    if leggi(r, 2)? != [0xFF, 0xD8] {
+        return None;
+    }
+    let (mut exif, mut jfif) = (None, None);
+    // Se il file finisce o si rovina prima di SOS, valgono i DPI trovati fin lì.
+    while let Some((marcatore, dati)) = prossimo_app(r) {
+        if marcatore == 0xE0 {
+            jfif = jfif.or_else(|| dpi_jfif(&dati).and_then(|(x, y)| dpi_plausibili(x, y)));
+        } else if let Some(contenuto) = dati.strip_prefix(b"Exif\0\0") {
+            exif = exif.or_else(|| {
+                risoluzione_tiff(&mut Cursor::new(contenuto)).and_then(|(x, y)| dpi_plausibili(x, y))
+            });
+        }
+    }
+    exif.or(jfif)
+}
+
+/// Prossimo segmento APP0 o APP1 del JPEG, con i suoi dati; gli altri (ICC,
+/// XMP, Photoshop…, anche di molti KB) si saltano senza leggerli. `None` da SOS
+/// in poi, a fine file o su un marcatore rovinato.
+fn prossimo_app<R: Read + Seek>(r: &mut R) -> Option<(u8, Vec<u8>)> {
+    loop {
+        if leggi(r, 1)?[0] != 0xFF {
+            return None;
+        }
+        // Prima del marcatore possono esserci più 0xFF di riempimento.
+        let mut marcatore = leggi(r, 1)?[0];
+        while marcatore == 0xFF {
+            marcatore = leggi(r, 1)?[0];
+        }
+        match marcatore {
+            // Marcatori senza lunghezza.
+            0x01 | 0xD0..=0xD8 => continue,
+            // Da SOS in poi non ci sono più segmenti APPn.
+            0xDA | 0xD9 => return None,
+            _ => {}
+        }
+        let lunghezza = be16(&leggi(r, 2)?, 0)?;
+        if lunghezza < 2 {
+            return None;
+        }
+        let resto = usize::from(lunghezza - 2);
+        if matches!(marcatore, 0xE0 | 0xE1) {
+            return Some((marcatore, leggi(r, resto)?));
+        }
+        r.seek(SeekFrom::Current(resto as i64)).ok()?;
+    }
+}
+
+/// Densità JFIF (APP0): unità 1 = dpi, 2 = punti per cm, 0 = solo proporzioni.
+fn dpi_jfif(dati: &[u8]) -> Option<(f64, f64)> {
+    if !dati.starts_with(b"JFIF\0") {
+        return None;
+    }
+    let unita = *dati.get(7)?;
+    let x = be16(dati, 8)? as f64;
+    let y = be16(dati, 10)? as f64;
+    match unita {
+        1 => Some((x, y)),
+        2 => Some((x * 2.54, y * 2.54)),
+        _ => None,
+    }
+}
+
+/// XResolution/YResolution/ResolutionUnit dell'IFD0 di un TIFF (o dell'EXIF
+/// dentro un JPEG), convertite in dpi. Si legge solo quello che serve, saltando
+/// agli offset: chi scrive con libtiff (o col crate `tiff`) mette l'IFD0 dopo i
+/// dati dell'immagine, in fondo al file.
+fn risoluzione_tiff<R: Read + Seek>(r: &mut R) -> Option<(f64, f64)> {
+    let testa = leggi_a(r, 0, 8)?;
+    let ordine = match &testa[..2] {
+        b"II" => Ordine::Piccolo,
+        b"MM" => Ordine::Grande,
+        _ => return None,
+    };
+    if ordine.u16(&testa, 2)? != 42 {
+        return None;
+    }
+    let ifd = u64::from(ordine.u32(&testa, 4)?);
+    let voci = usize::from(ordine.u16(&leggi_a(r, ifd, 2)?, 0)?);
+    let tabella = leggi_a(r, ifd + 2, voci * 12)?;
+    let (mut x, mut y) = (None, None);
+    // Se manca, TIFF 6.0 presuppone i pollici.
+    let mut unita = 2u16;
+    for voce in tabella.as_chunks::<12>().0 {
+        let tag = ordine.u16(voce, 0)?;
+        let tipo = ordine.u16(voce, 2)?;
+        let valore = u64::from(ordine.u32(voce, 8)?);
+        match tag {
+            282 => x = razionale(r, ordine, tipo, valore),
+            283 => y = razionale(r, ordine, tipo, valore),
+            296 if tipo == 3 => unita = ordine.u16(voce, 8)?,
+            _ => {}
+        }
+    }
+    let fattore = match unita {
+        2 => 1.0,         // pollici
+        3 => 2.54,        // centimetri
+        _ => return None, // unità relativa: i valori non sono DPI
+    };
+    Some((x? * fattore, y? * fattore))
+}
+
+/// Valore RATIONAL (o SRATIONAL) puntato da una voce dell'IFD.
+fn razionale<R: Read + Seek>(r: &mut R, ordine: Ordine, tipo: u16, offset: u64) -> Option<f64> {
+    let b = leggi_a(r, offset, 8)?;
+    let (num, den) = (ordine.u32(&b, 0)?, ordine.u32(&b, 4)?);
+    let (num, den) = match tipo {
+        5 => (num as f64, den as f64),
+        10 => (num as i32 as f64, den as i32 as f64),
+        _ => return None,
+    };
+    (den != 0.0).then_some(num / den)
+}
+
+fn leggi<R: Read>(r: &mut R, n: usize) -> Option<Vec<u8>> {
+    let mut b = vec![0; n];
+    r.read_exact(&mut b).ok()?;
+    Some(b)
+}
+
+fn leggi_a<R: Read + Seek>(r: &mut R, offset: u64, n: usize) -> Option<Vec<u8>> {
+    r.seek(SeekFrom::Start(offset)).ok()?;
+    leggi(r, n)
+}
+
+fn be16(dati: &[u8], i: usize) -> Option<u16> {
+    Some(u16::from_be_bytes(dati.get(i..i + 2)?.try_into().ok()?))
+}
+
+#[derive(Clone, Copy)]
+enum Ordine {
+    Piccolo,
+    Grande,
+}
+
+impl Ordine {
+    fn u16(self, dati: &[u8], i: usize) -> Option<u16> {
+        let b: [u8; 2] = dati.get(i..i + 2)?.try_into().ok()?;
+        Some(match self {
+            Ordine::Piccolo => u16::from_le_bytes(b),
+            Ordine::Grande => u16::from_be_bytes(b),
+        })
+    }
+
+    fn u32(self, dati: &[u8], i: usize) -> Option<u32> {
+        let b: [u8; 4] = dati.get(i..i + 4)?.try_into().ok()?;
+        Some(match self {
+            Ordine::Piccolo => u32::from_le_bytes(b),
+            Ordine::Grande => u32::from_be_bytes(b),
+        })
+    }
 }
 
 /// Dati del PDF che servono alla lista e all'anteprima.
@@ -666,13 +887,192 @@ mod test {
             let info = analizza(&p).unwrap();
             assert_eq!(info.formato, atteso, "{nome}");
             assert_eq!(info.pagine, 1, "{nome}");
-            assert_eq!(info.dettagli, "40 × 30 px", "{nome}");
+            assert_eq!(info.dettagli, "40 × 30 px · 300 dpi (presunti) · 3 × 3 mm", "{nome}");
+            assert_eq!(
+                info.risoluzione,
+                Some(Risoluzione { x: 300.0, y: 300.0, presunta: true }),
+                "{nome}"
+            );
             assert_eq!(info.fogli_a4, None, "{nome}");
             let (l, a) = info.mm.unwrap();
             // Senza DPI noti si assume DPI_IMMAGINI (300).
             assert!((l - 40.0 * 25.4 / DPI_IMMAGINI).abs() < 0.01, "{nome}: {l}");
             assert!((a - 30.0 * 25.4 / DPI_IMMAGINI).abs() < 0.01, "{nome}: {a}");
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// TIFF minimo (little endian) con dimensioni e risoluzione nell'IFD0.
+    fn tiff_le(px_l: u32, px_a: u32, dpi_x: u32, dpi_y: u32, unita: u16) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"II");
+        v.extend_from_slice(&42u16.to_le_bytes());
+        v.extend_from_slice(&8u32.to_le_bytes()); // offset dell'IFD0
+        v.extend_from_slice(&5u16.to_le_bytes());
+        let mut voce = |tag: u16, tipo: u16, valore: u32| {
+            v.extend_from_slice(&tag.to_le_bytes());
+            v.extend_from_slice(&tipo.to_le_bytes());
+            v.extend_from_slice(&1u32.to_le_bytes());
+            v.extend_from_slice(&valore.to_le_bytes());
+        };
+        voce(256, 3, px_l); // ImageWidth
+        voce(257, 3, px_a); // ImageLength
+        voce(282, 5, 74); // XResolution: RATIONAL a 74
+        voce(283, 5, 82); // YResolution: RATIONAL a 82
+        voce(296, 3, u32::from(unita)); // ResolutionUnit
+        v.extend_from_slice(&0u32.to_le_bytes()); // nessun IFD successivo
+        v.extend_from_slice(&dpi_x.to_le_bytes());
+        v.extend_from_slice(&1u32.to_le_bytes());
+        v.extend_from_slice(&dpi_y.to_le_bytes());
+        v.extend_from_slice(&1u32.to_le_bytes());
+        v
+    }
+
+    /// JPEG minimo con un segmento JFIF.
+    fn jpeg_jfif(unita: u8, dpi_x: u16, dpi_y: u16) -> Vec<u8> {
+        let mut v = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        v.extend_from_slice(&16u16.to_be_bytes());
+        v.extend_from_slice(b"JFIF\0\x01\x02");
+        v.push(unita);
+        v.extend_from_slice(&dpi_x.to_be_bytes());
+        v.extend_from_slice(&dpi_y.to_be_bytes());
+        v.extend_from_slice(&[0, 0, 0xFF, 0xD9]); // miniatura 0 × 0, EOI
+        v
+    }
+
+    /// JPEG minimo con un segmento EXIF.
+    fn jpeg_exif(dpi: u32, unita: u16) -> Vec<u8> {
+        let tiff = tiff_le(300, 300, dpi, dpi, unita);
+        let mut app1 = b"Exif\0\0".to_vec();
+        app1.extend_from_slice(&tiff);
+        let mut v = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        v.extend_from_slice(&(app1.len() as u16 + 2).to_be_bytes());
+        v.extend_from_slice(&app1);
+        v.extend_from_slice(&[0xFF, 0xD9]);
+        v
+    }
+
+    #[test]
+    fn dpi_da_tiff() {
+        assert_eq!(risoluzione_tiff(&mut Cursor::new(tiff_le(300, 300, 300, 300, 2))), Some((300.0, 300.0)));
+    }
+
+    #[test]
+    fn dpi_tiff_in_centimetri() {
+        let (x, y) = risoluzione_tiff(&mut Cursor::new(tiff_le(300, 300, 118, 118, 3))).unwrap();
+        assert!((x - 299.72).abs() < 0.01 && (y - 299.72).abs() < 0.01);
+    }
+
+    #[test]
+    fn dpi_assenti_o_assurdi() {
+        // Unità 1 = solo proporzioni: non sono DPI.
+        assert_eq!(risoluzione_tiff(&mut Cursor::new(tiff_le(300, 300, 300, 300, 1))), None);
+        assert_eq!(dpi_plausibili(0.0, 0.0), None);
+        assert_eq!(dpi_plausibili(1.0, 1.0), None);
+        assert_eq!(dpi_plausibili(300.0, 300.0), Some((300.0, 300.0)));
+    }
+
+    #[test]
+    fn dpi_da_jfif() {
+        assert_eq!(dpi_jpeg(&mut Cursor::new(jpeg_jfif(1, 300, 300))), Some((300.0, 300.0)));
+        let (x, y) = dpi_jpeg(&mut Cursor::new(jpeg_jfif(2, 118, 118))).unwrap();
+        assert!((x - 299.72).abs() < 0.01 && (y - 299.72).abs() < 0.01);
+        // Unità 0: solo rapporto d'aspetto, si ricade sui 300 presunti.
+        assert_eq!(dpi_jpeg(&mut Cursor::new(jpeg_jfif(0, 1, 1))), None);
+    }
+
+    #[test]
+    fn dpi_da_exif() {
+        assert_eq!(dpi_jpeg(&mut Cursor::new(jpeg_exif(150, 2))), Some((150.0, 150.0)));
+    }
+
+    #[test]
+    fn dpi_da_exif_prima_di_un_icc_grande() {
+        // Un profilo ICC CMYK (FOGRA39 ≈ 650 KB) va in tanti APP2 da 64 KB dopo
+        // l'EXIF: contano i DPI dell'EXIF, anche se il file poi è troncato.
+        let mut v = jpeg_exif(150, 2);
+        let eoi = v.split_off(v.len() - 2);
+        for _ in 0..10 {
+            v.extend_from_slice(&[0xFF, 0xE2]);
+            v.extend_from_slice(&65_000u16.to_be_bytes());
+            v.extend_from_slice(&[0; 64_998]);
+        }
+        v.extend_from_slice(&eoi);
+        assert_eq!(dpi_jpeg(&mut Cursor::new(v.clone())), Some((150.0, 150.0)));
+        v.truncate(300 * 1024);
+        assert_eq!(dpi_jpeg(&mut Cursor::new(v)), Some((150.0, 150.0)));
+    }
+
+    #[test]
+    fn dpi_da_tiff_con_ifd_in_fondo() {
+        // Il crate `tiff` (come libtiff) scrive l'IFD0 dopo i dati, qui a ~360 KB.
+        use tiff::encoder::{Rational, TiffEncoder, colortype};
+        let dir = cartella("tiff-ifd-in-fondo");
+        let p = dir.join("grande.tif");
+        let mut enc = TiffEncoder::new(File::create(&p).unwrap()).unwrap();
+        let mut img = enc.new_image::<colortype::RGB8>(400, 300).unwrap();
+        img.resolution_unit(tiff::tags::ResolutionUnit::Inch);
+        img.x_resolution(Rational { n: 150, d: 1 });
+        img.y_resolution(Rational { n: 150, d: 1 });
+        img.write_data(&vec![128u8; 400 * 300 * 3]).unwrap();
+        let info = analizza(&p).unwrap();
+        assert_eq!(info.risoluzione, Some(Risoluzione { x: 150.0, y: 150.0, presunta: false }));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn etichette_dpi() {
+        let r = |x, y, presunta| Risoluzione { x, y, presunta };
+        assert_eq!(r(300.0, 300.0, true).etichetta(), "300 dpi (presunti)");
+        assert_eq!(r(300.0, 300.0, false).etichetta(), "300 dpi");
+        assert_eq!(r(150.0, 300.0, false).etichetta(), "150 × 300 dpi");
+    }
+
+    #[test]
+    fn analizza_usa_i_dpi_del_file() {
+        let dir = cartella("dpi-file");
+
+        // 300 × 150 px a 150 dpi = 50,8 × 25,4 mm.
+        let info = analizza_bytes(&dir, "dichiarati.tif", &tiff_le(300, 150, 150, 150, 2));
+        assert_eq!(info.risoluzione, Some(Risoluzione { x: 150.0, y: 150.0, presunta: false }));
+        let (l, a) = info.mm.unwrap();
+        assert!((l - 50.8).abs() < 0.1 && (a - 25.4).abs() < 0.1);
+        assert!(info.dettagli.contains("150 dpi"), "{}", info.dettagli);
+
+        // Unità relativa: DPI assenti, si usano i 300 presunti.
+        let info = analizza_bytes(&dir, "presunti.tif", &tiff_le(300, 150, 300, 300, 1));
+        assert_eq!(info.risoluzione, Some(Risoluzione { x: 300.0, y: 300.0, presunta: true }));
+        let (l, a) = info.mm.unwrap();
+        assert!((l - 25.4).abs() < 0.1 && (a - 12.7).abs() < 0.1);
+        assert!(info.dettagli.contains("300 dpi (presunti)"), "{}", info.dettagli);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn analizza_usa_i_phys_del_png() {
+        let dir = cartella("png-phys");
+        let png = {
+            let p = dir.join("foto.png");
+            image::RgbImage::from_pixel(300, 150, image::Rgb([1, 2, 3]))
+                .save_with_format(&p, image::ImageFormat::Png)
+                .unwrap();
+            std::fs::read(&p).unwrap()
+        };
+
+        // 11811 px/m ≈ 300 dpi: 300 × 150 px = 25,4 × 12,7 mm.
+        let p = scrivi(&dir, "300.png", &png::test::con_phys(&png, 11811));
+        let info = analizza(&p).unwrap();
+        let r = info.risoluzione.unwrap();
+        assert!(!r.presunta && (r.x - 300.0).abs() < 0.01 && (r.y - 300.0).abs() < 0.01);
+        let (l, a) = info.mm.unwrap();
+        assert!((l - 25.4).abs() < 0.1 && (a - 12.7).abs() < 0.1, "{l} × {a}");
+
+        // pHYs assurdo (1 px/m): si ricade sui 300 presunti.
+        let p = scrivi(&dir, "assurdo.png", &png::test::con_phys(&png, 1));
+        let info = analizza(&p).unwrap();
+        assert_eq!(info.risoluzione, Some(Risoluzione { x: 300.0, y: 300.0, presunta: true }));
+
         let _ = std::fs::remove_dir_all(dir);
     }
 

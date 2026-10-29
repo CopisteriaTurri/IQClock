@@ -435,6 +435,10 @@ impl App {
                             didascalia.push_str(" · 90°");
                         }
                         ui.label(RichText::new(didascalia).small());
+                        if let Some(r) = &d.info.risoluzione {
+                            let testo = RichText::new(r.etichetta()).small();
+                            ui.label(if r.presunta { testo.color(ARANCIO) } else { testo });
+                        }
                         if let Some(f) = d.info.fogli_a4 {
                             ui.label(RichText::new(file::etichetta_fogli_a4(f)).small().color(Color32::from_gray(90)));
                         }
