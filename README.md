@@ -72,7 +72,11 @@ Il `prtMarkerSuppliesLevel` standard non è implementato dalla stampante.
 
 - L'anteprima mostra le prime 4 pagine (PDF con pdfium, JPEG, TIFF e PNG); PostScript
   e HP-GL/2 restano senza anteprima.
-- Niente nesting, ridimensionamento o rotazione automatica: decide la stampante.
+- Niente nesting o ridimensionamento: decide la stampante.
+- La rotazione di 90° la decide la stampante (impostazione del pannello): la T2600
+  ruota il foglio quando così entra nel rotolo o consuma meno carta, e l'anteprima
+  mostra già le pagine come usciranno. Il PJL non la controlla: provato il 29/10/2026,
+  `@PJL SET AUTOROTATE=OFF` viene ignorato e `ON` non cambia niente.
 - Le immagini JPEG e TIFF sono misurate supponendo 300 dpi; per i PNG valgono quelli
   dichiarati nel file.
 - Nessun controllo che il job sia stato effettivamente stampato: "inviato" vuol dire
