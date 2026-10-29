@@ -387,6 +387,14 @@ impl App {
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.add_space(10.0);
             let pronti = self.documenti.iter().filter(|d| !matches!(d.stato, StatoJob::InInvio(_) | StatoJob::Inviato)).count();
+            // Totale del lavoro: le copie moltiplicano i fogli; se un file non
+            // ha un conteggio (es. HP-GL/2) il totale non è affidabile e si tace.
+            let fogli = self
+                .documenti
+                .iter()
+                .filter(|d| !matches!(d.stato, StatoJob::InInvio(_) | StatoJob::Inviato))
+                .map(|d| d.info.fogli_a4.map(|f| f * d.copie))
+                .sum::<Option<u32>>();
             let pulsante = egui::Button::new(RichText::new("Stampa").color(Color32::WHITE).size(16.0))
                 .fill(BLU_HP)
                 .corner_radius(CornerRadius::same(16))
@@ -396,6 +404,11 @@ impl App {
             }
             if pronti > 1 {
                 ui.label(format!("{pronti} file da stampare"));
+            }
+            if let Some(f) = fogli
+                && f > 0
+            {
+                ui.label(format!("Totale: {}", file::etichetta_fogli_a4(f)));
             }
         });
     }
@@ -422,6 +435,9 @@ impl App {
                             didascalia.push_str(" · 90°");
                         }
                         ui.label(RichText::new(didascalia).small());
+                        if let Some(f) = d.info.fogli_a4 {
+                            ui.label(RichText::new(file::etichetta_fogli_a4(f)).small().color(Color32::from_gray(90)));
+                        }
                         match &d.stato {
                             StatoJob::Pronto => {}
                             StatoJob::InInvio(f) => {
@@ -519,6 +535,9 @@ impl App {
         }
 
         let mut nota = format!("{} — {}", d.nome, d.info.dettagli);
+        if let Some(f) = d.info.fogli_a4 {
+            nota.push_str(&format!(" · {}", file::etichetta_fogli_a4(f)));
+        }
         if d.info.pagine > pagine_visibili {
             nota.push_str(&format!(" (mostrate {pagine_visibili})"));
         }

@@ -24,6 +24,11 @@ dei rispettivi proprietari e qui compaiono solo per indicare la compatibilità. 
 Le impostazioni (IP, porta, larghezza rotolo) stanno in `%APPDATA%\iqclock\config.txt`.
 Di default: `192.168.10.72:9100`, rotolo 36".
 
+Per i PDF la lista mostra anche i fogli A4 equivalenti: le pagine ISO valgono il loro
+formato (A3 = 2 fogli, A0 = 16, A5 = mezzo), le altre la loro area; il conteggio è
+arrotondato per eccesso e nel totale del lavoro viene moltiplicato per le copie. Il
+fronte/retro dimezza i fogli, ma la stampa fronte/retro non è ancora supportata.
+
 ## Cosa viene mandato alla stampante
 
 ```

@@ -19,10 +19,18 @@ pub struct InfoFile {
     pub mm: Option<(f64, f64)>,
     /// Es. "3 pagine · 594 × 841 mm (A1)" oppure "4961 × 7016 px".
     pub dettagli: String,
+    /// Fogli A4 equivalenti delle pagine del PDF, arrotondati per eccesso:
+    /// le pagine ISO valgono il loro formato (A3 = 2, A0 = 16, A5 = 0,5), le
+    /// altre la loro area. `None` per gli altri formati o se le misure di una
+    /// pagina non si leggono.
+    pub fogli_a4: Option<u32>,
 }
 
 /// Risoluzione presunta delle immagini senza DPI noti, per l'anteprima sul rotolo.
 pub const DPI_IMMAGINI: f64 = 300.0;
+
+/// Area di un foglio A4 in mm².
+const AREA_A4_MM2: f64 = 210.0 * 297.0;
 
 pub fn riconosci(percorso: &Path) -> Result<Formato> {
     let mut testa = [0u8; 8];
@@ -54,15 +62,20 @@ pub fn riconosci(percorso: &Path) -> Result<Formato> {
 pub fn analizza(percorso: &Path) -> Result<InfoFile> {
     let formato = riconosci(percorso)?;
     let byte = std::fs::metadata(percorso)?.len();
-    let mut info = InfoFile { formato, byte, pagine: 1, mm: None, dettagli: String::new() };
+    let mut info =
+        InfoFile { formato, byte, pagine: 1, mm: None, dettagli: String::new(), fogli_a4: None };
     match formato {
         Formato::Pdf => match leggi_pdf(percorso) {
-            Ok((pagine, mm)) => {
-                info.pagine = pagine;
-                info.mm = mm;
-                info.dettagli =
-                    if pagine == 1 { "1 pagina".to_string() } else { format!("{pagine} pagine") };
-                if let Some((l, a)) = mm {
+            Ok(pdf) => {
+                info.pagine = pdf.pagine;
+                info.mm = pdf.mm;
+                info.fogli_a4 = pdf.fogli_a4;
+                info.dettagli = if pdf.pagine == 1 {
+                    "1 pagina".to_string()
+                } else {
+                    format!("{} pagine", pdf.pagine)
+                };
+                if let Some((l, a)) = pdf.mm {
                     info.dettagli.push_str(&format!(" · {l:.0} × {a:.0} mm{}", formato_iso(l, a)));
                 }
             }
@@ -82,15 +95,81 @@ pub fn analizza(percorso: &Path) -> Result<InfoFile> {
     Ok(info)
 }
 
-/// Numero di pagine e dimensioni della prima pagina.
-fn leggi_pdf(percorso: &Path) -> Result<(usize, Option<(f64, f64)>)> {
+/// Dati del PDF che servono alla lista e all'anteprima.
+struct Pdf {
+    pagine: usize,
+    /// Dimensioni della prima pagina.
+    mm: Option<(f64, f64)>,
+    fogli_a4: Option<u32>,
+}
+
+fn leggi_pdf(percorso: &Path) -> Result<Pdf> {
     let doc = lopdf::Document::load(percorso).context("apertura")?;
     let pagine = doc.get_pages();
     if pagine.is_empty() && doc.is_encrypted() {
         bail!("cifrato (serve la password)");
     }
-    let mm = pagine.values().next().and_then(|&id| dimensioni_pagina_mm(&doc, id));
-    Ok((pagine.len(), mm))
+    let mut mm = None;
+    let mut misure = Vec::with_capacity(pagine.len());
+    let mut tutte_note = true;
+    for (n, &id) in pagine.values().enumerate() {
+        let pagina = dimensioni_pagina_mm(&doc, id);
+        if n == 0 {
+            mm = pagina;
+        }
+        match pagina {
+            Some(m) => misure.push(m),
+            None => tutte_note = false,
+        }
+    }
+    // Basta una pagina senza misure per rendere il conto inaffidabile.
+    let fogli_a4 = (tutte_note && !misure.is_empty()).then(|| conta_fogli_a4(&misure, false));
+    Ok(Pdf { pagine: pagine.len(), mm, fogli_a4 })
+}
+
+/// Formati ISO A: nome, lati in mm (corto e lungo) e fogli A4 equivalenti.
+const ISO: [(&str, f64, f64, f64); 6] = [
+    ("A0", 841.0, 1189.0, 16.0),
+    ("A1", 594.0, 841.0, 8.0),
+    ("A2", 420.0, 594.0, 4.0),
+    ("A3", 297.0, 420.0, 2.0),
+    ("A4", 210.0, 297.0, 1.0),
+    ("A5", 148.0, 210.0, 0.5),
+];
+
+/// Formato ISO A corrispondente alle misure (2 mm di tolleranza), con i suoi
+/// fogli A4 equivalenti.
+fn iso(l: f64, a: f64) -> Option<(&'static str, f64)> {
+    let (corto, lungo) = if l < a { (l, a) } else { (a, l) };
+    ISO.iter()
+        .find(|(_, c, g, _)| (corto - c).abs() < 2.0 && (lungo - g).abs() < 2.0)
+        .map(|(n, _, _, fogli)| (*n, *fogli))
+}
+
+/// Fogli A4 che servono per le pagine date, in mm. Le pagine ISO valgono il
+/// loro formato nominale, le altre la loro area divisa per quella di un A4
+/// (arrotondata al mezzo foglio più vicino, perché una pagina appena fuori
+/// formato non deve raddoppiare il conto). Con `fronte_retro` due pagine
+/// stanno su un foglio. Il totale è arrotondato per eccesso: mezzo foglio è
+/// comunque un foglio da prendere.
+pub fn conta_fogli_a4(pagine_mm: &[(f64, f64)], fronte_retro: bool) -> u32 {
+    let mut fogli = 0.0;
+    for &(l, a) in pagine_mm {
+        fogli += match iso(l, a) {
+            Some((_, equivalenti)) => equivalenti,
+            None => (l * a / AREA_A4_MM2 * 2.0).round() / 2.0,
+        };
+    }
+    if fronte_retro {
+        fogli /= 2.0;
+    }
+    // Il rumore dei float non deve trasformare 3 in 4.
+    (fogli - 1e-9).ceil().max(0.0) as u32
+}
+
+/// "1 foglio A4" oppure "3 fogli A4".
+pub fn etichetta_fogli_a4(fogli: u32) -> String {
+    if fogli == 1 { "1 foglio A4".into() } else { format!("{fogli} fogli A4") }
 }
 
 /// MediaBox e /Rotate (entrambi ereditabili) in mm, risalendo l'albero delle
@@ -132,19 +211,7 @@ fn dimensioni_pagina_mm(doc: &lopdf::Document, pagina: lopdf::ObjectId) -> Optio
 
 /// " (A1)" se le misure corrispondono a un formato ISO A, con 2 mm di tolleranza.
 fn formato_iso(l: f64, a: f64) -> String {
-    const ISO: [(&str, f64, f64); 6] = [
-        ("A0", 841.0, 1189.0),
-        ("A1", 594.0, 841.0),
-        ("A2", 420.0, 594.0),
-        ("A3", 297.0, 420.0),
-        ("A4", 210.0, 297.0),
-        ("A5", 148.0, 210.0),
-    ];
-    let (corto, lungo) = if l < a { (l, a) } else { (a, l) };
-    ISO.iter()
-        .find(|(_, c, g)| (corto - c).abs() < 2.0 && (lungo - g).abs() < 2.0)
-        .map(|(n, ..)| format!(" ({n})"))
-        .unwrap_or_default()
+    iso(l, a).map(|(n, _)| format!(" ({n})")).unwrap_or_default()
 }
 
 pub fn dimensione_leggibile(byte: u64) -> String {
@@ -310,6 +377,7 @@ mod test {
         assert_eq!(info.formato, Formato::Pdf);
         assert_eq!(info.pagine, 1);
         assert_eq!(info.dettagli, "1 pagina · 210 × 297 mm (A4)");
+        assert_eq!(info.fogli_a4, Some(1));
         let (l, a) = info.mm.unwrap();
         assert!((l - 210.0).abs() < 0.5 && (a - 297.0).abs() < 0.5, "{l} × {a}");
         let _ = std::fs::remove_dir_all(dir);
@@ -330,6 +398,15 @@ mod test {
             let p = scrivi(&dir, &format!("{nome}.pdf"), &pdf(&[pagina(pt(l), pt(a))], None));
             let info = analizza(&p).unwrap();
             assert_eq!(info.dettagli, format!("1 pagina · {l:.0} × {a:.0} mm ({nome})"), "{nome}");
+            let fogli = match nome {
+                "A0" => 16,
+                "A1" => 8,
+                "A2" => 4,
+                "A3" => 2,
+                "A4" | "A5" => 1,
+                _ => unreachable!(),
+            };
+            assert_eq!(info.fogli_a4, Some(fogli), "{nome}");
         }
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -350,6 +427,7 @@ mod test {
         p.ruota = Some(90);
         let info = analizza_bytes(&dir, "ruotato.pdf", &pdf(&[p], None));
         assert_eq!(info.dettagli, "1 pagina · 297 × 210 mm (A4)");
+        assert_eq!(info.fogli_a4, Some(1));
 
         // 180° non scambia le misure.
         let mut dritto = pagina(pt(210.0), pt(297.0));
@@ -438,6 +516,8 @@ mod test {
         let dati = con_parent(&pdf(&[senza_media_box], None), None);
         let info = analizza_bytes(&dir, "ciclo-vuoto.pdf", &dati);
         assert_eq!(info.mm, None);
+        // Senza le misure di una pagina il conteggio dei fogli non è affidabile.
+        assert_eq!(info.fogli_a4, None);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -452,6 +532,8 @@ mod test {
         let info = analizza_bytes(&dir, "tre.pdf", &pdf(&pagine, None));
         assert_eq!(info.pagine, 3);
         assert_eq!(info.dettagli, "3 pagine · 594 × 841 mm (A1)");
+        // A1 (8) + A4 (1) + A2 (4).
+        assert_eq!(info.fogli_a4, Some(13));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -462,6 +544,7 @@ mod test {
         assert_eq!(info.pagine, 0);
         assert_eq!(info.mm, None);
         assert_eq!(info.dettagli, "0 pagine");
+        assert_eq!(info.fogli_a4, None);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -472,6 +555,7 @@ mod test {
         assert!(info.dettagli.starts_with("PDF illeggibile: "), "{}", info.dettagli);
         assert_eq!(info.pagine, 1);
         assert_eq!(info.mm, None);
+        assert_eq!(info.fogli_a4, None);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -497,7 +581,72 @@ mod test {
         // mostrare "0 pagine".
         assert_eq!(info.dettagli, "PDF illeggibile: cifrato (serve la password)");
         assert_eq!(info.mm, None);
+        assert_eq!(info.fogli_a4, None);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ---- fogli A4 ----
+
+    #[test]
+    fn pdf_multipagina_conta_i_fogli_a4() {
+        let dir = cartella("pdf-fogli-a4");
+        let tre_a4 = [pagina(pt(210.0), pt(297.0)); 3];
+        let info = analizza_bytes(&dir, "tre-a4.pdf", &pdf(&tre_a4, None));
+        assert_eq!(info.fogli_a4, Some(3));
+
+        // A3 (2) + A1 (8) + A5 (mezzo) = 10,5 → 11 fogli.
+        let miste = [
+            pagina(pt(297.0), pt(420.0)),
+            pagina(pt(594.0), pt(841.0)),
+            pagina(pt(148.0), pt(210.0)),
+        ];
+        let info = analizza_bytes(&dir, "miste.pdf", &pdf(&miste, None));
+        assert_eq!(info.pagine, 3);
+        assert_eq!(info.fogli_a4, Some(11));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pdf_fuori_formato_conta_per_area() {
+        let dir = cartella("pdf-fogli-area");
+        // 420 × 420 mm = 2,83 fogli A4, arrotondati a 3; con due A4 fanno 5.
+        let pagine = [
+            pagina(pt(420.0), pt(420.0)),
+            pagina(pt(210.0), pt(297.0)),
+            pagina(pt(210.0), pt(297.0)),
+        ];
+        let info = analizza_bytes(&dir, "area.pdf", &pdf(&pagine, None));
+        assert_eq!(info.fogli_a4, Some(5));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn misure_appena_fuori_formato_non_gonfiano_il_conteggio() {
+        // 2 mm oltre l'A4: un solo foglio, non due.
+        assert_eq!(conta_fogli_a4(&[(212.0, 299.0)], false), 1);
+        assert_eq!(conta_fogli_a4(&[(210.0, 297.0)], false), 1);
+        // Sensibilmente più grande: due fogli.
+        assert_eq!(conta_fogli_a4(&[(240.0, 340.0)], false), 2);
+        assert_eq!(conta_fogli_a4(&[], false), 0);
+    }
+
+    #[test]
+    fn fronte_retro_mette_due_pagine_per_foglio() {
+        assert_eq!(conta_fogli_a4(&[(210.0, 297.0); 4], false), 4);
+        assert_eq!(conta_fogli_a4(&[(210.0, 297.0); 4], true), 2);
+        // Numero dispari: l'ultima pagina prende comunque un foglio.
+        assert_eq!(conta_fogli_a4(&[(210.0, 297.0); 3], true), 2);
+        // A3 + A1 = 10 fogli a faccia singola, 5 fronte/retro.
+        let grandi = [(297.0, 420.0), (594.0, 841.0)];
+        assert_eq!(conta_fogli_a4(&grandi, false), 10);
+        assert_eq!(conta_fogli_a4(&grandi, true), 5);
+    }
+
+    #[test]
+    fn etichetta_dei_fogli() {
+        assert_eq!(etichetta_fogli_a4(1), "1 foglio A4");
+        assert_eq!(etichetta_fogli_a4(0), "0 fogli A4");
+        assert_eq!(etichetta_fogli_a4(12), "12 fogli A4");
     }
 
     // ---- immagini e altri formati ----
@@ -518,6 +667,7 @@ mod test {
             assert_eq!(info.formato, atteso, "{nome}");
             assert_eq!(info.pagine, 1, "{nome}");
             assert_eq!(info.dettagli, "40 × 30 px", "{nome}");
+            assert_eq!(info.fogli_a4, None, "{nome}");
             let (l, a) = info.mm.unwrap();
             // Senza DPI noti si assume DPI_IMMAGINI (300).
             assert!((l - 40.0 * 25.4 / DPI_IMMAGINI).abs() < 0.01, "{nome}: {l}");
@@ -546,6 +696,7 @@ mod test {
         assert_eq!(info.formato, Formato::Hpgl2);
         assert_eq!(info.pagine, 1);
         assert_eq!(info.mm, None);
+        assert_eq!(info.fogli_a4, None);
         assert!(info.dettagli.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
