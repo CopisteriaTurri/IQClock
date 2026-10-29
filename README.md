@@ -87,6 +87,10 @@ cargo build --release --target x86_64-pc-windows-gnu   # Windows (serve mingw64-
 cargo test
 ```
 
+Le icone in `assets/` si rigenerano con `python3 genera-icona.py` (serve Pillow) e sono
+in git: `iqclock.png` è quella della finestra e della taskbar, `iqclock.ico` la incorpora
+`build.rs` nell'exe Windows (con versione e descrizione del file).
+
 pdfium viene da [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries),
 release `chromium/7881`: è la versione dell'API per cui è compilato `pdfium-render` 0.9
 (feature `pdfium_latest`). Aggiornando il crate va aggiornata anche `VERSIONE` nello script.

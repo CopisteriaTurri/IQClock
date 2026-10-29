@@ -41,20 +41,31 @@ fn main() -> Result<()> {
 
 fn avvia_gui(file: Vec<PathBuf>) -> Result<()> {
     let config = Config::carica();
-    let opzioni = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("IQClock")
-            .with_inner_size([1200.0, 760.0])
-            .with_min_inner_size([800.0, 500.0])
-            .with_drag_and_drop(true),
-        ..Default::default()
-    };
+    let mut finestra = eframe::egui::ViewportBuilder::default()
+        .with_title("IQClock")
+        .with_inner_size([1200.0, 760.0])
+        .with_min_inner_size([800.0, 500.0])
+        .with_drag_and_drop(true);
+    if let Some(icona) = icona_finestra() {
+        finestra = finestra.with_icon(icona);
+    }
+    let opzioni = eframe::NativeOptions { viewport: finestra, ..Default::default() };
     eframe::run_native(
         "IQClock",
         opzioni,
         Box::new(move |cc| Ok(Box::new(gui::App::new(cc, config, file)))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Icona della finestra e della taskbar: la stessa immagine che `build.rs`
+/// incorpora nell'exe come `.ico`, così le due non divergono.
+fn icona_finestra() -> Option<eframe::egui::IconData> {
+    let img = image::load_from_memory(include_bytes!("../assets/iqclock.png"))
+        .ok()?
+        .to_rgba8();
+    let (width, height) = img.dimensions();
+    Some(eframe::egui::IconData { rgba: img.into_raw(), width, height })
 }
 
 /// Toglie `--nome valore` dagli argomenti e restituisce il valore.
