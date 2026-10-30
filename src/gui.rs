@@ -26,11 +26,27 @@ const SEZIONE: &str = "Sezione";
 const AZIONE: &str = "Azione";
 const RICHIAMO: &str = "Richiamo";
 const RILASCIO: &str = "Rilascio";
+/// Famiglia del grassetto vero (in egui `.strong()` cambia solo il colore).
+const GRASSETTO: &str = "Grassetto";
 
 /// Tutte le dimensioni del testo, in un posto solo: in giro per il codice si
 /// usano solo gli stili (`TextStyle`), mai valori fissi.
 fn configura_stile(ctx: &egui::Context) {
     use FontFamily::{Monospace, Proportional};
+    let mut font = egui::FontDefinitions::default();
+    for (nome, dati) in [
+        ("NotoSans-Regular", &include_bytes!("../assets/font/NotoSans-Regular.ttf")[..]),
+        ("NotoSans-Bold", &include_bytes!("../assets/font/NotoSans-Bold.ttf")[..]),
+    ] {
+        font.font_data.insert(nome.into(), egui::FontData::from_static(dati).into());
+    }
+    // I font di default restano dopo, per i simboli (▸, ✓, …) che Noto Sans non ha.
+    let ripiego = font.families[&Proportional].clone();
+    font.families.get_mut(&Proportional).unwrap().insert(0, "NotoSans-Regular".into());
+    let mut grassetto = vec!["NotoSans-Bold".to_string()];
+    grassetto.extend(ripiego);
+    font.families.insert(FontFamily::Name(GRASSETTO.into()), grassetto);
+    ctx.set_fonts(font);
     ctx.all_styles_mut(|s| {
         s.text_styles = [
             (TextStyle::Small, FontId::new(11.5, Proportional)),
@@ -39,9 +55,9 @@ fn configura_stile(ctx: &egui::Context) {
             (TextStyle::Heading, FontId::new(20.0, Proportional)),
             (TextStyle::Monospace, FontId::new(13.0, Monospace)),
             // Intestazioni di sezione (STAMPANTE, CARTA, …).
-            (TextStyle::Name(SEZIONE.into()), FontId::new(12.0, Proportional)),
+            (TextStyle::Name(SEZIONE.into()), FontId::new(12.0, FontFamily::Name(GRASSETTO.into()))),
             // Pulsante Stampa.
-            (TextStyle::Name(AZIONE.into()), FontId::new(17.0, Proportional)),
+            (TextStyle::Name(AZIONE.into()), FontId::new(17.0, FontFamily::Name(GRASSETTO.into()))),
             // Invito ad aggiungere file nell'anteprima vuota.
             (TextStyle::Name(RICHIAMO.into()), FontId::new(20.0, Proportional)),
             // Sovrimpressione mentre si trascinano file.
@@ -595,14 +611,17 @@ fn barra_inchiostro(ui: &mut egui::Ui, c: &Cartuccia) {
     };
     ui.horizontal(|ui| {
         let nome = c.colore.unwrap_or(&c.nome);
-        ui.add_sized([100.0, ui.text_style_height(&TextStyle::Small)], egui::Label::new(RichText::new(nome).small()).truncate())
-            .on_hover_text(&c.nome);
-        let (r, _) = ui.allocate_exact_size(Vec2::new(90.0, 8.0), Sense::hover());
+        let dim = Vec2::new(120.0, ui.text_style_height(&TextStyle::Body));
+        ui.allocate_ui_with_layout(dim, Layout::left_to_right(Align::Center), |ui| {
+            ui.set_min_width(dim.x);
+            ui.add(egui::Label::new(nome).truncate()).on_hover_text(&c.nome);
+        });
+        let (r, _) = ui.allocate_exact_size(Vec2::new(70.0, 10.0), Sense::hover());
         ui.painter().rect_filled(r, 2.0, Color32::from_gray(225));
         if let Some(p) = c.percentuale {
             let pieno = Rect::from_min_size(r.min, Vec2::new(r.width() * p as f32 / 100.0, r.height()));
             ui.painter().rect_filled(pieno, 2.0, colore);
-            let testo = RichText::new(format!("{p}%")).small();
+            let testo = RichText::new(format!("{p}%"));
             ui.label(if p < 15 { testo.color(ARANCIO).strong() } else { testo });
         }
     });
