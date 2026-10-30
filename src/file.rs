@@ -23,7 +23,13 @@ pub struct InfoFile {
     /// Es. "3 pagine · 594 × 841 mm (A1)" oppure
     /// "4961 × 7016 px · 300 dpi (presunti) · 420 × 594 mm (A2)".
     pub dettagli: String,
+    /// Pagine del PDF raggruppate per formato, nell'ordine in cui compaiono.
+    /// Vuoto per gli altri formati.
+    pub formati_pagine: Formati,
 }
+
+/// Pagine per formato: ("A4", 9), ("320 × 450 mm", 1)…
+pub type Formati = Vec<(String, usize)>;
 
 /// Risoluzione usata per un'immagine, in punti per pollice.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -84,18 +90,28 @@ pub fn riconosci(percorso: &Path) -> Result<Formato> {
 pub fn analizza(percorso: &Path) -> Result<InfoFile> {
     let formato = riconosci(percorso)?;
     let byte = std::fs::metadata(percorso)?.len();
-    let mut info =
-        InfoFile { formato, byte, pagine: 1, mm: None, risoluzione: None, dettagli: String::new() };
+    let mut info = InfoFile {
+        formato,
+        byte,
+        pagine: 1,
+        mm: None,
+        risoluzione: None,
+        dettagli: String::new(),
+        formati_pagine: Vec::new(),
+    };
     match formato {
         Formato::Pdf => match leggi_pdf(percorso) {
-            Ok((pagine, mm)) => {
+            Ok(Pdf { pagine, mm, formati }) => {
                 info.pagine = pagine;
                 info.mm = mm;
                 info.dettagli =
                     if pagine == 1 { "1 pagina".to_string() } else { format!("{pagine} pagine") };
-                if let Some((l, a)) = mm {
+                if formati.len() > 1 {
+                    info.dettagli.push_str(&format!(" · {}", etichetta_formati(&formati)));
+                } else if let Some((l, a)) = mm {
                     info.dettagli.push_str(&format!(" · {l:.0} × {a:.0} mm{}", formato_iso(l, a)));
                 }
+                info.formati_pagine = formati;
             }
             Err(e) => info.dettagli = format!("PDF illeggibile: {e}"),
         },
@@ -304,15 +320,57 @@ impl Ordine {
     }
 }
 
-/// Numero di pagine e dimensioni della prima pagina.
-fn leggi_pdf(percorso: &Path) -> Result<(usize, Option<(f64, f64)>)> {
+/// Quello che serve sapere di un PDF per la lista e l'anteprima.
+struct Pdf {
+    pagine: usize,
+    /// Dimensioni della prima pagina.
+    mm: Option<(f64, f64)>,
+    formati: Formati,
+}
+
+fn leggi_pdf(percorso: &Path) -> Result<Pdf> {
     let doc = lopdf::Document::load(percorso).context("apertura")?;
     let pagine = doc.get_pages();
     if pagine.is_empty() && doc.is_encrypted() {
         bail!("cifrato (serve la password)");
     }
-    let mm = pagine.values().next().and_then(|&id| dimensioni_pagina_mm(&doc, id));
-    Ok((pagine.len(), mm))
+    let misure: Vec<_> = pagine.values().map(|&id| dimensioni_pagina_mm(&doc, id)).collect();
+    let mm = misure.first().copied().flatten();
+    let mut formati = Vec::new();
+    for m in misure {
+        let nome = match m {
+            Some((l, a)) => nome_formato(l, a),
+            None => "misure ignote".to_string(),
+        };
+        aggiungi_formato(&mut formati, nome, 1);
+    }
+    Ok(Pdf { pagine: pagine.len(), mm, formati })
+}
+
+/// Nome del formato di una pagina: "A4" se ISO, altrimenti le misure al mm,
+/// lato corto prima, così una pagina orizzontale finisce con le verticali.
+fn nome_formato(l: f64, a: f64) -> String {
+    match iso(l, a) {
+        Some(n) => n.to_string(),
+        None => {
+            let (corto, lungo) = if l < a { (l, a) } else { (a, l) };
+            format!("{corto:.0} × {lungo:.0} mm")
+        }
+    }
+}
+
+/// Somma `n` pagine al formato `nome`, aggiungendolo in fondo se è nuovo.
+pub fn aggiungi_formato(formati: &mut Formati, nome: String, n: usize) {
+    match formati.iter_mut().find(|(f, _)| *f == nome) {
+        Some((_, c)) => *c += n,
+        None => formati.push((nome, n)),
+    }
+}
+
+/// "A4: 9  |  A3: 2  |  320 × 450 mm: 1": formato prima del numero e barre
+/// tra i formati, così il × delle misure non si confonde col conteggio.
+pub fn etichetta_formati(formati: &[(String, usize)]) -> String {
+    formati.iter().map(|(f, n)| format!("{f}: {n}")).collect::<Vec<_>>().join("  |  ")
 }
 
 /// Valore di una chiave ereditabile della pagina (MediaBox, Rotate, …),
@@ -356,8 +414,8 @@ fn dimensioni_pagina_mm(doc: &lopdf::Document, pagina: lopdf::ObjectId) -> Optio
     Some(if ruota % 180 == 90 { (a, l) } else { (l, a) })
 }
 
-/// " (A1)" se le misure corrispondono a un formato ISO A, con 2 mm di tolleranza.
-fn formato_iso(l: f64, a: f64) -> String {
+/// Formato ISO A corrispondente alle misure, con 2 mm di tolleranza.
+fn iso(l: f64, a: f64) -> Option<&'static str> {
     const ISO: [(&str, f64, f64); 6] = [
         ("A0", 841.0, 1189.0),
         ("A1", 594.0, 841.0),
@@ -369,8 +427,12 @@ fn formato_iso(l: f64, a: f64) -> String {
     let (corto, lungo) = if l < a { (l, a) } else { (a, l) };
     ISO.iter()
         .find(|(_, c, g)| (corto - c).abs() < 2.0 && (lungo - g).abs() < 2.0)
-        .map(|(n, ..)| format!(" ({n})"))
-        .unwrap_or_default()
+        .map(|(n, ..)| *n)
+}
+
+/// " (A1)" se le misure corrispondono a un formato ISO A.
+fn formato_iso(l: f64, a: f64) -> String {
+    iso(l, a).map(|n| format!(" ({n})")).unwrap_or_default()
 }
 
 /// File temporaneo (un PNG convertito, una pagina impaginata sul rotolo):
@@ -697,17 +759,58 @@ mod test {
     }
 
     #[test]
-    fn pdf_multipagina_usa_la_prima() {
+    fn pdf_multipagina_dello_stesso_formato() {
         let dir = cartella("pdf-pagine");
-        let pagine = [
-            pagina(pt(594.0), pt(841.0)),
-            pagina(pt(210.0), pt(297.0)),
-            pagina(pt(420.0), pt(594.0)),
-        ];
+        let pagine = [pagina(pt(594.0), pt(841.0)); 3];
         let info = analizza_bytes(&dir, "tre.pdf", &pdf(&pagine, None));
         assert_eq!(info.pagine, 3);
         assert_eq!(info.dettagli, "3 pagine · 594 × 841 mm (A1)");
+        assert_eq!(info.formati_pagine, [("A1".to_string(), 3)]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pdf_con_formati_diversi_li_conta() {
+        let dir = cartella("pdf-formati");
+        let a4 = pagina(pt(210.0), pt(297.0));
+        let mut a4_orizzontale = pagina(pt(297.0), pt(210.0));
+        a4_orizzontale.ruota = Some(90);
+        let pagine = [
+            a4,
+            pagina(pt(297.0), pt(420.0)),
+            a4,
+            pagina(pt(450.0), pt(320.0)),
+            a4_orizzontale,
+            pagina(pt(420.0), pt(297.0)),
+        ];
+        let info = analizza_bytes(&dir, "misto.pdf", &pdf(&pagine, None));
+        assert_eq!(info.pagine, 6);
+        // Primo apparso, primo elencato; l'orientamento non separa i formati.
+        assert_eq!(info.dettagli, "6 pagine · A4: 3  |  A3: 2  |  320 × 450 mm: 1");
+        // La prima pagina resta quella dell'anteprima.
+        let (l, a) = info.mm.unwrap();
+        assert!((l - 210.0).abs() < 0.5 && (a - 297.0).abs() < 0.5, "{l} × {a}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pdf_pagina_senza_misure_conta_a_parte() {
+        let dir = cartella("pdf-formati-ignoti");
+        let senza_media_box = PaginaTest { media_box: None, ruota: None };
+        let pagine = [pagina(pt(210.0), pt(297.0)), senza_media_box];
+        let info = analizza_bytes(&dir, "ignoti.pdf", &pdf(&pagine, None));
+        assert_eq!(info.dettagli, "2 pagine · A4: 1  |  misure ignote: 1");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn formati_si_sommano_tra_file() {
+        let mut totale = Vec::new();
+        aggiungi_formato(&mut totale, "A4".into(), 3);
+        aggiungi_formato(&mut totale, "A3".into(), 1);
+        aggiungi_formato(&mut totale, "A4".into(), 2);
+        assert_eq!(etichetta_formati(&totale), "A4: 5  |  A3: 1");
+        assert_eq!(etichetta_formati(&[]), "");
     }
 
     #[test]
