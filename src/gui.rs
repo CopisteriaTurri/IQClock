@@ -587,6 +587,16 @@ impl App {
             if pronti > 1 {
                 ui.label(format!("{pronti} file da stampare"));
             }
+            // Pagine dei PDF in coda per formato, copie comprese.
+            let mut formati = Vec::new();
+            for d in self.documenti.iter().filter(|d| !matches!(d.stato, StatoJob::InInvio(_) | StatoJob::Inviato)) {
+                for (f, n) in &d.info.formati_pagine {
+                    file::aggiungi_formato(&mut formati, f.clone(), n * d.copie as usize);
+                }
+            }
+            if !formati.is_empty() {
+                ui.label(format!("Totale: {}", file::etichetta_formati(&formati)));
+            }
         });
     }
 
@@ -612,6 +622,9 @@ impl App {
                             didascalia.push_str(" · 90°");
                         }
                         ui.label(RichText::new(didascalia).small());
+                        if !d.info.formati_pagine.is_empty() {
+                            ui.label(RichText::new(file::etichetta_formati(&d.info.formati_pagine)).small());
+                        }
                         if let Some(r) = &d.info.risoluzione {
                             let testo = RichText::new(r.etichetta()).small();
                             ui.label(if r.presunta { testo.color(ARANCIO) } else { testo });

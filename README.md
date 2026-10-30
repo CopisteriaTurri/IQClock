@@ -30,6 +30,11 @@ dei rispettivi proprietari e qui compaiono solo per indicare la compatibilità. 
 Le impostazioni (IP, porta, larghezza rotolo, margine) stanno in `%APPDATA%\iqclock\config.txt`.
 Di default: `192.168.10.72:9100`, rotolo 36", margine 5 mm.
 
+Per i PDF la lista mostra quante pagine ci sono per formato (es. `9 × A4 · 2 × A3 ·
+1 × 320 × 450 mm`): i formati ISO A per nome, gli altri con le misure al mm, senza
+distinguere verticale e orizzontale. Vicino a **Stampa** c'è il totale dei PDF in coda,
+copie comprese.
+
 ## Allineamento sul rotolo
 
 Un contenuto più stretto del rotolo può uscire a **sinistra** (default), al **centro** o
