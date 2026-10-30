@@ -104,6 +104,9 @@ cargo test
 Le icone in `assets/` si rigenerano con `python3 genera-icona.py` (serve Pillow) e sono
 in git: `iqclock.png` è quella della finestra e della taskbar, `iqclock.ico` la incorpora
 `build.rs` nell'exe Windows (con versione e descrizione del file).
+Su Linux, al primo avvio, l'app scrive `~/.local/share/applications/iqclock.desktop` e
+l'icona in `~/.local/share/icons/`: sotto Wayland è l'unico modo per avere l'icona nella
+barra (altrimenti si vede quella generica), e IQClock compare anche nel menu applicazioni.
 
 pdfium viene da [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries),
 release `chromium/7881`: è la versione dell'API per cui è compilato `pdfium-render` 0.9
