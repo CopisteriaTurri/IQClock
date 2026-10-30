@@ -367,9 +367,10 @@ pub fn aggiungi_formato(formati: &mut Formati, nome: String, n: usize) {
     }
 }
 
-/// "9 × A4 · 2 × A3 · 1 × 320 × 450 mm".
+/// "A4: 9  |  A3: 2  |  320 × 450 mm: 1": formato prima del numero e barre
+/// tra i formati, così il × delle misure non si confonde col conteggio.
 pub fn etichetta_formati(formati: &[(String, usize)]) -> String {
-    formati.iter().map(|(f, n)| format!("{n} × {f}")).collect::<Vec<_>>().join(" · ")
+    formati.iter().map(|(f, n)| format!("{f}: {n}")).collect::<Vec<_>>().join("  |  ")
 }
 
 /// Valore di una chiave ereditabile della pagina (MediaBox, Rotate, …),
@@ -785,7 +786,7 @@ mod test {
         let info = analizza_bytes(&dir, "misto.pdf", &pdf(&pagine, None));
         assert_eq!(info.pagine, 6);
         // Primo apparso, primo elencato; l'orientamento non separa i formati.
-        assert_eq!(info.dettagli, "6 pagine · 3 × A4 · 2 × A3 · 1 × 320 × 450 mm");
+        assert_eq!(info.dettagli, "6 pagine · A4: 3  |  A3: 2  |  320 × 450 mm: 1");
         // La prima pagina resta quella dell'anteprima.
         let (l, a) = info.mm.unwrap();
         assert!((l - 210.0).abs() < 0.5 && (a - 297.0).abs() < 0.5, "{l} × {a}");
@@ -798,7 +799,7 @@ mod test {
         let senza_media_box = PaginaTest { media_box: None, ruota: None };
         let pagine = [pagina(pt(210.0), pt(297.0)), senza_media_box];
         let info = analizza_bytes(&dir, "ignoti.pdf", &pdf(&pagine, None));
-        assert_eq!(info.dettagli, "2 pagine · 1 × A4 · 1 × misure ignote");
+        assert_eq!(info.dettagli, "2 pagine · A4: 1  |  misure ignote: 1");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -808,7 +809,7 @@ mod test {
         aggiungi_formato(&mut totale, "A4".into(), 3);
         aggiungi_formato(&mut totale, "A3".into(), 1);
         aggiungi_formato(&mut totale, "A4".into(), 2);
-        assert_eq!(etichetta_formati(&totale), "5 × A4 · 1 × A3");
+        assert_eq!(etichetta_formati(&totale), "A4: 5  |  A3: 1");
         assert_eq!(etichetta_formati(&[]), "");
     }
 

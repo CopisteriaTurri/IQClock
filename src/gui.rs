@@ -739,7 +739,18 @@ impl App {
         p.rect_stroke(rotolo, 0.0, Stroke::new(1.0, Color32::from_gray(160)), StrokeKind::Outside);
 
         let mut y = rotolo.top();
+        let piu_pagine = misure.len() > 1;
         for (n, (l, a, ruotata)) in misure.iter().enumerate() {
+            // Divisione tra una pagina e la precedente, a metà dello spazio vuoto.
+            if n > 0 {
+                let y_riga = y - spazio_tra_pagine * rid / 2.0;
+                p.extend(egui::Shape::dashed_line(
+                    &[Pos2::new(rotolo.left(), y_riga), Pos2::new(rotolo.right(), y_riga)],
+                    Stroke::new(1.0, Color32::from_gray(120)),
+                    6.0,
+                    4.0,
+                ));
+            }
             let dim = Vec2::new(*l as f32, *a as f32) * scala * rid;
             // Una pagina impaginata è più stretta del rotolo del margine sui due
             // lati: la stampante la mette dal margine sinistro.
@@ -751,6 +762,10 @@ impl App {
             disegna_pagina(ui, r, d, n, *ruotata);
             if *ruotata || d.pagine.get(n).is_some_and(|p| p.ruotata) {
                 p.text(r.left_top() + Vec2::new(5.0, 4.0), Align2::LEFT_TOP, "90°", TextStyle::Small.resolve(ui.style()), Color32::from_gray(90));
+            }
+            if piu_pagine {
+                // A destra del rotolo, fuori dalle pagine: non copre il contenuto.
+                p.text(Pos2::new(rotolo.right() + 4.0, r.top()), Align2::LEFT_TOP, (n + 1).to_string(), TextStyle::Small.resolve(ui.style()), Color32::from_gray(90));
             }
             y += dim.y + spazio_tra_pagine * rid;
         }
