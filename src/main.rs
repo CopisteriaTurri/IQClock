@@ -4,6 +4,8 @@
 
 mod anteprima;
 mod config;
+#[cfg(target_os = "linux")]
+mod desktop;
 mod file;
 mod gui;
 mod pjl;
@@ -42,20 +44,40 @@ fn main() -> Result<()> {
 
 fn avvia_gui(file: Vec<PathBuf>) -> Result<()> {
     let config = Config::carica();
-    let opzioni = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("IQClock")
-            .with_inner_size([1200.0, 760.0])
-            .with_min_inner_size([800.0, 500.0])
-            .with_drag_and_drop(true),
-        ..Default::default()
-    };
+    #[cfg(target_os = "linux")]
+    if let Err(e) = desktop::installa(ICONA) {
+        eprintln!("icona per il desktop non installata: {e}");
+    }
+    let mut finestra = eframe::egui::ViewportBuilder::default()
+        .with_title("IQClock")
+        .with_inner_size([1200.0, 760.0])
+        .with_min_inner_size([800.0, 500.0])
+        .with_drag_and_drop(true)
+        // Su Wayland l'icona non passa dalla finestra: il desktop cerca il file
+        // `iqclock.desktop` con lo stesso app_id (vedi `desktop.rs`).
+        .with_app_id("iqclock");
+    if let Some(icona) = icona_finestra() {
+        finestra = finestra.with_icon(icona);
+    }
+    let opzioni = eframe::NativeOptions { viewport: finestra, ..Default::default() };
     eframe::run_native(
         "IQClock",
         opzioni,
         Box::new(move |cc| Ok(Box::new(gui::App::new(cc, config, file)))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+const ICONA: &[u8] = include_bytes!("../assets/iqclock.png");
+
+/// Icona della finestra e della taskbar: la stessa immagine che `build.rs`
+/// incorpora nell'exe come `.ico`, così le due non divergono.
+fn icona_finestra() -> Option<eframe::egui::IconData> {
+    let img = image::load_from_memory(ICONA)
+        .ok()?
+        .to_rgba8();
+    let (width, height) = img.dimensions();
+    Some(eframe::egui::IconData { rgba: img.into_raw(), width, height })
 }
 
 /// Toglie `--nome valore` dagli argomenti e restituisce il valore.

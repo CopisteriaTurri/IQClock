@@ -3,6 +3,7 @@ name = "iqclock"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
+description = "Alternativa minima a HP Click per stampanti HP DesignJet PostScript"
 
 [dependencies]
 anyhow = "1.0.104"
@@ -17,6 +18,9 @@ tiff = "0.11"
 [features]
 # Include pdfium nell'eseguibile (serve prima `scarica-pdfium.sh`); usata per le release.
 pdfium-incluso = []
+
+[build-dependencies]
+winresource = "0.1.34"
 
 [profile.release]
 strip = true
