@@ -2,7 +2,8 @@
 
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 
@@ -132,6 +133,12 @@ fn risoluzione_dichiarata(percorso: &Path, formato: Formato) -> Option<(f64, f64
         _ => return None,
     };
     dpi_plausibili(x, y)
+}
+
+/// DPI con cui la stampante stamperà l'immagine: quelli dichiarati, altrimenti
+/// quelli presunti.
+pub fn dpi_immagine(percorso: &Path, formato: Formato) -> (f64, f64) {
+    risoluzione_dichiarata(percorso, formato).unwrap_or((DPI_IMMAGINI, DPI_IMMAGINI))
 }
 
 /// Scarta i DPI che non possono essere veri: 0, 1 e valori fuori scala.
@@ -308,41 +315,45 @@ fn leggi_pdf(percorso: &Path) -> Result<(usize, Option<(f64, f64)>)> {
     Ok((pagine.len(), mm))
 }
 
-/// MediaBox e /Rotate (entrambi ereditabili) in mm, risalendo l'albero delle
-/// pagine: vince il valore più vicino alla pagina.
-fn dimensioni_pagina_mm(doc: &lopdf::Document, pagina: lopdf::ObjectId) -> Option<(f64, f64)> {
+/// Valore di una chiave ereditabile della pagina (MediaBox, Rotate, …),
+/// risalendo l'albero delle pagine: vince il valore più vicino alla pagina.
+/// I riferimenti indiretti vengono risolti.
+pub(crate) fn ereditato<'a>(
+    doc: &'a lopdf::Document,
+    pagina: lopdf::ObjectId,
+    chiave: &[u8],
+) -> Option<&'a lopdf::Object> {
     let mut nodo = doc.get_dictionary(pagina).ok()?;
-    let mut ruota = None;
-    let mut lati = None;
     // Un albero di pagine è profondo pochi livelli: il limite evita di girare
     // all'infinito su un PDF con /Parent ciclici.
     for _ in 0..32 {
-        if ruota.is_none() {
-            ruota = nodo.get(b"Rotate").ok().and_then(|o| o.as_i64().ok());
+        if let Ok(v) = nodo.get(chiave) {
+            return doc.dereference(v).ok().map(|(_, v)| v);
         }
-        if lati.is_none()
-            && let Ok(mb) = nodo.get(b"MediaBox").and_then(|o| o.as_array())
-        {
-            let v: Vec<f64> =
-                mb.iter().filter_map(|o| o.as_float().ok().map(f64::from)).collect();
-            if v.len() != 4 {
-                return None;
-            }
-            lati = Some(((v[2] - v[0]).abs(), (v[3] - v[1]).abs()));
-        }
-        if ruota.is_some() && lati.is_some() {
-            break;
-        }
-        let Some(padre) = nodo.get(b"Parent").ok().and_then(|o| o.as_reference().ok()) else {
-            break;
-        };
-        let Ok(padre) = doc.get_dictionary(padre) else { break };
-        nodo = padre;
+        let padre = nodo.get(b"Parent").ok()?.as_reference().ok()?;
+        nodo = doc.get_dictionary(padre).ok()?;
     }
-    let (l, a) = lati?;
+    None
+}
+
+/// MediaBox normalizzato `[x0, y0, x1, y1]` (in punti, con x0 < x1 e y0 < y1)
+/// e /Rotate in gradi (0, 90, 180 o 270).
+pub(crate) fn box_e_rotazione(doc: &lopdf::Document, pagina: lopdf::ObjectId) -> Option<([f64; 4], i64)> {
+    let mb = ereditato(doc, pagina, b"MediaBox")?.as_array().ok()?;
+    let v: Vec<f64> = mb.iter().filter_map(|o| o.as_float().ok().map(f64::from)).collect();
+    if v.len() != 4 {
+        return None;
+    }
+    let ruota = ereditato(doc, pagina, b"Rotate").and_then(|o| o.as_i64().ok()).unwrap_or(0);
+    Some(([v[0].min(v[2]), v[1].min(v[3]), v[0].max(v[2]), v[1].max(v[3])], ruota.rem_euclid(360)))
+}
+
+/// Lati della pagina in mm come appare (con /Rotate applicato).
+fn dimensioni_pagina_mm(doc: &lopdf::Document, pagina: lopdf::ObjectId) -> Option<(f64, f64)> {
+    let ([x0, y0, x1, y1], ruota) = box_e_rotazione(doc, pagina)?;
     let pt_mm = 25.4 / 72.0;
-    let (l, a) = (l * pt_mm, a * pt_mm);
-    Some(if ruota.unwrap_or(0).rem_euclid(180) == 90 { (a, l) } else { (l, a) })
+    let (l, a) = ((x1 - x0) * pt_mm, (y1 - y0) * pt_mm);
+    Some(if ruota % 180 == 90 { (a, l) } else { (l, a) })
 }
 
 /// " (A1)" se le misure corrispondono a un formato ISO A, con 2 mm di tolleranza.
@@ -360,6 +371,35 @@ fn formato_iso(l: f64, a: f64) -> String {
         .find(|(_, c, g)| (corto - c).abs() < 2.0 && (lungo - g).abs() < 2.0)
         .map(|(n, ..)| format!(" ({n})"))
         .unwrap_or_default()
+}
+
+/// File temporaneo (un PNG convertito, una pagina impaginata sul rotolo):
+/// viene cancellato quando questo valore esce di scena.
+pub struct FileTemporaneo {
+    percorso: PathBuf,
+}
+
+impl FileTemporaneo {
+    /// Riserva un nome nella cartella temporanea; il file lo crea chi lo scrive.
+    pub fn nuovo(estensione: &str) -> Self {
+        static CONTATORE: AtomicU64 = AtomicU64::new(0);
+        let percorso = std::env::temp_dir().join(format!(
+            "iqclock-{}-{}.{estensione}",
+            std::process::id(),
+            CONTATORE.fetch_add(1, Ordering::Relaxed)
+        ));
+        Self { percorso }
+    }
+
+    pub fn percorso(&self) -> &Path {
+        &self.percorso
+    }
+}
+
+impl Drop for FileTemporaneo {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.percorso);
+    }
 }
 
 pub fn dimensione_leggibile(byte: u64) -> String {

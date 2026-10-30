@@ -14,6 +14,7 @@ use eframe::egui::{
 use crate::anteprima::{Anteprime, PAGINE_MAX, Pagina};
 use crate::config::Config;
 use crate::file::{self, InfoFile};
+use crate::impagina::{self, Allineamento, Impaginazione};
 use crate::pjl::{self, OpzioniJob, Sorgente};
 use crate::rotazione::{self, TOLLERANZA_MM};
 use crate::stampante;
@@ -95,22 +96,38 @@ struct Documento {
     info: InfoFile,
     copie: u32,
     stato: StatoJob,
-    /// Prime pagine renderizzate con le loro misure in mm, se note
-    /// (vuoto finché non arrivano, o se l'anteprima non è disponibile).
-    pagine: Vec<(TextureHandle, Option<(f64, f64)>)>,
+    /// Prime pagine renderizzate (vuoto finché non arrivano, o se l'anteprima
+    /// non è disponibile).
+    pagine: Vec<PaginaMostrata>,
+}
+
+struct PaginaMostrata {
+    tex: TextureHandle,
+    /// Misure in mm, se note.
+    mm: Option<(f64, f64)>,
+    /// Impaginata da IQClock: parte dal margine sinistro del rotolo.
+    impaginata: bool,
+    /// Ruotata di 90° da IQClock per impaginarla sul rotolo.
+    ruotata: bool,
 }
 
 impl Documento {
-    /// Misure della pagina `n` in mm: quelle date da pdfium, altrimenti quelle
-    /// della prima pagina lette all'apertura del file.
+    /// Misure della pagina `n` in mm: quelle date dall'anteprima, altrimenti
+    /// quelle della prima pagina lette all'apertura del file.
     fn mm_pagina(&self, n: usize) -> Option<(f64, f64)> {
-        self.pagine.get(n).and_then(|(_, mm)| *mm).or(self.info.mm)
+        self.pagine.get(n).and_then(|p| p.mm).or(self.info.mm)
     }
 
     /// true se la stampante ruoterà la pagina `n` di 90°. Senza misure non si
-    /// può prevedere: la pagina resta dritta.
+    /// può prevedere: la pagina resta dritta. Una pagina impaginata da IQClock
+    /// è larga quanto la parte stampabile del rotolo e la stampante non la ruota più.
     fn ruotata(&self, n: usize, rotolo_mm: f64) -> bool {
         self.mm_pagina(n).is_some_and(|(l, a)| rotazione::ruota(l, a, rotolo_mm))
+    }
+
+    /// true se la pagina `n` esce ruotata di 90°, da IQClock o dalla stampante.
+    fn esce_ruotata(&self, n: usize, rotolo_mm: f64) -> bool {
+        self.pagine.get(n).is_some_and(|p| p.ruotata) || self.ruotata(n, rotolo_mm)
     }
 }
 
@@ -135,6 +152,14 @@ pub struct App {
     /// Larghezza letta dalla stampante via SNMP (nome ingresso, mm).
     /// `None` = non esposta o stampante non raggiunta: si usa il fallback manuale.
     larghezza_rilevata: Option<(String, f64)>,
+    allineamento: Allineamento,
+    /// Larghezza confermata a mano per questa sessione, quando la stampante
+    /// non la comunica (vedi `rotolo_verificato`).
+    rotolo_confermato: Option<f64>,
+    /// Finestra di conferma della larghezza del rotolo aperta.
+    chiedi_conferma: bool,
+    /// Impaginazione con cui sono state chieste le anteprime.
+    impaginazione_anteprime: Option<Impaginazione>,
     stato_stampante: Option<Result<StatoStampante, String>>,
     verifica_in_corso: bool,
     avvisi: Vec<String>,
@@ -157,6 +182,10 @@ impl App {
         });
         let mut app = Self {
             larghezza_rotolo: config.larghezza_rotolo_mm,
+            allineamento: Allineamento::Sinistra,
+            rotolo_confermato: None,
+            chiedi_conferma: false,
+            impaginazione_anteprime: None,
             config,
             documenti: Vec::new(),
             prossimo_id: 0,
@@ -187,7 +216,7 @@ impl App {
             Ok(info) => {
                 let id = self.prossimo_id;
                 self.prossimo_id += 1;
-                self.anteprime.richiedi(id, percorso.clone(), info.formato);
+                self.anteprime.richiedi(id, percorso.clone(), info.formato, self.impaginazione_anteprime);
                 self.documenti.push(Documento {
                     id,
                     percorso,
@@ -217,6 +246,36 @@ impl App {
         });
     }
 
+    fn impaginazione(&self) -> Option<Impaginazione> {
+        (self.allineamento != Allineamento::Sinistra).then_some(Impaginazione {
+            allineamento: self.allineamento,
+            rotolo_mm: self.rotolo_effettivo(),
+            margine_mm: self.config.margine_mm,
+        })
+    }
+
+    /// true se la larghezza l'ha rilevata la stampante, o se l'utente ha
+    /// confermato quella scelta a mano. Impaginando con una larghezza sbagliata
+    /// la stampante ridurrebbe o taglierebbe la pagina.
+    fn rotolo_verificato(&self) -> bool {
+        self.larghezza_rilevata.is_some() || self.rotolo_confermato == Some(self.larghezza_rotolo)
+    }
+
+    /// Richiede di nuovo le anteprime quando cambia l'impaginazione: mostrano
+    /// il file che parte davvero.
+    fn aggiorna_anteprime(&mut self) {
+        let imp = self.impaginazione();
+        if imp == self.impaginazione_anteprime {
+            return;
+        }
+        self.impaginazione_anteprime = imp;
+        for d in &self.documenti {
+            if impagina::impaginabile(d.info.formato) {
+                self.anteprime.richiedi(d.id, d.percorso.clone(), d.info.formato, imp);
+            }
+        }
+    }
+
     fn opzioni(&self, doc: &Documento) -> OpzioniJob {
         OpzioniJob {
             nome: doc.nome.clone(),
@@ -225,6 +284,21 @@ impl App {
             scala_di_grigi: self.scala_di_grigi,
             taglierina: self.taglierina,
             extra: self.extra_pjl.clone(),
+            impaginazione: self.impaginazione(),
+        }
+    }
+
+    /// Prima di impaginare con una larghezza del rotolo non verificata chiede
+    /// conferma.
+    fn chiedi_e_stampa(&mut self, ctx: &egui::Context) {
+        let da_impaginare = self.impaginazione().is_some()
+            && self.documenti.iter().any(|d| {
+                matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_)) && impagina::impaginabile(d.info.formato)
+            });
+        if da_impaginare && !self.rotolo_verificato() {
+            self.chiedi_conferma = true;
+        } else {
+            self.stampa(ctx);
         }
     }
 
@@ -307,7 +381,7 @@ impl App {
                             .enumerate()
                             .map(|(n, p)| {
                                 let tex = ctx.load_texture(format!("{}-{n}", d.id), p.immagine, TextureOptions::LINEAR);
-                                (tex, p.mm)
+                                PaginaMostrata { tex, mm: p.mm, impaginata: p.impaginata, ruotata: p.ruotata }
                             })
                             .collect();
                     }
@@ -420,6 +494,33 @@ impl App {
         }
 
         ui.add_space(6.0);
+        sezione(ui, "ALLINEAMENTO");
+        let escluso = self
+            .selezionato
+            .and_then(|i| self.documenti.get(i))
+            .is_some_and(|d| !impagina::impaginabile(d.info.formato));
+        ui.add_enabled_ui(!escluso, |ui| {
+            ui.horizontal(|ui| {
+                for a in Allineamento::TUTTI {
+                    ui.selectable_value(&mut self.allineamento, a, a.etichetta());
+                }
+            })
+            .response
+            .on_hover_text("Posizione sul rotolo del contenuto più stretto della carta. Con Centro e Destra IQClock manda una pagina larga quanto il rotolo meno i margini e la ruota da sé quando conviene");
+        });
+        if escluso {
+            ui.label(RichText::new("PostScript e HP-GL/2 partono così come sono: l'allineamento non si applica").small());
+        }
+        if self.allineamento != Allineamento::Sinistra {
+            ui.horizontal(|ui| {
+                ui.label("Margine");
+                ui.add(egui::DragValue::new(&mut self.config.margine_mm).range(impagina::MARGINE_MIN_MM..=50.0).speed(0.5).suffix(" mm"))
+            })
+            .response
+            .on_hover_text("Bordo non stampabile per lato: la pagina mandata è larga quanto il rotolo meno questo margine sui due lati");
+        }
+
+        ui.add_space(6.0);
         sezione(ui, "COLORE");
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.scala_di_grigi, false, "Colore");
@@ -481,7 +582,7 @@ impl App {
                 .corner_radius(CornerRadius::same(16))
                 .min_size(Vec2::new(ui.available_width(), 36.0));
             if ui.add_enabled(pronti > 0, pulsante).clicked() {
-                self.stampa(ui.ctx());
+                self.chiedi_e_stampa(ui.ctx());
             }
             if pronti > 1 {
                 ui.label(format!("{pronti} file da stampare"));
@@ -507,7 +608,7 @@ impl App {
                         ui.label(RichText::new(&d.nome).small().strong());
                         let mut didascalia =
                             format!("{} · {}", d.info.formato.etichetta(), file::dimensione_leggibile(d.info.byte));
-                        if (0..d.info.pagine.min(PAGINE_MAX)).any(|n| d.ruotata(n, self.rotolo_effettivo())) {
+                        if (0..d.info.pagine.min(PAGINE_MAX)).any(|n| d.esce_ruotata(n, self.rotolo_effettivo())) {
                             didascalia.push_str(" · 90°");
                         }
                         ui.label(RichText::new(didascalia).small());
@@ -580,7 +681,9 @@ impl App {
         let scala = (area.width() - 2.0 * margine) / rotolo_mm as f32;
         let pagine_visibili = d.info.pagine.min(PAGINE_MAX);
         // Misure come escono dalla stampante: la T2600 ruota di 90° da sola
-        // quando conviene (vedi `rotazione.rs`), scambiando i due lati.
+        // quando conviene (vedi `rotazione.rs`), scambiando i due lati. Le
+        // pagine impaginate da IQClock arrivano già ruotate e larghe quanto il
+        // rotolo: la stampante le lascia come sono.
         let misure: Vec<(f64, f64, bool)> = (0..pagine_visibili)
             .map(|n| {
                 let (l, a) = d.mm_pagina(n).unwrap_or((rotolo_mm * 0.7, rotolo_mm));
@@ -588,6 +691,7 @@ impl App {
                 if ruotata { (a, l, true) } else { (l, a, false) }
             })
             .collect();
+        let ruotate_da_iqclock = d.pagine.iter().take(pagine_visibili).any(|p| p.ruotata);
         let mut nota = format!("{} — {}", d.nome, d.info.dettagli);
         if d.info.pagine > pagine_visibili {
             nota.push_str(&format!(" (mostrate {pagine_visibili})"));
@@ -599,6 +703,9 @@ impl App {
             nota.push_str("\nLa stampante ruoterà di 90° le pagine segnate, per farle entrare nel rotolo");
         } else if misure.iter().any(|(_, _, r)| *r) {
             nota.push_str("\nLa stampante ruoterà di 90° le pagine segnate, per risparmiare carta");
+        }
+        if ruotate_da_iqclock {
+            nota.push_str("\nIQClock ha ruotato di 90° le pagine segnate prima di allinearle, come farebbe la stampante");
         }
         // Didascalia centrata che va a capo: con nomi lunghi o avvisi non
         // starebbe nella larghezza dell'anteprima.
@@ -621,9 +728,15 @@ impl App {
         let mut y = rotolo.top();
         for (n, (l, a, ruotata)) in misure.iter().enumerate() {
             let dim = Vec2::new(*l as f32, *a as f32) * scala * rid;
-            let r = Rect::from_min_size(Pos2::new(rotolo.left(), y), dim);
+            // Una pagina impaginata è più stretta del rotolo del margine sui due
+            // lati: la stampante la mette dal margine sinistro.
+            let margine = match (d.pagine.get(n), self.impaginazione_anteprime) {
+                (Some(p), Some(imp)) if p.impaginata => imp.margine_mm as f32 * scala * rid,
+                _ => 0.0,
+            };
+            let r = Rect::from_min_size(Pos2::new(rotolo.left() + margine, y), dim);
             disegna_pagina(ui, r, d, n, *ruotata);
-            if *ruotata {
+            if *ruotata || d.pagine.get(n).is_some_and(|p| p.ruotata) {
                 p.text(r.left_top() + Vec2::new(5.0, 4.0), Align2::LEFT_TOP, "90°", TextStyle::Small.resolve(ui.style()), Color32::from_gray(90));
             }
             y += dim.y + spazio_tra_pagine * rid;
@@ -665,7 +778,7 @@ fn barra_inchiostro(ui: &mut egui::Ui, c: &Cartuccia) {
 /// pagina bianca con il formato, centrata in `spazio` con le sue proporzioni.
 /// Con `ruotata` la pagina è girata di 90°, come la stampa la stampante.
 fn disegna_pagina(ui: &egui::Ui, spazio: Rect, d: &Documento, n: usize, ruotata: bool) {
-    let tex = d.pagine.get(n).map(|(t, _)| t);
+    let tex = d.pagine.get(n).map(|p| &p.tex);
     let rapporto = match tex {
         Some(t) => t.aspect_ratio(),
         None => d.mm_pagina(n).map(|(l, a)| (l / a) as f32).unwrap_or(210.0 / 297.0),
@@ -696,6 +809,43 @@ fn disegna_pagina(ui: &egui::Ui, spazio: Rect, d: &Documento, n: usize, ruotata:
 }
 
 impl App {
+    /// Finestra che chiede di confermare la larghezza del rotolo prima di
+    /// mandare pagine impaginate.
+    fn conferma_rotolo(&mut self, ctx: &egui::Context) {
+        let mut scelta = None;
+        let finestra = egui::Modal::new(egui::Id::unique("conferma_rotolo")).show(ctx, |ui| {
+            ui.set_max_width(380.0);
+            ui.heading("Larghezza del rotolo");
+            ui.add_space(6.0);
+            ui.label(format!(
+                "La stampante non ha comunicato la larghezza del rotolo: IQClock allinea le pagine su \
+                 {:.0} mm, scelti a mano. Se è sbagliata, la stampante le ridurrà o le taglierà.",
+                self.larghezza_rotolo
+            ));
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button(format!("Stampa su {:.0} mm", self.larghezza_rotolo)).clicked() {
+                    scelta = Some(true);
+                }
+                if ui.button("Annulla").clicked() {
+                    scelta = Some(false);
+                }
+            });
+        });
+        if finestra.should_close() && scelta.is_none() {
+            scelta = Some(false);
+        }
+        match scelta {
+            Some(true) => {
+                self.chiedi_conferma = false;
+                self.rotolo_confermato = Some(self.larghezza_rotolo);
+                self.stampa(ctx);
+            }
+            Some(false) => self.chiedi_conferma = false,
+            None => {}
+        }
+    }
+
     fn foto_finestra(&mut self, ctx: &egui::Context) {
         let Some((percorso, fotogrammi)) = &mut self.foto else { return };
         *fotogrammi += 1;
@@ -722,6 +872,7 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.gestisci_eventi(ctx);
         self.file_trascinati(ctx);
+        self.aggiorna_anteprime();
         self.foto_finestra(ctx);
     }
 
@@ -741,6 +892,9 @@ impl eframe::App for App {
             });
         }
         egui::CentralPanel::default_margins().show(ui, |ui| self.anteprima(ui));
+        if self.chiedi_conferma {
+            self.conferma_rotolo(ui.ctx());
+        }
 
         if sta_trascinando {
             let schermo = ui.ctx().content_rect();

@@ -10,6 +10,8 @@
 
 use std::fmt::Write as _;
 
+use crate::impagina::Impaginazione;
+
 /// Universal Exit Language: deve aprire e chiudere ogni job PJL.
 pub const UEL: &[u8] = b"\x1b%-12345X";
 
@@ -96,6 +98,9 @@ pub struct OpzioniJob {
     pub taglierina: Option<bool>,
     /// Righe `@PJL ...` aggiuntive, una per riga, mandate così come sono.
     pub extra: String,
+    /// Allineamento sul rotolo. Non finisce nel PJL: cambia il file che parte
+    /// (vedi `impagina.rs`); `None` = il file parte com'è.
+    pub impaginazione: Option<Impaginazione>,
 }
 
 impl Default for OpzioniJob {
@@ -107,6 +112,7 @@ impl Default for OpzioniJob {
             scala_di_grigi: false,
             taglierina: None,
             extra: String::new(),
+            impaginazione: None,
         }
     }
 }
@@ -245,6 +251,7 @@ mod test {
             scala_di_grigi: true,
             taglierina: Some(false),
             extra: "@PJL SET MIRROR=OFF\nroba non pjl\n".into(),
+            impaginazione: None,
         };
         assert_eq!(
             testo(intestazione(&opz, Formato::Jpeg)),
@@ -279,6 +286,7 @@ mod test {
                                     scala_di_grigi,
                                     taglierina,
                                     extra: extra.into(),
+                                    impaginazione: None,
                                 };
                                 let atteso = attesa_intestazione(&opz, formato);
                                 let got = testo(intestazione(&opz, formato));
@@ -391,6 +399,7 @@ mod test {
             scala_di_grigi: true,
             taglierina: Some(true),
             extra: "@PJL SET FOO=1".into(),
+            impaginazione: None,
         };
         assert_eq!(testo(chiusura(&opz)), attesa_chiusura("x.pdf"));
         let solo_nome = OpzioniJob { nome: "x.pdf".into(), ..Default::default() };

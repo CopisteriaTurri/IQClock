@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
+use crate::file::FileTemporaneo;
+use crate::impagina;
 use crate::pjl::{self, Formato, OpzioniJob};
 use crate::png;
 
@@ -25,23 +27,44 @@ fn connetti(host: &str, porta: u16) -> Result<TcpStream> {
         .with_context(|| format!("stampante non raggiungibile su {indirizzo}"))
 }
 
+/// File che parte davvero: i PNG diventano TIFF (la stampante non li legge,
+/// vedi `png.rs`) e con un'impaginazione il file viene allargato al rotolo
+/// (vedi `impagina.rs`). L'eventuale temporaneo va tenuto vivo fino alla fine
+/// dell'invio.
+fn da_mandare(percorso: &Path, formato: Formato, opz: &OpzioniJob) -> Result<Option<(FileTemporaneo, Formato)>> {
+    if let Some(imp) = &opz.impaginazione
+        && let Some(composto) = impagina::prepara(percorso, formato, imp).context("impaginazione sul rotolo")?
+    {
+        return Ok(Some(composto));
+    }
+    if formato == Formato::Png {
+        return Ok(Some((png::png_a_tiff(percorso)?, Formato::Tiff)));
+    }
+    Ok(None)
+}
+
 /// Scrive il job completo (intestazione PJL + file + chiusura) su `dest`,
 /// chiamando `avanzamento` con la frazione già scritta (0.0..=1.0).
-///
-/// I PNG non vengono mandati così come sono: la stampante non li legge, quindi
-/// si convertono in TIFF (vedi `png.rs`) e si invia quello.
 pub fn scrivi_job(
+    dest: &mut impl Write,
+    percorso: &Path,
+    formato: Formato,
+    opz: &OpzioniJob,
+    avanzamento: impl FnMut(f32),
+) -> Result<()> {
+    match da_mandare(percorso, formato, opz)? {
+        Some((file, formato)) => scrivi_file(dest, file.percorso(), formato, opz, avanzamento),
+        None => scrivi_file(dest, percorso, formato, opz, avanzamento),
+    }
+}
+
+fn scrivi_file(
     dest: &mut impl Write,
     percorso: &Path,
     formato: Formato,
     opz: &OpzioniJob,
     mut avanzamento: impl FnMut(f32),
 ) -> Result<()> {
-    if formato == Formato::Png {
-        let tiff = png::png_a_tiff(percorso)?;
-        return scrivi_job(dest, tiff.percorso(), Formato::Tiff, opz, avanzamento);
-    }
-
     let totale = std::fs::metadata(percorso)?.len().max(1);
     let mut file = BufReader::new(File::open(percorso)?);
     dest.write_all(&pjl::intestazione(opz, formato))?;
@@ -71,15 +94,16 @@ pub fn invia(
     opz: &OpzioniJob,
     avanzamento: impl FnMut(f32),
 ) -> Result<()> {
-    // Il PNG si converte prima di connettersi, così la stampante non resta col
-    // socket aperto e senza dati per tutta la conversione.
-    if formato == Formato::Png {
-        let tiff = png::png_a_tiff(percorso)?;
-        return invia(host, porta, tiff.percorso(), Formato::Tiff, opz, avanzamento);
-    }
+    // Conversione e impaginazione prima di connettersi, così la stampante non
+    // resta col socket aperto e senza dati mentre lavorano.
+    let preparato = da_mandare(percorso, formato, opz)?;
+    let (percorso, formato) = match &preparato {
+        Some((file, formato)) => (file.percorso(), *formato),
+        None => (percorso, formato),
+    };
     let mut sock = connetti(host, porta)?;
     sock.set_write_timeout(Some(TIMEOUT_SCRITTURA))?;
-    scrivi_job(&mut sock, percorso, formato, opz, avanzamento).context("invio interrotto")?;
+    scrivi_file(&mut sock, percorso, formato, opz, avanzamento).context("invio interrotto")?;
     // Chiude il lato di scrittura: per la stampante il job è finito.
     let _ = sock.shutdown(Shutdown::Write);
     Ok(())

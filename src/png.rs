@@ -10,16 +10,15 @@
 //! Il TIFF viene scritto in un file temporaneo, cancellato quando il job è finito.
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::path::Path;
 
 use anyhow::{Context, Result};
-use image::DynamicImage;
-use tiff::encoder::{Compression, Predictor, Rational, TiffEncoder, colortype};
-use tiff::tags::ResolutionUnit;
+use image::{DynamicImage, RgbImage};
+use tiff::encoder::Rational;
+use tiff::encoder::compression::{CompressionAlgorithm, Lzw};
 
-use crate::file::{DPI_IMMAGINI, dpi_plausibili};
+use crate::file::{DPI_IMMAGINI, FileTemporaneo, dpi_plausibili};
 
 /// Firma di un file PNG (8 byte).
 pub const FIRMA: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
@@ -62,62 +61,143 @@ pub fn dpi(percorso: &Path) -> Option<(f64, f64)> {
     }
 }
 
-/// TIFF temporaneo: il file viene cancellato quando questo valore esce di scena.
-pub struct TiffTemporaneo {
-    percorso: PathBuf,
-}
-
-impl TiffTemporaneo {
-    pub fn percorso(&self) -> &Path {
-        &self.percorso
-    }
-}
-
-impl Drop for TiffTemporaneo {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.percorso);
-    }
-}
-
 /// Converte il PNG in un TIFF RGB 8 bit su bianco, in un file temporaneo.
-pub fn png_a_tiff(percorso: &Path) -> Result<TiffTemporaneo> {
-    static CONTATORE: AtomicU64 = AtomicU64::new(0);
-    // Senza limiti: quelli di default di `image` (512 MiB) bocciano già un A0 a 300 dpi.
-    let mut lettore = image::ImageReader::open(percorso)?;
-    lettore.no_limits();
-    let immagine =
-        lettore.decode().with_context(|| format!("lettura di {}", percorso.display()))?;
-    let (larghezza, altezza, rgb) = su_bianco(immagine);
-    let (dpi_x, dpi_y) = dpi(percorso).unwrap_or((DPI_IMMAGINI, DPI_IMMAGINI));
+pub fn png_a_tiff(percorso: &Path) -> Result<FileTemporaneo> {
+    let rgb = su_bianco(decodifica(percorso)?);
+    let dpi = dpi(percorso).unwrap_or((DPI_IMMAGINI, DPI_IMMAGINI));
+    let riga = rgb.width() as usize * 3;
+    tiff_temporaneo(rgb.width(), rgb.height(), dpi, |y, out| {
+        let inizio = y as usize * riga;
+        out.copy_from_slice(&rgb.as_raw()[inizio..inizio + riga]);
+    })
+}
 
-    let dest = std::env::temp_dir().join(format!(
-        "iqclock-{}-{}.tiff",
-        std::process::id(),
-        CONTATORE.fetch_add(1, Ordering::Relaxed)
-    ));
-    let scrivi = || -> Result<()> {
-        let mut tiff = TiffEncoder::new(BufWriter::new(File::create(&dest)?))?
-            .with_compression(Compression::Lzw)
-            .with_predictor(Predictor::Horizontal);
-        let mut img = tiff.new_image::<colortype::RGB8>(larghezza, altezza)?;
-        img.resolution_unit(ResolutionUnit::Inch);
-        img.x_resolution(razionale(dpi_x));
-        img.y_resolution(razionale(dpi_y));
-        img.write_data(&rgb)?;
-        Ok(())
-    };
-    if let Err(e) = scrivi() {
-        let _ = std::fs::remove_file(&dest);
-        return Err(e).context("conversione in TIFF");
+/// Decodifica un'immagine intera.
+pub fn decodifica(percorso: &Path) -> Result<DynamicImage> {
+    // Senza limiti: quelli di default di `image` (512 MiB) bocciano già un A0 a 300 dpi.
+    let mut lettore = image::ImageReader::open(percorso)?.with_guessed_format()?;
+    lettore.no_limits();
+    lettore.decode().with_context(|| format!("lettura di {}", percorso.display()))
+}
+
+/// Scrive un TIFF RGB 8 bit (LZW con predittore) in un file temporaneo, una
+/// striscia alla volta: `riga(y, out)` riempie la riga `y` (`larghezza` × 3 byte).
+/// Così un'immagine allargata al rotolo non deve stare tutta in memoria.
+///
+/// Il TIFF lo scriviamo a mano: la crate `tiff` comprime solo con `write_data`,
+/// che vuole l'immagine intera; le strisce scritte da sole uscirebbero non
+/// compresse con il tag che dice LZW. Della crate si usa il compressore LZW.
+pub fn tiff_temporaneo(
+    larghezza: u32,
+    altezza: u32,
+    (dpi_x, dpi_y): (f64, f64),
+    riga: impl FnMut(u32, &mut [u8]),
+) -> Result<FileTemporaneo> {
+    let dest = FileTemporaneo::nuovo("tiff");
+    let mut out = BufWriter::new(File::create(dest.percorso())?);
+    scrivi_tiff(&mut out, larghezza, altezza, (dpi_x, dpi_y), riga).context("scrittura del TIFF")?;
+    out.flush()?;
+    Ok(dest)
+}
+
+const RIGHE_PER_STRISCIA: u32 = 64;
+
+fn scrivi_tiff<W: Write + Seek>(
+    out: &mut W,
+    larghezza: u32,
+    altezza: u32,
+    (dpi_x, dpi_y): (f64, f64),
+    mut riga: impl FnMut(u32, &mut [u8]),
+) -> Result<()> {
+    // Intestazione little endian; l'offset della directory si scrive alla fine.
+    out.write_all(b"II*\0\0\0\0\0")?;
+    let mut posizione = 8u64;
+    let byte_riga = larghezza as usize * 3;
+    let mut offset_strisce = Vec::new();
+    let mut byte_strisce = Vec::new();
+    let mut striscia = Vec::new();
+    for inizio in (0..altezza).step_by(RIGHE_PER_STRISCIA as usize) {
+        let righe = RIGHE_PER_STRISCIA.min(altezza - inizio);
+        striscia.resize(righe as usize * byte_riga, 0);
+        for (y, r) in (inizio..).zip(striscia.chunks_exact_mut(byte_riga)) {
+            riga(y, r);
+            // Predittore orizzontale: ogni campione diventa la differenza col
+            // pixel a sinistra (da destra verso sinistra, per non perderlo).
+            for i in (3..r.len()).rev() {
+                r[i] = r[i].wrapping_sub(r[i - 3]);
+            }
+        }
+        let n = Lzw.write_to(out, &striscia)?;
+        offset_strisce.push(u32::try_from(posizione).context("TIFF oltre 4 GB")?);
+        byte_strisce.push(n as u32);
+        posizione += n;
     }
-    Ok(TiffTemporaneo { percorso: dest })
+
+    // Valori che non stanno nei 4 byte della voce: dopo i dati.
+    let mut extra = Vec::new();
+    let mut fuori = |dati: &[u8]| -> u32 {
+        let offset = posizione + extra.len() as u64;
+        extra.extend_from_slice(dati);
+        offset as u32
+    };
+    let bit = fuori(&[8, 0, 8, 0, 8, 0]);
+    let razionale = |dpi: f64| {
+        let r = razionale(dpi);
+        [r.n.to_le_bytes(), r.d.to_le_bytes()].concat()
+    };
+    let res_x = fuori(&razionale(dpi_x));
+    let res_y = fuori(&razionale(dpi_y));
+    let lunghi = |v: &[u32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+    let n_strisce = offset_strisce.len() as u32;
+    let (offset, conteggi) = if n_strisce == 1 {
+        (offset_strisce[0], byte_strisce[0])
+    } else {
+        (fuori(&lunghi(&offset_strisce)), fuori(&lunghi(&byte_strisce)))
+    };
+    if extra.len() % 2 == 1 {
+        extra.push(0);
+    }
+    let directory = posizione + extra.len() as u64;
+    const SHORT: u16 = 3;
+    const LONG: u16 = 4;
+    const RATIONAL: u16 = 5;
+    // (tag, tipo, quanti, valore o offset), in ordine di tag come vuole il formato.
+    let voci: [(u16, u16, u32, u32); 14] = [
+        (256, LONG, 1, larghezza),
+        (257, LONG, 1, altezza),
+        (258, SHORT, 3, bit),
+        (259, SHORT, 1, 5), // LZW
+        (262, SHORT, 1, 2), // RGB
+        (273, LONG, n_strisce, offset),
+        (277, SHORT, 1, 3),
+        (278, LONG, 1, RIGHE_PER_STRISCIA),
+        (279, LONG, n_strisce, conteggi),
+        (282, RATIONAL, 1, res_x),
+        (283, RATIONAL, 1, res_y),
+        (284, SHORT, 1, 1), // campioni interlacciati
+        (296, SHORT, 1, 2), // pollici
+        (317, SHORT, 1, 2), // predittore orizzontale
+    ];
+    out.write_all(&extra)?;
+    out.write_all(&(voci.len() as u16).to_le_bytes())?;
+    for (tag, tipo, quanti, valore) in voci {
+        out.write_all(&tag.to_le_bytes())?;
+        out.write_all(&tipo.to_le_bytes())?;
+        out.write_all(&quanti.to_le_bytes())?;
+        // Uno SHORT sta nei primi due byte del campo valore.
+        out.write_all(&valore.to_le_bytes())?;
+    }
+    out.write_all(&0u32.to_le_bytes())?;
+    out.seek(SeekFrom::Start(4))?;
+    out.write_all(&u32::try_from(directory).context("TIFF oltre 4 GB")?.to_le_bytes())?;
+    Ok(())
 }
 
 /// RGB a 8 bit con l'eventuale trasparenza appiattita sul bianco della carta.
 ///
 /// `into_rgba8` riduce anche i PNG a 16 bit a 8 bit per canale, che è quanto
 /// serve alla stampa (e non copia l'immagine se è già RGBA a 8 bit).
-fn su_bianco(immagine: DynamicImage) -> (u32, u32, Vec<u8>) {
+pub fn su_bianco(immagine: DynamicImage) -> RgbImage {
     let rgba = immagine.into_rgba8();
     let (larghezza, altezza) = rgba.dimensions();
     let mut rgb = Vec::with_capacity((larghezza * altezza * 3) as usize);
@@ -127,7 +207,7 @@ fn su_bianco(immagine: DynamicImage) -> (u32, u32, Vec<u8>) {
         let mescola = |c: u8| ((c as u32 * a + 255 * (255 - a) + 127) / 255) as u8;
         rgb.extend_from_slice(&[mescola(r), mescola(g), mescola(b)]);
     }
-    (larghezza, altezza, rgb)
+    RgbImage::from_raw(larghezza, altezza, rgb).expect("dimensioni coerenti")
 }
 
 /// DPI → frazione razionale con tre decimali (il TIFF usa numeri razionali).
@@ -139,7 +219,8 @@ fn razionale(dpi: f64) -> Rational {
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
-    use image::{ImageBuffer, Rgb, RgbaImage};
+    use std::path::PathBuf;
+    use image::{ImageBuffer, Rgb, RgbImage, RgbaImage};
     use tiff::decoder::Decoder;
     use tiff::decoder::ifd::Value;
     use tiff::tags::Tag;
@@ -247,5 +328,22 @@ pub(crate) mod test {
         let (x, y) = dpi_scritti(tiff.percorso());
         assert!((x - 150.0).abs() < 0.1 && (y - 150.0).abs() < 0.1, "{x} {y}");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tiff_a_piu_strisce_si_rilegge_identico() {
+        // 3 strisce (64 + 64 + 2 righe) con pixel tutti diversi: verifica
+        // predittore, LZW e tabella delle strisce.
+        let (l, a) = (37, 130);
+        let img = RgbImage::from_fn(l, a, |x, y| Rgb([(x * 7 + y) as u8, (y * 3) as u8, (x ^ y) as u8]));
+        let tiff = tiff_temporaneo(l, a, (200.0, 100.0), |y, out| {
+            let byte = l as usize * 3;
+            out.copy_from_slice(&img.as_raw()[y as usize * byte..(y as usize + 1) * byte]);
+        })
+        .unwrap();
+        let letta = image::open(tiff.percorso()).unwrap().to_rgb8();
+        assert!(letta == img, "pixel diversi dopo la rilettura");
+        let (x, y) = dpi_scritti(tiff.percorso());
+        assert!((x - 200.0).abs() < 0.01 && (y - 100.0).abs() < 0.01, "{x} {y}");
     }
 }

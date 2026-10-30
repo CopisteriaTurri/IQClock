@@ -3,8 +3,9 @@
 //! La T2600 ruota da sola i job quando così il foglio consuma meno carta
 //! (impostazione del pannello). Il PJL non la controlla: provato il
 //! 29/10/2026, `@PJL SET AUTOROTATE=OFF` viene ignorato e `ON` non cambia
-//! niente. Qui c'è solo la regola, usata dall'anteprima per mostrare come
-//! uscirà il foglio.
+//! niente. Qui c'è solo la regola: l'anteprima la usa per mostrare come
+//! uscirà il foglio, e `impagina.rs` per ruotare da sé le pagine che allarga al
+//! rotolo (quelle la stampante non le ruota più).
 //!
 //! Verificato con un A5 verticale (esce ruotato) e un A5 orizzontale (esce
 //! dritto) su rotolo da 36"; il caso "più largo del rotolo" non è provato.

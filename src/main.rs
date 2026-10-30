@@ -8,6 +8,7 @@ mod config;
 mod desktop;
 mod file;
 mod gui;
+mod impagina;
 mod pjl;
 mod png;
 mod rotazione;
@@ -20,11 +21,15 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 
 use config::Config;
+use impagina::{Allineamento, Impaginazione};
 use pjl::{OpzioniJob, Sorgente};
 
 const USO: &str = "\
 Senza argomenti (o con dei file) apre l'interfaccia. Da riga di comando:
   iqclock stampa FILE... [--host IP] [--copie N] [--rotolo 1|2|auto] [--grigi] [--prn OUT]
+                 [--allinea sinistra|centro|destra] [--larghezza-rotolo MM] [--margine MM]
+      Con --allinea centro/destra la larghezza del rotolo si legge dalla stampante (SNMP);
+      --larghezza-rotolo la indica a mano.
   iqclock stato [--host IP]
   iqclock snmp OID [--host IP]      (diagnostica: elenca le voci sotto OID)";
 
@@ -113,12 +118,36 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
     };
     let scala_di_grigi = prendi_flag(&mut args, "--grigi");
     let prn = prendi(&mut args, "--prn")?.map(PathBuf::from);
+    let allineamento = match prendi(&mut args, "--allinea")? {
+        None => Allineamento::Sinistra,
+        Some(a) => Allineamento::da_testo(&a)
+            .with_context(|| format!("--allinea vuole sinistra, centro o destra (non {a})"))?,
+    };
+    let larghezza_rotolo: Option<f64> =
+        prendi(&mut args, "--larghezza-rotolo")?.map(|m| m.parse()).transpose().context("--larghezza-rotolo")?;
+    let margine_mm =
+        prendi(&mut args, "--margine")?.map(|m| m.parse()).transpose().context("--margine")?.unwrap_or(config.margine_mm);
     if args.is_empty() {
         bail!("nessun file da stampare\n{USO}");
     }
     if prn.is_some() && args.len() > 1 {
         bail!("--prn accetta un solo file");
     }
+    let impaginazione = if allineamento == Allineamento::Sinistra {
+        None
+    } else {
+        // Impaginare su una larghezza sbagliata fa ridurre o tagliare la pagina:
+        // o la dice la stampante, o la si indica esplicitamente.
+        let rotolo_mm = match larghezza_rotolo {
+            Some(mm) => mm,
+            None => stato::leggi(&config.host)
+                .context("lettura del rotolo dalla stampante")?
+                .larghezza_rotolo_mm()
+                .map(|(_, mm)| mm)
+                .context("la stampante non dichiara la larghezza del rotolo: indicala con --larghezza-rotolo MM")?,
+        };
+        Some(Impaginazione { allineamento, rotolo_mm, margine_mm })
+    };
 
     for f in args.iter().map(PathBuf::from) {
         let info = file::analizza(&f).with_context(|| f.display().to_string())?;
@@ -127,6 +156,7 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
             copie,
             sorgente,
             scala_di_grigi,
+            impaginazione,
             ..Default::default()
         };
         match &prn {

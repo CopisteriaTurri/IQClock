@@ -22,12 +22,41 @@ dei rispettivi proprietari e qui compaiono solo per indicare la compatibilità. 
   ```
   iqclock stampa tavola.pdf --copie 2 --rotolo 1 --grigi
   iqclock stampa tavola.pdf --prn prova.prn     # scrive il job su file senza stampare
+  iqclock stampa logo.png --allinea centro       # centrato sul rotolo (vedi sotto)
   iqclock stato                                  # stato, inchiostri, carta
   iqclock snmp 1.3.6.1.2.1.43                    # diagnostica SNMP
   ```
 
-Le impostazioni (IP, porta, larghezza rotolo) stanno in `%APPDATA%\iqclock\config.txt`.
-Di default: `192.168.10.72:9100`, rotolo 36".
+Le impostazioni (IP, porta, larghezza rotolo, margine) stanno in `%APPDATA%\iqclock\config.txt`.
+Di default: `192.168.10.72:9100`, rotolo 36", margine 5 mm.
+
+## Allineamento sul rotolo
+
+Un contenuto più stretto del rotolo può uscire a **sinistra** (default), al **centro** o
+a **destra**. Con "Sinistra" il file parte com'è e decide la stampante. Con "Centro" e
+"Destra" IQClock manda una pagina già larga quanto il rotolo meno il margine per lato (mai
+quanto il rotolo intero: provato il 30/10/2026, la T2600 la mette per il lungo e tira fuori
+un foglio di 91 × 93 cm), con il contenuto spostato,
+senza comandi PJL proprietari:
+
+- **PDF**: si allarga il MediaBox di ogni pagina attorno al contenuto, che non viene
+  toccato: resta vettoriale e le annotazioni restano al loro posto.
+- **JPEG, TIFF, PNG**: riscritti in TIFF con una banda bianca fino alla larghezza del
+  rotolo, agli stessi DPI del file (dei TIFF multipagina parte solo la prima pagina).
+- **PostScript, HP-GL/2**: partono come sono, il controllo si disattiva.
+
+Una pagina così larga la stampante non la ruota più: la rotazione di 90° che
+farebbe per risparmiare carta la decide IQClock prima di allargare, con la stessa regola.
+Il **margine** (bordo non stampabile per lato) è configurabile, minimo 3 mm;
+se non entra nella larghezza utile la pagina parte com'è. L'anteprima mostra il file
+impaginato, cioè quello che parte.
+Provato sulla T2600 il 30/10/2026 con margine 5 mm (pagina da 904 mm su rotolo da 914):
+un PNG 100 × 60 mm centrato e un PDF A5 verticale centrato (ruotato dall'app) escono su
+fogli corti, dritti e con la cornice intera.
+
+La **larghezza del rotolo** è quella rilevata dalla stampante via SNMP; se non arriva si
+usa quella scelta a mano e, prima di stampare, IQClock chiede conferma. Da riga di comando
+in quel caso serve `--larghezza-rotolo MM`.
 
 ## Cosa viene mandato alla stampante
 
@@ -89,9 +118,9 @@ binari di testa che vengono scartati in lettura.
 - L'anteprima mostra le prime 4 pagine (PDF con pdfium, JPEG, TIFF e PNG); PostScript
   e HP-GL/2 restano senza anteprima.
 - Niente nesting o ridimensionamento: decide la stampante.
-- La rotazione di 90° la decide la stampante (impostazione del pannello): la T2600
-  ruota il foglio quando così entra nel rotolo o consuma meno carta, e l'anteprima
-  mostra già le pagine come usciranno. Il PJL non la controlla: provato il 29/10/2026,
+- Con l'allineamento a sinistra la rotazione di 90° la decide la stampante (impostazione
+  del pannello): la T2600 ruota il foglio quando così entra nel rotolo o consuma meno
+  carta, e l'anteprima mostra già le pagine come usciranno. Il PJL non la controlla: provato il 29/10/2026,
   `@PJL SET AUTOROTATE=OFF` viene ignorato e `ON` non cambia niente.
 - Per le immagini si usano i DPI dichiarati dal file (EXIF/JFIF per JPEG, tag di
   risoluzione per TIFF, chunk `pHYs` per PNG); se mancano o non sono plausibili
