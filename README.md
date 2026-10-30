@@ -9,10 +9,15 @@ Progetto indipendente, non affiliato né approvato da HP. "HP" e "DesignJet" son
 dei rispettivi proprietari e qui compaiono solo per indicare la compatibilità. Il software
 è fornito senza alcuna garanzia.
 
+![IQClock con una tavola A1 in anteprima e lo stato della stampante](docs/screenshot.png)
+
 ## Uso
 
+- **Download**: [ultima release](https://github.com/CopisteriaTurri/IQClock/releases/latest)
+  (`iqclock-win-x64.exe`, `iqclock-linux-x64`). pdfium è già dentro l'eseguibile: al primo
+  avvio viene estratto in `%LOCALAPPDATA%\iqclock` (`~/.cache/iqclock` su Linux).
 - **Interfaccia**: `iqclock.exe` (oppure trascina i file sull'eseguibile).
-  Tenere `pdfium.dll` nella stessa cartella: senza, i PDF non hanno l'anteprima.
+  Una `pdfium.dll` messa nella stessa cartella ha la precedenza su quella inclusa.
 - **Riga di comando** (su Windows l'output è visibile solo dalla build di debug):
   ```
   iqclock stampa tavola.pdf --copie 2 --rotolo 1 --grigi
@@ -72,9 +77,18 @@ Il `prtMarkerSuppliesLevel` standard non è implementato dalla stampante.
 
 - L'anteprima mostra le prime 4 pagine (PDF con pdfium, JPEG, TIFF e PNG); PostScript
   e HP-GL/2 restano senza anteprima.
-- Niente nesting, ridimensionamento o rotazione automatica: decide la stampante.
-- Le immagini JPEG e TIFF sono misurate supponendo 300 dpi; per i PNG valgono quelli
-  dichiarati nel file.
+- Niente nesting o ridimensionamento: decide la stampante.
+- La rotazione di 90° la decide la stampante (impostazione del pannello): la T2600
+  ruota il foglio quando così entra nel rotolo o consuma meno carta, e l'anteprima
+  mostra già le pagine come usciranno. Il PJL non la controlla: provato il 29/10/2026,
+  `@PJL SET AUTOROTATE=OFF` viene ignorato e `ON` non cambia niente.
+- Per le immagini si usano i DPI dichiarati dal file (EXIF/JFIF per JPEG, tag di
+  risoluzione per TIFF, chunk `pHYs` per PNG); se mancano o non sono plausibili
+  (0, 1, ecc.) si presumono 300 dpi. La lista indica i DPI usati e se sono presunti;
+  l'anteprima e le misure in mm seguono quegli stessi DPI.
+  Provato sulla T2600 il 29/10/2026: rispetta i DPI del JPEG (solo JFIF o solo EXIF,
+  a 72 dpi), del TIFF e del PNG (150 dpi, `pHYs` portato nel TIFF convertito) e, se
+  JFIF ed EXIF non coincidono, usa l'EXIF come l'anteprima.
 - Nessun controllo che il job sia stato effettivamente stampato: "inviato" vuol dire
   che la stampante ha ricevuto tutti i byte.
 
@@ -82,8 +96,8 @@ Il `prtMarkerSuppliesLevel` standard non è implementato dalla stampante.
 
 ```
 ./scarica-pdfium.sh                                    # pdfium in pdfium/ (non è in git)
-cargo build --release                                  # Linux
-cargo build --release --target x86_64-pc-windows-gnu   # Windows (serve mingw64-gcc)
+cargo build --release --features pdfium-incluso       # Linux
+cargo build --release --features pdfium-incluso --target x86_64-pc-windows-gnu   # Windows (serve mingw64-gcc)
 cargo test
 ```
 
@@ -94,9 +108,10 @@ in git: `iqclock.png` è quella della finestra e della taskbar, `iqclock.ico` la
 pdfium viene da [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries),
 release `chromium/7881`: è la versione dell'API per cui è compilato `pdfium-render` 0.9
 (feature `pdfium_latest`). Aggiornando il crate va aggiornata anche `VERSIONE` nello script.
-Per distribuire su Windows: `iqclock.exe` + `pdfium/win-x64/pdfium.dll` +
-`pdfium/LICENSE` nella stessa cartella. In debug l'app trova pdfium anche in
-`pdfium/<piattaforma>` del progetto.
+Con la feature `pdfium-incluso` (quella delle release) la libreria finisce
+nell'eseguibile, che pesa circa 7 MB in più; la licenza di pdfium va distribuita insieme
+(`LICENSE-pdfium.txt` nella release). Senza la feature pdfium va messa accanto
+all'eseguibile; in debug l'app la trova anche in `pdfium/<piattaforma>` del progetto.
 
 ## Licenza
 
