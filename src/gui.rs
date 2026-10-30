@@ -132,6 +132,9 @@ pub struct App {
     taglierina: Option<bool>,
     extra_pjl: String,
     larghezza_rotolo: f64,
+    /// Larghezza letta dalla stampante via SNMP (nome ingresso, mm).
+    /// `None` = non esposta o stampante non raggiunta: si usa il fallback manuale.
+    larghezza_rilevata: Option<(String, f64)>,
     stato_stampante: Option<Result<StatoStampante, String>>,
     verifica_in_corso: bool,
     avvisi: Vec<String>,
@@ -163,6 +166,7 @@ impl App {
             scala_di_grigi: false,
             taglierina: None,
             extra_pjl: String::new(),
+            larghezza_rilevata: None,
             stato_stampante: None,
             verifica_in_corso: false,
             avvisi: errore_pdfium.into_iter().collect(),
@@ -224,6 +228,12 @@ impl App {
         }
     }
 
+    /// Larghezza usata per anteprima e controllo di ingombro: quella rilevata
+    /// via SNMP se disponibile, altrimenti il fallback scelto a mano.
+    fn rotolo_effettivo(&self) -> f64 {
+        self.larghezza_rilevata.as_ref().map(|(_, m)| *m).unwrap_or(self.larghezza_rotolo)
+    }
+
     /// Manda i documenti pronti uno dopo l'altro, su un unico thread: la porta
     /// 9100 accetta un job alla volta.
     fn stampa(&mut self, ctx: &egui::Context) {
@@ -281,6 +291,12 @@ impl App {
                 Evento::Finito(id, Ok(())) => self.imposta_stato(id, StatoJob::Inviato),
                 Evento::Finito(id, Err(e)) => self.imposta_stato(id, StatoJob::Errore(e)),
                 Evento::Stato(r) => {
+                    if let Ok(s) = &r {
+                        self.larghezza_rilevata =
+                            s.larghezza_rotolo_mm().map(|(n, m)| (n.to_string(), m));
+                    } else {
+                        self.larghezza_rilevata = None;
+                    }
                     self.stato_stampante = Some(r);
                     self.verifica_in_corso = false;
                 }
@@ -347,7 +363,7 @@ impl App {
                         "MANUAL_FEED" => "Foglio singolo",
                         n => n,
                     };
-                    ui.colored_label(colore, format!("{nome}: {}", i.descrizione()));
+                    ui.colored_label(colore, format!("{nome}: {}", i.descrizione_lunga()));
                 }
                 for c in &s.cartucce {
                     barra_inchiostro(ui, c);
@@ -384,7 +400,24 @@ impl App {
                 }
             })
             .response
-            .on_hover_text("Larghezza del rotolo, usata solo per l'anteprima (anche per prevedere la rotazione)");
+            .on_hover_text(
+                "Fallback manuale: vale solo se la stampante non dice che rotolo ha caricato",
+            );
+        match &self.larghezza_rilevata {
+            Some((nome, mm)) => {
+                ui.colored_label(
+                    Color32::DARK_GREEN,
+                    format!("Rotolo rilevato ({nome}): {mm:.0} mm — anteprima su questo"),
+                );
+            }
+            None => {
+                let nota = match &self.stato_stampante {
+                    Some(Ok(_)) => "Rotolo non rilevato (la MIB non espone le dimensioni): uso il fallback manuale",
+                    Some(Err(_)) | None => "Rotolo non rilevato: uso il fallback manuale",
+                };
+                ui.colored_label(Color32::GRAY, nota);
+            }
+        }
 
         ui.add_space(6.0);
         sezione(ui, "COLORE");
@@ -474,7 +507,7 @@ impl App {
                         ui.label(RichText::new(&d.nome).small().strong());
                         let mut didascalia =
                             format!("{} · {}", d.info.formato.etichetta(), file::dimensione_leggibile(d.info.byte));
-                        if (0..d.info.pagine.min(PAGINE_MAX)).any(|n| d.ruotata(n, self.larghezza_rotolo)) {
+                        if (0..d.info.pagine.min(PAGINE_MAX)).any(|n| d.ruotata(n, self.rotolo_effettivo())) {
                             didascalia.push_str(" · 90°");
                         }
                         ui.label(RichText::new(didascalia).small());
@@ -543,7 +576,7 @@ impl App {
         // formato, sono in scala una sotto l'altra.
         let margine = 30.0;
         let spazio_tra_pagine = 8.0;
-        let rotolo_mm = self.larghezza_rotolo;
+        let rotolo_mm = self.rotolo_effettivo();
         let scala = (area.width() - 2.0 * margine) / rotolo_mm as f32;
         let pagine_visibili = d.info.pagine.min(PAGINE_MAX);
         // Misure come escono dalla stampante: la T2600 ruota di 90° da sola

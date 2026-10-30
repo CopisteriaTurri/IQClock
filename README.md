@@ -70,8 +70,19 @@ Verificato sulla T2600 il 23/10/2026:
 | Nomi cartucce | `1.3.6.1.2.1.43.11.1.1.6.1.N` |
 | % inchiostro (MIB privata HP) | `1.3.6.1.4.1.11.2.3.9.4.2.1.4.1.5.4.N.1.0` |
 | Ingressi carta / stato | `1.3.6.1.2.1.43.8.2.1.13.1.N` / `….11.1.N` |
+| Nome supporto letto | `1.3.6.1.4.1.11.2.3.9.4.2.1.4.1.3.3.N.4.0` → "Plain Paper" (riga 1 = rotolo) |
+| Larghezza rotolo | `1.3.6.1.4.1.11.2.3.9.4.2.1.4.1.3.3.N.10.0` in decipoint (1/720″): 25920 = 914,4 mm |
+| Carta residua sul rotolo | `1.3.6.1.4.1.11.2.3.9.4.2.1.4.1.3.3.N.11.0`, stessa unità (1971554 = 69,6 m) |
 
 Il `prtMarkerSuppliesLevel` standard non è implementato dalla stampante.
+
+La tabella carta standard espone solo nomi e stati: le dimensioni stanno nella
+MIB privata HP (passerella PML), verificata il 28/10/2026 contro l'EWS
+(`DevMgmt/MediaHandlingDyn.xml`: Roll1 914.400000 mm, restano 69552.065476 mm).
+La larghezza mostrata in GUI (`Rotolo rilevato`) e da `iqclock stato` è quella
+della riga HP dell'ingresso pronto; se manca (walk vuoti o valori ≤ 0) si usa il
+fallback manuale e l'anteprima va su quello. Le stringhe PML hanno due byte
+binari di testa che vengono scartati in lettura.
 
 ## Limiti del prototipo
 
