@@ -108,7 +108,8 @@ impl StatoStampante {
         };
         match self.dispositivo {
             Some(3) => format!("{base} — con avvisi"),
-            Some(5) if self.stampante.is_some() => format!("{base} — errore"),
+            // Se la base viene già da hrDeviceStatus, l'errore è già detto.
+            Some(5) if matches!(self.stampante, Some(3..=5)) => format!("{base} — errore"),
             _ => base.to_string(),
         }
     }
@@ -196,7 +197,11 @@ fn per_indice(voci: Vec<(Vec<u32>, Valore)>) -> Vec<(u32, Valore)> {
 }
 
 pub fn leggi(host: &str) -> Result<StatoStampante> {
-    let mut c = Client::new(host, "public")?;
+    leggi_da(host, 161)
+}
+
+pub fn leggi_da(host: &str, porta: u16) -> Result<StatoStampante> {
+    let mut c = Client::new_con_porta(host, porta, "public")?;
     let mut stato = StatoStampante::default();
 
     for (o, v) in c.get(&[snmp::oid(MODELLO), snmp::oid(STATO_STAMPANTE), snmp::oid(STATO_DISPOSITIVO)])? {
@@ -259,6 +264,115 @@ pub fn leggi(host: &str) -> Result<StatoStampante> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::snmp::test::{avvia_agente, ber, ber_intero};
+    use std::collections::BTreeMap;
+    use std::net::UdpSocket;
+    use std::thread;
+    use std::time::Duration;
+
+    fn testo(s: &str) -> Vec<u8> {
+        ber(0x04, s.as_bytes())
+    }
+
+    fn sotto(base: &str, indice: &str) -> Vec<u32> {
+        snmp::oid(&format!("{base}.{indice}"))
+    }
+
+    /// Tabella che imita la T2600: modello, stati, due cartucce (una nota con
+    /// livello, una ignota senza livello), rotolo in uso e manuale vuoto.
+    fn tabella_base(stampante: i64, dispositivo: i64) -> BTreeMap<Vec<u32>, Vec<u8>> {
+        BTreeMap::from([
+            (snmp::oid(MODELLO), testo("HP DesignJet T2600")),
+            (snmp::oid(STATO_STAMPANTE), ber_intero(stampante)),
+            (snmp::oid(STATO_DISPOSITIVO), ber_intero(dispositivo)),
+            (sotto(NOMI_CARTUCCE, "1"), testo("HP 730 300ML ( P2V62A )")),
+            (sotto(NOMI_CARTUCCE, "2"), testo("HP 730 300ML ( P2V99A )")),
+            (sotto(LIVELLI_HP, "1.1.0"), ber_intero(87)),
+            (sotto(NOMI_INGRESSI, "1"), testo("ROLL")),
+            (sotto(NOMI_INGRESSI, "2"), testo("MANUAL FEED")),
+            (sotto(STATI_INGRESSI, "1"), ber_intero(6)),
+            (sotto(STATI_INGRESSI, "2"), ber_intero(21)),
+        ])
+    }
+
+    #[test]
+    fn legge_stato_pronta() {
+        let s = leggi_da("127.0.0.1", avvia_agente(tabella_base(3, 2))).unwrap();
+        assert_eq!(s.modello.as_deref(), Some("HP DesignJet T2600"));
+        assert_eq!(s.descrizione(), "pronta");
+        assert!(s.ok());
+        assert_eq!(s.ingressi.len(), 2);
+        assert!(s.ingressi[0].pronto());
+        assert_eq!(s.ingressi[1].descrizione(), "vuoto / da caricare");
+        assert!(!s.ingressi[1].pronto());
+        assert_eq!(s.cartucce.len(), 2);
+        assert_eq!(s.cartucce[0].colore, Some("Ciano"));
+        assert_eq!(s.cartucce[0].percentuale, Some(87));
+        assert_eq!(s.cartucce[1].colore, None);
+        assert_eq!(s.cartucce[1].percentuale, None);
+    }
+
+    #[test]
+    fn legge_stato_errore() {
+        let s = leggi_da("127.0.0.1", avvia_agente(tabella_base(1, 5))).unwrap();
+        assert_eq!(s.descrizione(), "ferma (errore)");
+        assert!(!s.ok());
+    }
+
+    #[test]
+    fn inchiostro_esaurito_e_livelli_fuori_scala() {
+        let mut t = tabella_base(3, 2);
+        t.insert(sotto(LIVELLI_HP, "1.1.0"), ber_intero(0));
+        t.insert(sotto(LIVELLI_HP, "2.1.0"), ber_intero(150));
+        let s = leggi_da("127.0.0.1", avvia_agente(t)).unwrap();
+        assert_eq!(s.cartucce[0].percentuale, Some(0));
+        assert_eq!(s.cartucce[1].percentuale, None, "oltre 100 non è una percentuale");
+    }
+
+    #[test]
+    fn nessuna_risposta_da_errore_leggibile() {
+        // Agente muto: tiene la porta aperta senza rispondere (i datagrammi
+        // restano in coda, niente ICMP), il client esaurisce i tentativi.
+        // Dura ~4 s (2 tentativi × timeout 2 s): è il prezzo del test.
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let porta = sock.local_addr().unwrap().port();
+        thread::spawn(move || {
+            let _tiene_aperta = sock;
+            thread::sleep(Duration::from_secs(6));
+        });
+        let err = leggi_da("127.0.0.1", porta).unwrap_err();
+        assert!(format!("{err:#}").contains("nessuna risposta SNMP"), "{err:#}");
+    }
+
+    #[test]
+    fn per_indice_usa_ultimo_arco() {
+        let v = per_indice(vec![
+            (vec![1, 2, 7], Valore::Intero(6)),
+            (vec![1, 2, 3], Valore::Nullo),
+            (vec![], Valore::Intero(1)),
+        ]);
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].0, 7);
+        assert_eq!(v[0].1.intero(), Some(6));
+    }
+
+    #[test]
+    fn descrizione_e_ok() {
+        let pronta = StatoStampante { stampante: Some(3), dispositivo: Some(2), ..Default::default() };
+        assert_eq!(pronta.descrizione(), "pronta");
+        assert!(pronta.ok());
+        let stampa = StatoStampante { stampante: Some(4), dispositivo: Some(2), ..Default::default() };
+        assert_eq!(stampa.descrizione(), "sta stampando");
+        assert!(stampa.ok());
+        let avvisi = StatoStampante { stampante: Some(3), dispositivo: Some(3), ..Default::default() };
+        assert_eq!(avvisi.descrizione(), "pronta — con avvisi");
+        assert!(!avvisi.ok());
+        let riscalda = StatoStampante { stampante: Some(5), dispositivo: Some(2), ..Default::default() };
+        assert_eq!(riscalda.descrizione(), "in riscaldamento");
+        assert!(!riscalda.ok());
+        assert_eq!(StatoStampante::default().descrizione(), "stato sconosciuto");
+        assert!(!StatoStampante::default().ok());
+    }
 
     fn ingresso(nome: &str, stato: i64, larghezza_mm: Option<f64>) -> Ingresso {
         Ingresso { nome: nome.into(), stato, media: None, larghezza_mm, rimanenti_mm: None }

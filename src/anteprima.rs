@@ -2,8 +2,9 @@
 //! su un thread dedicato: pdfium non è thread-safe, quindi una sola istanza lo usa.
 //!
 //! La libreria pdfium (`pdfium.dll` / `libpdfium.so`, build chromium/7881 di
-//! bblanchon/pdfium-binaries) va messa accanto all'eseguibile. Se manca, i PDF
-//! restano senza anteprima e il resto funziona.
+//! bblanchon/pdfium-binaries) può stare accanto all'eseguibile; con la feature
+//! `pdfium-incluso` (usata per le release) è dentro l'eseguibile e viene estratta
+//! nella cache utente. Se manca, i PDF restano senza anteprima e il resto funziona.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Sender, channel};
@@ -40,17 +41,7 @@ impl Anteprime {
             let pdfium = carica_pdfium();
             let _ = esito_tx.send(pdfium.as_ref().err().cloned());
             for (id, percorso, formato) in rx {
-                let pagine = match formato {
-                    Formato::Pdf => match &pdfium {
-                        Ok(p) => pagine_pdf(p, &percorso).unwrap_or_default(),
-                        Err(_) => Vec::new(),
-                    },
-                    Formato::Jpeg | Formato::Tiff | Formato::Png => {
-                        immagine(&percorso).map(|immagine| Pagina { immagine, mm: None }).into_iter().collect()
-                    }
-                    Formato::PostScript | Formato::Hpgl2 => Vec::new(),
-                };
-                consegna(id, pagine);
+                consegna(id, pagine_per_richiesta(&pdfium, &percorso, formato));
             }
         });
         let errore = esito_rx.recv().unwrap_or_else(|_| Some("thread anteprime terminato".into()));
@@ -62,31 +53,109 @@ impl Anteprime {
     }
 }
 
+/// Una richiesta del thread anteprime: i PDF senza pdfium (o illeggibili)
+/// danno zero pagine ma non bloccano il resto (le immagini funzionano comunque).
+fn pagine_per_richiesta(pdfium: &Result<Pdfium, String>, percorso: &Path, formato: Formato) -> Vec<Pagina> {
+    match formato {
+        Formato::Pdf => match pdfium {
+            Ok(p) => pagine_pdf(p, percorso).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        },
+        Formato::Jpeg | Formato::Tiff | Formato::Png => {
+            immagine(percorso).map(|immagine| Pagina { immagine, mm: None }).into_iter().collect()
+        }
+        Formato::PostScript | Formato::Hpgl2 => Vec::new(),
+    }
+}
+
 /// Cerca pdfium accanto all'eseguibile, poi (in debug) in `pdfium/<piattaforma>`
-/// del progetto, infine tra le librerie di sistema.
+/// del progetto, poi quello incluso nell'eseguibile, infine tra le librerie di sistema.
 fn carica_pdfium() -> Result<Pdfium, String> {
+    #[allow(unused_mut)]
+    let mut cartelle = cartelle_pdfium();
+    #[cfg(feature = "pdfium-incluso")]
+    cartelle.push(estrai_pdfium().map_err(|e| format!("estrazione di pdfium non riuscita: {e}"))?);
+    carica_pdfium_in(&cartelle, true)
+}
+
+fn cartelle_pdfium() -> Vec<PathBuf> {
     let mut cartelle: Vec<PathBuf> = Vec::new();
     if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
         cartelle.push(dir);
     }
     if cfg!(debug_assertions) {
-        let piattaforma = if cfg!(windows) { "win-x64" } else { "linux-x64" };
-        cartelle.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("pdfium").join(piattaforma));
+        cartelle.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("pdfium").join(PIATTAFORMA));
     }
-    for dir in &cartelle {
+    cartelle
+}
+
+/// Variante testabile di [`carica_pdfium`]: cerca solo in `cartelle` e, se
+/// `con_fallback_sistema` è falso, non prova le librerie di sistema (così il
+/// caso "libpdfium mancante" è riproducibile anche dove pdfium è installato).
+fn carica_pdfium_in(cartelle: &[PathBuf], con_fallback_sistema: bool) -> Result<Pdfium, String> {
+    for dir in cartelle {
         let lib = Pdfium::pdfium_platform_library_name_at_path(dir);
         if lib.exists() {
-            return Pdfium::bind_to_library(&lib)
-                .map(Pdfium::new)
-                .map_err(|e| format!("{}: {e}", lib.display()));
+            return match Pdfium::bind_to_library(&lib) {
+                Ok(bindings) => Ok(Pdfium::new(bindings)),
+                // pdfium-render consente un solo binding per processo: nei test in
+                // parallelo (ma non nell'app, che lo carica una volta sola) la
+                // libreria può essere già inizializzata. `Pdfium::default()` in quel
+                // caso riusa i binding esistenti invece di riaprire la libreria.
+                Err(PdfiumError::PdfiumLibraryBindingsAlreadyInitialized) => Ok(Pdfium::default()),
+                Err(e) => Err(format!("{}: {e}", lib.display())),
+            };
         }
     }
-    Pdfium::bind_to_system_library().map(Pdfium::new).map_err(|_| {
-        format!(
-            "{} non trovata accanto all'eseguibile: anteprima dei PDF non disponibile",
-            Pdfium::pdfium_platform_library_name().to_string_lossy()
-        )
-    })
+    if con_fallback_sistema {
+        return match Pdfium::bind_to_system_library() {
+            Ok(bindings) => Ok(Pdfium::new(bindings)),
+            Err(PdfiumError::PdfiumLibraryBindingsAlreadyInitialized) => Ok(Pdfium::default()),
+            Err(_) => Err(messaggio_pdfium_mancante()),
+        };
+    }
+    Err(messaggio_pdfium_mancante())
+}
+
+fn messaggio_pdfium_mancante() -> String {
+    format!(
+        "{} non trovata accanto all'eseguibile: anteprima dei PDF non disponibile",
+        Pdfium::pdfium_platform_library_name().to_string_lossy()
+    )
+}
+
+const PIATTAFORMA: &str = if cfg!(windows) { "win-x64" } else { "linux-x64" };
+
+#[cfg(all(feature = "pdfium-incluso", windows))]
+const PDFIUM_INCLUSO: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/pdfium/win-x64/pdfium.dll"));
+#[cfg(all(feature = "pdfium-incluso", not(windows)))]
+const PDFIUM_INCLUSO: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/pdfium/linux-x64/libpdfium.so"));
+
+/// Scrive la pdfium inclusa nella cache utente (`%LOCALAPPDATA%\iqclock` su Windows,
+/// `~/.cache/iqclock` altrove), se non c'è già identica, e ne restituisce la cartella.
+#[cfg(feature = "pdfium-incluso")]
+fn estrai_pdfium() -> std::io::Result<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("XDG_CACHE_HOME")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        })
+        .ok_or_else(|| std::io::Error::other("cartella di cache non trovata"))?;
+    let dir = base.join("iqclock");
+    let lib = Pdfium::pdfium_platform_library_name_at_path(&dir);
+    if std::fs::read(&lib).ok().as_deref() != Some(PDFIUM_INCLUSO) {
+        std::fs::create_dir_all(&dir)?;
+        // Prima su un file a parte: due istanze avviate insieme non vedono mai
+        // una libreria scritta a metà.
+        let tmp = dir.join(format!("pdfium-{}.tmp", std::process::id()));
+        std::fs::write(&tmp, PDFIUM_INCLUSO)?;
+        std::fs::rename(&tmp, &lib).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })?;
+    }
+    Ok(dir)
 }
 
 fn pagine_pdf(pdfium: &Pdfium, percorso: &Path) -> Result<Vec<Pagina>, PdfiumError> {
@@ -118,32 +187,61 @@ fn immagine(percorso: &Path) -> Option<ColorImage> {
 mod test {
     use super::*;
     use lopdf::dictionary;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
 
-    /// Richiede pdfium in `pdfium/linux-x64` (vedi `scarica-pdfium.sh`).
-    #[test]
-    fn rende_un_pdf_a1() {
-        let Ok(pdfium) = carica_pdfium() else {
-            eprintln!("pdfium assente: test saltato");
-            return;
-        };
-        let pdf = std::env::temp_dir().join(format!("iqclock-a1-{}.pdf", std::process::id()));
-        // PDF minimo: una pagina A1 (1684 × 2384 pt) vuota.
+    static CONTATORE: AtomicU64 = AtomicU64::new(0);
+    fn file_temp(suffisso: &str) -> PathBuf {
+        let n = CONTATORE.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!("iqclock-test-{}-{n}{suffisso}", std::process::id()))
+    }
+
+    /// PDF minimo con una pagina per ogni MediaBox `(larghezza, altezza)` in pt.
+    fn crea_pdf(pagine_pt: &[(i32, i32)]) -> PathBuf {
         let mut doc = lopdf::Document::with_version("1.5");
         let pagine_id = doc.new_object_id();
-        let pagina = doc.add_object(dictionary! {
-            "Type" => "Page",
-            "Parent" => pagine_id,
-            "MediaBox" => vec![0.into(), 0.into(), 1684.into(), 2384.into()],
-        });
+        let mut kids = Vec::new();
+        for &(l, a) in pagine_pt {
+            let pagina = doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pagine_id,
+                "MediaBox" => vec![0.into(), 0.into(), l.into(), a.into()],
+            });
+            kids.push(pagina.into());
+        }
+        let n = pagine_pt.len() as i64;
         doc.objects.insert(
             pagine_id,
             lopdf::Object::Dictionary(dictionary! {
-                "Type" => "Pages", "Kids" => vec![pagina.into()], "Count" => 1,
+                "Type" => "Pages", "Kids" => kids, "Count" => lopdf::Object::Integer(n),
             }),
         );
         let catalogo = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pagine_id });
         doc.trailer.set("Root", catalogo);
+        let pdf = file_temp(".pdf");
         doc.save(&pdf).unwrap();
+        pdf
+    }
+
+    /// Pdfium caricato davvero, oppure `None` con avviso (sviluppo locale senza
+    /// `scarica-pdfium.sh`). In CI la libreria deve esserci: lì l'assenza è un
+    /// errore, altrimenti i test di rendering passerebbero senza girare.
+    fn pdfium_o_salta() -> Option<Pdfium> {
+        match carica_pdfium() {
+            Ok(p) => Some(p),
+            Err(e) if std::env::var_os("CI").is_some() => panic!("pdfium non caricato in CI: {e}"),
+            Err(e) => {
+                eprintln!("pdfium assente ({e}): test saltato");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn rende_un_pdf_a1() {
+        let Some(pdfium) = pdfium_o_salta() else { return };
+        // Una pagina A1 (1684 × 2384 pt) vuota.
+        let pdf = crea_pdf(&[(1684, 2384)]);
 
         let pagine = pagine_pdf(&pdfium, &pdf).unwrap();
         std::fs::remove_file(&pdf).unwrap();
@@ -153,5 +251,99 @@ mod test {
         assert!((l as f64 / a as f64 - 1684.0 / 2384.0).abs() < 0.01);
         let (l_mm, a_mm) = pagine[0].mm.unwrap();
         assert!((l_mm - 594.0).abs() < 1.0 && (a_mm - 841.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn mostra_solo_le_prime_quattro_pagine() {
+        let Some(pdfium) = pdfium_o_salta() else { return };
+        // Sei pagine A4 vuote: l'anteprima ne mostra al massimo PAGINE_MAX.
+        let pdf = crea_pdf(&[(595, 842); 6]);
+        let pagine = pagine_pdf(&pdfium, &pdf).unwrap();
+        std::fs::remove_file(&pdf).unwrap();
+        assert_eq!(pagine.len(), PAGINE_MAX);
+    }
+
+    #[test]
+    fn pdf_corrotto_e_inesistente_danno_errore() {
+        let Some(pdfium) = pdfium_o_salta() else { return };
+        let corrotto = file_temp(".pdf");
+        std::fs::write(&corrotto, b"%PDF-1.5\nnon un pdf vero").unwrap();
+        assert!(pagine_pdf(&pdfium, &corrotto).is_err(), "PDF corrotto");
+        std::fs::remove_file(&corrotto).unwrap();
+        assert!(pagine_pdf(&pdfium, &file_temp(".pdf")).is_err(), "PDF inesistente");
+    }
+
+    /// Senza libpdfium il messaggio dice cosa manca e che i PDF restano senza
+    /// anteprima; `carica_pdfium_in` con fallback disattivato lo rende
+    /// riproducibile anche dove pdfium è installato.
+    #[test]
+    fn pdfium_mancante_messaggio_chiaro() {
+        let inesistente = Path::new(env!("CARGO_MANIFEST_DIR")).join("pdfium-cella-inesistente");
+        let Err(msg) = carica_pdfium_in(std::slice::from_ref(&inesistente), false) else {
+            panic!("una cartella inesistente non può dare pdfium");
+        };
+        assert!(msg.contains("anteprima dei PDF non disponibile"), "{msg}");
+        assert!(msg.contains(&*Pdfium::pdfium_platform_library_name().to_string_lossy()), "{msg}");
+    }
+
+    fn png_valido(l: u32, a: u32) -> PathBuf {
+        let p = file_temp(".png");
+        image::RgbImage::new(l, a).save(&p).unwrap();
+        p
+    }
+
+    /// Senza pdfium i PDF danno zero pagine ma le immagini funzionano comunque
+    /// (l'app resta utilizzabile) e gli altri formati danno zero pagine.
+    #[test]
+    fn senza_pdfium_pdf_vuoto_ma_immagini_funzionano() {
+        let senza: Result<Pdfium, String> = Err(messaggio_pdfium_mancante());
+        let pdf = crea_pdf(&[(595, 842)]);
+        assert!(pagine_per_richiesta(&senza, &pdf, Formato::Pdf).is_empty());
+        std::fs::remove_file(&pdf).unwrap();
+        assert!(pagine_per_richiesta(&senza, &file_temp(".pdf"), Formato::PostScript).is_empty());
+        assert!(pagine_per_richiesta(&senza, &file_temp(".pdf"), Formato::Hpgl2).is_empty());
+
+        let png = png_valido(60, 40);
+        let pagine = pagine_per_richiesta(&senza, &png, Formato::Png);
+        std::fs::remove_file(&png).unwrap();
+        assert_eq!(pagine.len(), 1);
+        assert!(pagine[0].mm.is_none());
+    }
+
+    #[test]
+    fn immagine_corrotta_da_zero_pagine() {
+        let p = file_temp(".png");
+        std::fs::write(&p, b"non un'immagine").unwrap();
+        assert!(immagine(&p).is_none());
+        let senza: Result<Pdfium, String> = Err(messaggio_pdfium_mancante());
+        assert!(pagine_per_richiesta(&senza, &p, Formato::Png).is_empty());
+        assert!(pagine_per_richiesta(&senza, &p, Formato::Jpeg).is_empty());
+        assert!(pagine_per_richiesta(&senza, &p, Formato::Tiff).is_empty());
+        std::fs::remove_file(&p).unwrap();
+    }
+
+    #[test]
+    fn immagine_grande_viene_ridotta_mantenendo_le_proporzioni() {
+        let p = png_valido(2000, 1000);
+        let img = immagine(&p).expect("PNG valido");
+        std::fs::remove_file(&p).unwrap();
+        let [l, a] = img.size;
+        assert_eq!(l, LATO_MAX as usize);
+        assert_eq!(a, LATO_MAX as usize / 2);
+    }
+
+    /// Il thread anteprime consegna comunque le immagini (con o senza pdfium):
+    /// l'app resta utilizzabile anche se la libreria manca.
+    #[test]
+    fn il_thread_consegna_le_immagini() {
+        let png = png_valido(60, 40);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (anteprime, _) = Anteprime::avvia(move |id, pagine| {
+            let _ = tx.send((id, pagine.len()));
+        });
+        anteprime.richiedi(7, png.clone(), Formato::Png);
+        let (id, n) = rx.recv_timeout(Duration::from_secs(10)).expect("consegna anteprima");
+        std::fs::remove_file(&png).unwrap();
+        assert_eq!((id, n), (7, 1));
     }
 }

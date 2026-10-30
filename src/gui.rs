@@ -5,20 +5,77 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
+use eframe::egui::load::SizedTexture;
 use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText,
-    Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, Vec2,
+    self, Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Pos2, Rect, RichText,
+    Sense, Stroke, StrokeKind, TextStyle, TextureHandle, TextureOptions, Vec2,
 };
 
 use crate::anteprima::{Anteprime, PAGINE_MAX, Pagina};
 use crate::config::Config;
 use crate::file::{self, InfoFile};
 use crate::pjl::{self, OpzioniJob, Sorgente};
+use crate::rotazione::{self, TOLLERANZA_MM};
 use crate::stampante;
 use crate::stato::{self, Cartuccia, StatoStampante};
 
 const BLU_HP: Color32 = Color32::from_rgb(0x00, 0x7D, 0xBA);
 const ARANCIO: Color32 = Color32::from_rgb(0xC0, 0x60, 0x00);
+/// Stili di testo propri dell'interfaccia, oltre a quelli standard di egui.
+const SEZIONE: &str = "Sezione";
+const AZIONE: &str = "Azione";
+const RICHIAMO: &str = "Richiamo";
+const RILASCIO: &str = "Rilascio";
+/// Famiglia del grassetto vero (in egui `.strong()` cambia solo il colore).
+const GRASSETTO: &str = "Grassetto";
+
+/// Tutte le dimensioni del testo, in un posto solo: in giro per il codice si
+/// usano solo gli stili (`TextStyle`), mai valori fissi.
+fn configura_stile(ctx: &egui::Context) {
+    use FontFamily::{Monospace, Proportional};
+    let mut font = egui::FontDefinitions::default();
+    for (nome, dati) in [
+        ("NotoSans-Regular", &include_bytes!("../assets/font/NotoSans-Regular.ttf")[..]),
+        ("NotoSans-Bold", &include_bytes!("../assets/font/NotoSans-Bold.ttf")[..]),
+    ] {
+        font.font_data.insert(nome.into(), egui::FontData::from_static(dati).into());
+    }
+    // I font di default restano dopo, per i simboli (▸, ✓, …) che Noto Sans non ha.
+    let ripiego = font.families[&Proportional].clone();
+    font.families.get_mut(&Proportional).unwrap().insert(0, "NotoSans-Regular".into());
+    let mut grassetto = vec!["NotoSans-Bold".to_string()];
+    grassetto.extend(ripiego);
+    font.families.insert(FontFamily::Name(GRASSETTO.into()), grassetto);
+    ctx.set_fonts(font);
+    ctx.all_styles_mut(|s| {
+        s.text_styles = [
+            (TextStyle::Small, FontId::new(11.5, Proportional)),
+            (TextStyle::Body, FontId::new(14.0, Proportional)),
+            (TextStyle::Button, FontId::new(14.0, Proportional)),
+            (TextStyle::Heading, FontId::new(20.0, Proportional)),
+            (TextStyle::Monospace, FontId::new(13.0, Monospace)),
+            // Intestazioni di sezione (STAMPANTE, CARTA, …).
+            (TextStyle::Name(SEZIONE.into()), FontId::new(12.0, FontFamily::Name(GRASSETTO.into()))),
+            // Pulsante Stampa.
+            (TextStyle::Name(AZIONE.into()), FontId::new(17.0, FontFamily::Name(GRASSETTO.into()))),
+            // Invito ad aggiungere file nell'anteprima vuota.
+            (TextStyle::Name(RICHIAMO.into()), FontId::new(20.0, Proportional)),
+            // Sovrimpressione mentre si trascinano file.
+            (TextStyle::Name(RILASCIO.into()), FontId::new(28.0, Proportional)),
+        ]
+        .into();
+    });
+}
+
+fn stile(nome: &str) -> TextStyle {
+    TextStyle::Name(nome.into())
+}
+
+/// Intestazione di sezione nel pannello delle impostazioni.
+fn sezione(ui: &mut egui::Ui, testo: &str) {
+    ui.label(RichText::new(testo).text_style(stile(SEZIONE)).strong());
+}
+
 const LARGHEZZE_ROTOLO: [(&str, f64); 3] = [("24\" (610 mm)", 610.0), ("36\" (914 mm)", 914.0), ("44\" (1118 mm)", 1118.0)];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -48,6 +105,12 @@ impl Documento {
     /// della prima pagina lette all'apertura del file.
     fn mm_pagina(&self, n: usize) -> Option<(f64, f64)> {
         self.pagine.get(n).and_then(|(_, mm)| *mm).or(self.info.mm)
+    }
+
+    /// true se la stampante ruoterà la pagina `n` di 90°. Senza misure non si
+    /// può prevedere: la pagina resta dritta.
+    fn ruotata(&self, n: usize, rotolo_mm: f64) -> bool {
+        self.mm_pagina(n).is_some_and(|(l, a)| rotazione::ruota(l, a, rotolo_mm))
     }
 }
 
@@ -85,6 +148,7 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, config: Config, iniziali: Vec<PathBuf>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
+        configura_stile(&cc.egui_ctx);
         let (tx, rx) = channel();
         let (tx_pagine, ctx_pagine) = (tx.clone(), cc.egui_ctx.clone());
         let (anteprime, errore_pdfium) = Anteprime::avvia(move |id, pagine| {
@@ -271,7 +335,7 @@ impl App {
         ui.heading("Impostazioni di stampa");
         ui.add_space(8.0);
 
-        ui.label(RichText::new("STAMPANTE").small().strong());
+        sezione(ui, "STAMPANTE");
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.config.host).desired_width(130.0));
             ui.label(":");
@@ -312,7 +376,7 @@ impl App {
         }
 
         ui.separator();
-        ui.label(RichText::new("CARTA").small().strong());
+        sezione(ui, "CARTA");
         egui::ComboBox::from_id_salt("sorgente")
             .selected_text(self.sorgente.etichetta())
             .width(200.0)
@@ -356,14 +420,14 @@ impl App {
         }
 
         ui.add_space(6.0);
-        ui.label(RichText::new("COLORE").small().strong());
+        sezione(ui, "COLORE");
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.scala_di_grigi, false, "Colore");
             ui.selectable_value(&mut self.scala_di_grigi, true, "Scala di grigi");
         });
 
         ui.add_space(6.0);
-        ui.label(RichText::new("TAGLIERINA").small().strong());
+        sezione(ui, "TAGLIERINA");
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.taglierina, None, "Stampante");
             ui.selectable_value(&mut self.taglierina, Some(true), "Sì");
@@ -374,7 +438,7 @@ impl App {
 
         if let Some(i) = self.selezionato {
             ui.add_space(6.0);
-            ui.label(RichText::new("COPIE").small().strong());
+            sezione(ui, "COPIE");
             let d = &mut self.documenti[i];
             ui.horizontal(|ui| {
                 if ui.button("−").clicked() && d.copie > 1 {
@@ -412,7 +476,7 @@ impl App {
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.add_space(10.0);
             let pronti = self.documenti.iter().filter(|d| !matches!(d.stato, StatoJob::InInvio(_) | StatoJob::Inviato)).count();
-            let pulsante = egui::Button::new(RichText::new("Stampa").color(Color32::WHITE).size(16.0))
+            let pulsante = egui::Button::new(RichText::new("Stampa").color(Color32::WHITE).text_style(stile(AZIONE)))
                 .fill(BLU_HP)
                 .corner_radius(CornerRadius::same(16))
                 .min_size(Vec2::new(ui.available_width(), 36.0));
@@ -439,9 +503,18 @@ impl App {
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 90.0), Sense::hover());
-                        disegna_pagina(ui, rect, d, 0);
+                        disegna_pagina(ui, rect, d, 0, false);
                         ui.label(RichText::new(&d.nome).small().strong());
-                        ui.label(RichText::new(format!("{} · {}", d.info.formato.etichetta(), file::dimensione_leggibile(d.info.byte))).small());
+                        let mut didascalia =
+                            format!("{} · {}", d.info.formato.etichetta(), file::dimensione_leggibile(d.info.byte));
+                        if (0..d.info.pagine.min(PAGINE_MAX)).any(|n| d.ruotata(n, self.rotolo_effettivo())) {
+                            didascalia.push_str(" · 90°");
+                        }
+                        ui.label(RichText::new(didascalia).small());
+                        if let Some(r) = &d.info.risoluzione {
+                            let testo = RichText::new(r.etichetta()).small();
+                            ui.label(if r.presunta { testo.color(ARANCIO) } else { testo });
+                        }
                         match &d.stato {
                             StatoJob::Pronto => {}
                             StatoJob::InInvio(f) => {
@@ -493,7 +566,7 @@ impl App {
                 area.center(),
                 Align2::CENTER_CENTER,
                 "Trascina qui PDF, PNG, PostScript, TIFF, JPEG o HP-GL/2",
-                FontId::proportional(20.0),
+                stile(RICHIAMO).resolve(ui.style()),
                 Color32::from_gray(110),
             );
             return;
@@ -506,11 +579,35 @@ impl App {
         let rotolo_mm = self.rotolo_effettivo();
         let scala = (area.width() - 2.0 * margine) / rotolo_mm as f32;
         let pagine_visibili = d.info.pagine.min(PAGINE_MAX);
-        let misure: Vec<(f64, f64)> = (0..pagine_visibili)
-            .map(|n| d.mm_pagina(n).unwrap_or((rotolo_mm * 0.7, rotolo_mm)))
+        // Misure come escono dalla stampante: la T2600 ruota di 90° da sola
+        // quando conviene (vedi `rotazione.rs`), scambiando i due lati.
+        let misure: Vec<(f64, f64, bool)> = (0..pagine_visibili)
+            .map(|n| {
+                let (l, a) = d.mm_pagina(n).unwrap_or((rotolo_mm * 0.7, rotolo_mm));
+                let ruotata = d.ruotata(n, rotolo_mm);
+                if ruotata { (a, l, true) } else { (l, a, false) }
+            })
             .collect();
-        let lunghezza: f32 = misure.iter().map(|(_, a)| *a as f32 * scala + spazio_tra_pagine).sum();
-        let alto_disponibile = area.height() - 2.0 * margine - 24.0;
+        let mut nota = format!("{} — {}", d.nome, d.info.dettagli);
+        if d.info.pagine > pagine_visibili {
+            nota.push_str(&format!(" (mostrate {pagine_visibili})"));
+        }
+        let tolleranza = rotolo_mm + TOLLERANZA_MM;
+        if misure.iter().any(|(l, a, _)| l.min(*a) > tolleranza) {
+            nota.push_str("\nAttenzione: una pagina non entra nel rotolo, la stampante la ridimensionerà o taglierà");
+        } else if misure.iter().any(|(_, a, r)| *r && *a > tolleranza) {
+            nota.push_str("\nLa stampante ruoterà di 90° le pagine segnate, per farle entrare nel rotolo");
+        } else if misure.iter().any(|(_, _, r)| *r) {
+            nota.push_str("\nLa stampante ruoterà di 90° le pagine segnate, per risparmiare carta");
+        }
+        // Didascalia centrata che va a capo: con nomi lunghi o avvisi non
+        // starebbe nella larghezza dell'anteprima.
+        let mut testo = egui::text::LayoutJob::simple(nota, TextStyle::Body.resolve(ui.style()), Color32::from_gray(60), area.width() - 2.0 * margine);
+        testo.halign = Align::Center;
+        let nota = ui.painter().layout_job(testo);
+
+        let lunghezza: f32 = misure.iter().map(|(_, a, _)| *a as f32 * scala + spazio_tra_pagine).sum();
+        let alto_disponibile = area.height() - 2.0 * margine - nota.size().y;
         // Se il rotolo è troppo lungo per la finestra riduco tutto in proporzione.
         let rid = (alto_disponibile / lunghezza).min(1.0);
         let rotolo = Rect::from_min_size(
@@ -522,29 +619,18 @@ impl App {
         p.rect_stroke(rotolo, 0.0, Stroke::new(1.0, Color32::from_gray(160)), StrokeKind::Outside);
 
         let mut y = rotolo.top();
-        for (n, (l, a)) in misure.iter().enumerate() {
+        for (n, (l, a, ruotata)) in misure.iter().enumerate() {
             let dim = Vec2::new(*l as f32, *a as f32) * scala * rid;
-            disegna_pagina(ui, Rect::from_min_size(Pos2::new(rotolo.left(), y), dim), d, n);
+            let r = Rect::from_min_size(Pos2::new(rotolo.left(), y), dim);
+            disegna_pagina(ui, r, d, n, *ruotata);
+            if *ruotata {
+                p.text(r.left_top() + Vec2::new(5.0, 4.0), Align2::LEFT_TOP, "90°", TextStyle::Small.resolve(ui.style()), Color32::from_gray(90));
+            }
             y += dim.y + spazio_tra_pagine * rid;
         }
 
-        let mut nota = format!("{} — {}", d.nome, d.info.dettagli);
-        if d.info.pagine > pagine_visibili {
-            nota.push_str(&format!(" (mostrate {pagine_visibili})"));
-        }
-        let tolleranza = rotolo_mm + 0.5;
-        if misure.iter().any(|(l, a)| l.min(*a) > tolleranza) {
-            nota.push_str("  — attenzione: una pagina non entra nel rotolo, la stampante la ridimensionerà o taglierà");
-        } else if misure.iter().any(|(l, _)| *l > tolleranza) {
-            nota.push_str("  — attenzione: una pagina è più larga del rotolo, va ruotata (impostazione della stampante)");
-        }
-        ui.painter().text(
-            Pos2::new(area.center().x, area.bottom() - 16.0),
-            Align2::CENTER_CENTER,
-            nota,
-            FontId::proportional(13.0),
-            Color32::from_gray(60),
-        );
+        let alto_nota = nota.size().y;
+        p.galley(Pos2::new(area.center().x, area.bottom() - 8.0 - alto_nota), nota, Color32::from_gray(60));
     }
 }
 
@@ -559,14 +645,17 @@ fn barra_inchiostro(ui: &mut egui::Ui, c: &Cartuccia) {
     };
     ui.horizontal(|ui| {
         let nome = c.colore.unwrap_or(&c.nome);
-        ui.add_sized([100.0, 14.0], egui::Label::new(RichText::new(nome).small()).truncate())
-            .on_hover_text(&c.nome);
-        let (r, _) = ui.allocate_exact_size(Vec2::new(90.0, 8.0), Sense::hover());
+        let dim = Vec2::new(120.0, ui.text_style_height(&TextStyle::Body));
+        ui.allocate_ui_with_layout(dim, Layout::left_to_right(Align::Center), |ui| {
+            ui.set_min_width(dim.x);
+            ui.add(egui::Label::new(nome).truncate()).on_hover_text(&c.nome);
+        });
+        let (r, _) = ui.allocate_exact_size(Vec2::new(70.0, 10.0), Sense::hover());
         ui.painter().rect_filled(r, 2.0, Color32::from_gray(225));
         if let Some(p) = c.percentuale {
             let pieno = Rect::from_min_size(r.min, Vec2::new(r.width() * p as f32 / 100.0, r.height()));
             ui.painter().rect_filled(pieno, 2.0, colore);
-            let testo = RichText::new(format!("{p}%")).small();
+            let testo = RichText::new(format!("{p}%"));
             ui.label(if p < 15 { testo.color(ARANCIO).strong() } else { testo });
         }
     });
@@ -574,12 +663,14 @@ fn barra_inchiostro(ui: &mut egui::Ui, c: &Cartuccia) {
 
 /// Pagina `n` del documento: l'immagine renderizzata se c'è, altrimenti una
 /// pagina bianca con il formato, centrata in `spazio` con le sue proporzioni.
-fn disegna_pagina(ui: &egui::Ui, spazio: Rect, d: &Documento, n: usize) {
+/// Con `ruotata` la pagina è girata di 90°, come la stampa la stampante.
+fn disegna_pagina(ui: &egui::Ui, spazio: Rect, d: &Documento, n: usize, ruotata: bool) {
     let tex = d.pagine.get(n).map(|(t, _)| t);
     let rapporto = match tex {
         Some(t) => t.aspect_ratio(),
         None => d.mm_pagina(n).map(|(l, a)| (l / a) as f32).unwrap_or(210.0 / 297.0),
     };
+    let rapporto = if ruotata { 1.0 / rapporto } else { rapporto };
     let dim = if spazio.width() / spazio.height() > rapporto {
         Vec2::new(spazio.height() * rapporto, spazio.height())
     } else {
@@ -590,7 +681,15 @@ fn disegna_pagina(ui: &egui::Ui, spazio: Rect, d: &Documento, n: usize) {
     p.rect_filled(r, 0.0, Color32::WHITE);
     p.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::from_gray(150)), StrokeKind::Inside);
     if let Some(tex) = tex {
-        p.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        if ruotata {
+            // L'immagine si disegna dritta in un rettangolo coi lati scambiati
+            // e si gira di 90° attorno al centro.
+            egui::Image::from_texture(SizedTexture::from_handle(tex))
+                .rotate(std::f32::consts::FRAC_PI_2, Vec2::splat(0.5))
+                .paint_at(ui, Rect::from_center_size(r.center(), Vec2::new(r.height(), r.width())));
+        } else {
+            p.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        }
     } else {
         p.text(r.center(), Align2::CENTER_CENTER, d.info.formato.etichetta(), FontId::proportional((r.height() / 6.0).clamp(9.0, 28.0)), Color32::from_gray(150));
     }
@@ -647,7 +746,7 @@ impl eframe::App for App {
             let schermo = ui.ctx().content_rect();
             let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("drop")));
             p.rect_filled(schermo, 0.0, Color32::from_rgba_unmultiplied(0, 125, 186, 60));
-            p.text(schermo.center(), Align2::CENTER_CENTER, "Rilascia per aggiungere", FontId::proportional(28.0), Color32::WHITE);
+            p.text(schermo.center(), Align2::CENTER_CENTER, "Rilascia per aggiungere", stile(RILASCIO).resolve(ui.style()), Color32::WHITE);
         }
     }
 
