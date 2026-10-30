@@ -555,8 +555,26 @@ impl App {
                 if ruotata { (a, l, true) } else { (l, a, false) }
             })
             .collect();
+        let mut nota = format!("{} — {}", d.nome, d.info.dettagli);
+        if d.info.pagine > pagine_visibili {
+            nota.push_str(&format!(" (mostrate {pagine_visibili})"));
+        }
+        let tolleranza = rotolo_mm + TOLLERANZA_MM;
+        if misure.iter().any(|(l, a, _)| l.min(*a) > tolleranza) {
+            nota.push_str("\nAttenzione: una pagina non entra nel rotolo, la stampante la ridimensionerà o taglierà");
+        } else if misure.iter().any(|(_, a, r)| *r && *a > tolleranza) {
+            nota.push_str("\nLa stampante ruoterà di 90° le pagine segnate, per farle entrare nel rotolo");
+        } else if misure.iter().any(|(_, _, r)| *r) {
+            nota.push_str("\nLa stampante ruoterà di 90° le pagine segnate, per risparmiare carta");
+        }
+        // Didascalia centrata che va a capo: con nomi lunghi o avvisi non
+        // starebbe nella larghezza dell'anteprima.
+        let mut testo = egui::text::LayoutJob::simple(nota, TextStyle::Body.resolve(ui.style()), Color32::from_gray(60), area.width() - 2.0 * margine);
+        testo.halign = Align::Center;
+        let nota = ui.painter().layout_job(testo);
+
         let lunghezza: f32 = misure.iter().map(|(_, a, _)| *a as f32 * scala + spazio_tra_pagine).sum();
-        let alto_disponibile = area.height() - 2.0 * margine - 24.0;
+        let alto_disponibile = area.height() - 2.0 * margine - nota.size().y;
         // Se il rotolo è troppo lungo per la finestra riduco tutto in proporzione.
         let rid = (alto_disponibile / lunghezza).min(1.0);
         let rotolo = Rect::from_min_size(
@@ -578,25 +596,8 @@ impl App {
             y += dim.y + spazio_tra_pagine * rid;
         }
 
-        let mut nota = format!("{} — {}", d.nome, d.info.dettagli);
-        if d.info.pagine > pagine_visibili {
-            nota.push_str(&format!(" (mostrate {pagine_visibili})"));
-        }
-        let tolleranza = rotolo_mm + TOLLERANZA_MM;
-        if misure.iter().any(|(l, a, _)| l.min(*a) > tolleranza) {
-            nota.push_str("  — attenzione: una pagina non entra nel rotolo, la stampante la ridimensionerà o taglierà");
-        } else if misure.iter().any(|(_, a, r)| *r && *a > tolleranza) {
-            nota.push_str("  — la stampante ruoterà di 90° le pagine segnate, per farle entrare nel rotolo");
-        } else if misure.iter().any(|(_, _, r)| *r) {
-            nota.push_str("  — la stampante ruoterà di 90° le pagine segnate, per risparmiare carta");
-        }
-        ui.painter().text(
-            Pos2::new(area.center().x, area.bottom() - 16.0),
-            Align2::CENTER_CENTER,
-            nota,
-            TextStyle::Body.resolve(ui.style()),
-            Color32::from_gray(60),
-        );
+        let alto_nota = nota.size().y;
+        p.galley(Pos2::new(area.center().x, area.bottom() - 8.0 - alto_nota), nota, Color32::from_gray(60));
     }
 }
 
