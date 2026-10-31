@@ -15,6 +15,7 @@ use crate::anteprima::{Anteprime, PAGINE_MAX, Pagina};
 use crate::config::Config;
 use crate::file::{self, InfoFile};
 use crate::impagina::{self, Allineamento, Impaginazione};
+use crate::lavorazione::{self, FormatoIso, Lavorazione, Scala};
 use crate::pjl::{self, OpzioniJob, Sorgente};
 use crate::rotazione::{self, TOLLERANZA_MM};
 use crate::stampante;
@@ -79,6 +80,39 @@ fn sezione(ui: &mut egui::Ui, testo: &str) {
 
 const LARGHEZZE_ROTOLO: [(&str, f64); 3] = [("24\" (610 mm)", 610.0), ("36\" (914 mm)", 914.0), ("44\" (1118 mm)", 1118.0)];
 
+/// Tipo di scala scelto nella GUI; i valori della modalità non attiva si
+/// perdono quando si cambia, come in un pannello di stampa.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModoScala {
+    Originale,
+    Formato,
+    Percentuale,
+    Misura,
+}
+
+impl ModoScala {
+    const TUTTI: [ModoScala; 4] =
+        [ModoScala::Originale, ModoScala::Formato, ModoScala::Percentuale, ModoScala::Misura];
+
+    fn di(scala: &Scala) -> Self {
+        match scala {
+            Scala::Originale => ModoScala::Originale,
+            Scala::Formato(_) => ModoScala::Formato,
+            Scala::Percentuale { .. } => ModoScala::Percentuale,
+            Scala::Misura { .. } => ModoScala::Misura,
+        }
+    }
+
+    fn etichetta(self) -> &'static str {
+        match self {
+            ModoScala::Originale => "Originale",
+            ModoScala::Formato => "Formato",
+            ModoScala::Percentuale => "Percentuale",
+            ModoScala::Misura => "Misura",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum StatoJob {
     Pronto,
@@ -96,6 +130,12 @@ struct Documento {
     info: InfoFile,
     copie: u32,
     stato: StatoJob,
+    /// Scala scelta per questo documento (come le copie).
+    lavorazione: Lavorazione,
+    /// Lock delle proporzioni per percentuale e misura custom.
+    blocca_proporzioni: bool,
+    /// Impaginazione e lavorazione con cui sono state chieste le anteprime.
+    anteprima: (Option<Impaginazione>, Lavorazione),
     /// Prime pagine renderizzate (vuoto finché non arrivano, o se l'anteprima
     /// non è disponibile).
     pagine: Vec<PaginaMostrata>,
@@ -113,9 +153,22 @@ struct PaginaMostrata {
 
 impl Documento {
     /// Misure della pagina `n` in mm: quelle date dall'anteprima, altrimenti
-    /// quelle della prima pagina lette all'apertura del file.
+    /// quelle della prima pagina lette all'apertura del file, scalate.
     fn mm_pagina(&self, n: usize) -> Option<(f64, f64)> {
-        self.pagine.get(n).and_then(|p| p.mm).or(self.info.mm)
+        self.pagine.get(n).and_then(|p| p.mm).or_else(|| {
+            self.info.mm.map(|(l, a)| {
+                let (sx, sy) = lavorazione::fattori(&self.lavorazione.scala, l, a);
+                (l * sx, a * sy)
+            })
+        })
+    }
+
+    /// Misure finali della prima pagina con la scala scelta: quelle mostrate
+    /// sotto la sezione SCALA.
+    fn uscita_mm(&self) -> Option<(f64, f64)> {
+        let (l, a) = self.info.mm?;
+        let (sx, sy) = lavorazione::fattori(&self.lavorazione.scala, l, a);
+        Some((l * sx, a * sy))
     }
 
     /// true se la stampante ruoterà la pagina `n` di 90°. Senza misure non si
@@ -216,7 +269,9 @@ impl App {
             Ok(info) => {
                 let id = self.prossimo_id;
                 self.prossimo_id += 1;
-                self.anteprime.richiedi(id, percorso.clone(), info.formato, self.impaginazione_anteprime);
+                let lavorazione = Lavorazione::default();
+                let imp = self.impaginazione_anteprime;
+                self.anteprime.richiedi(id, percorso.clone(), info.formato, lavorazione, imp);
                 self.documenti.push(Documento {
                     id,
                     percorso,
@@ -224,6 +279,9 @@ impl App {
                     info,
                     copie: 1,
                     stato: StatoJob::Pronto,
+                    lavorazione,
+                    blocca_proporzioni: true,
+                    anteprima: (imp, lavorazione),
                     pagine: Vec::new(),
                 });
                 self.selezionato = Some(self.documenti.len() - 1);
@@ -261,17 +319,21 @@ impl App {
         self.larghezza_rilevata.is_some() || self.rotolo_confermato == Some(self.larghezza_rotolo)
     }
 
-    /// Richiede di nuovo le anteprime quando cambia l'impaginazione: mostrano
-    /// il file che parte davvero.
+    /// Richiede di nuovo le anteprime quando cambiano impaginazione o scala:
+    /// mostrano il file che parte davvero. Si aggiornano solo i documenti la
+    /// cui lavorazione è cambiata.
     fn aggiorna_anteprime(&mut self) {
         let imp = self.impaginazione();
-        if imp == self.impaginazione_anteprime {
-            return;
-        }
         self.impaginazione_anteprime = imp;
-        for d in &self.documenti {
-            if impagina::impaginabile(d.info.formato) {
-                self.anteprime.richiedi(d.id, d.percorso.clone(), d.info.formato, imp);
+        let anteprime = &self.anteprime;
+        for d in &mut self.documenti {
+            if !impagina::impaginabile(d.info.formato) {
+                continue;
+            }
+            let chiave = (imp, d.lavorazione);
+            if chiave != d.anteprima {
+                d.anteprima = chiave;
+                anteprime.richiedi(d.id, d.percorso.clone(), d.info.formato, d.lavorazione, imp);
             }
         }
     }
@@ -285,6 +347,7 @@ impl App {
             taglierina: self.taglierina,
             extra: self.extra_pjl.clone(),
             impaginazione: self.impaginazione(),
+            lavorazione: doc.lavorazione,
         }
     }
 
@@ -405,6 +468,10 @@ impl App {
     }
 
     fn pannello_impostazioni(&mut self, ui: &mut egui::Ui) {
+        // Le sezioni sono più alte della finestra minima: scorrono, mentre il
+        // pulsante Stampa resta fermo in fondo.
+        let altezza = (ui.available_height() - 104.0).max(160.0);
+        egui::ScrollArea::vertical().max_height(altezza).show(ui, |ui| {
         ui.add_space(8.0);
         ui.heading("Impostazioni di stampa");
         ui.add_space(8.0);
@@ -540,16 +607,155 @@ impl App {
         if let Some(i) = self.selezionato {
             ui.add_space(6.0);
             sezione(ui, "COPIE");
-            let d = &mut self.documenti[i];
-            ui.horizontal(|ui| {
-                if ui.button("−").clicked() && d.copie > 1 {
-                    d.copie -= 1;
+            {
+                let d = &mut self.documenti[i];
+                ui.horizontal(|ui| {
+                    if ui.button("−").clicked() && d.copie > 1 {
+                        d.copie -= 1;
+                    }
+                    ui.add(egui::DragValue::new(&mut d.copie).range(1..=999));
+                    if ui.button("+").clicked() {
+                        d.copie += 1;
+                    }
+                });
+            }
+
+            ui.add_space(6.0);
+            sezione(ui, "SCALA");
+            if !lavorazione::lavorabile(self.documenti[i].info.formato) {
+                ui.label(
+                    RichText::new(
+                        "PostScript e HP-GL/2 partono così come sono: la scala non si applica",
+                    )
+                    .small(),
+                );
+            } else {
+                // Misure originali: il lock delle proporzioni non deve ereditare una scala che deforma.
+                let prima = self.documenti[i].info.mm;
+                let d = &mut self.documenti[i];
+                let mut modo = ModoScala::di(&d.lavorazione.scala);
+                egui::ComboBox::from_id_salt("scala-modo")
+                    .selected_text(modo.etichetta())
+                    .width(200.0)
+                    .show_ui(ui, |ui| {
+                        for m in ModoScala::TUTTI {
+                            ui.selectable_value(&mut modo, m, m.etichetta());
+                        }
+                    });
+                if modo != ModoScala::di(&d.lavorazione.scala) {
+                    d.lavorazione.scala = match modo {
+                        ModoScala::Originale => Scala::Originale,
+                        ModoScala::Formato => Scala::Formato(FormatoIso::A3),
+                        ModoScala::Percentuale => Scala::Percentuale { x: 100.0, y: 100.0 },
+                        ModoScala::Misura => {
+                            let (l, a) = prima.unwrap_or((210.0, 297.0));
+                            Scala::Misura {
+                                larghezza_mm: l,
+                                altezza_mm: a,
+                                proporzioni: d.blocca_proporzioni,
+                            }
+                        }
+                    };
                 }
-                ui.add(egui::DragValue::new(&mut d.copie).range(1..=999));
-                if ui.button("+").clicked() {
-                    d.copie += 1;
+                let blocco = d.blocca_proporzioni;
+                let (rapporto_l, rapporto_a) = prima.unwrap_or((210.0, 297.0));
+                let rapporto = if rapporto_l > 0.0 && rapporto_a > 0.0 {
+                    rapporto_l / rapporto_a
+                } else {
+                    210.0 / 297.0
+                };
+                let ((min_l, min_a), (max_l, max_a)) =
+                    lavorazione::limiti_mm(rapporto_l.max(1.0), rapporto_a.max(1.0));
+                match &mut d.lavorazione.scala {
+                    Scala::Originale => {}
+                    Scala::Formato(formato) => {
+                        egui::ComboBox::from_id_salt("scala-formato")
+                            .selected_text(formato.etichetta())
+                            .width(100.0)
+                            .show_ui(ui, |ui| {
+                                for f in FormatoIso::TUTTI {
+                                    ui.selectable_value(formato, f, f.etichetta());
+                                }
+                            });
+                    }
+                    Scala::Percentuale { x, y } => {
+                        ui.horizontal(|ui| {
+                            ui.label("Percentuale");
+                            let mut nuovo_x = *x;
+                            let cambiata = ui
+                                .add(
+                                    egui::DragValue::new(&mut nuovo_x)
+                                        .range(1.0..=1000.0)
+                                        .speed(1.0)
+                                        .suffix(" %"),
+                                )
+                                .changed();
+                            if cambiata {
+                                *x = nuovo_x;
+                                if blocco {
+                                    *y = nuovo_x;
+                                }
+                            }
+                            if !blocco {
+                                ui.label("×");
+                                ui.add(
+                                    egui::DragValue::new(y)
+                                        .range(1.0..=1000.0)
+                                        .speed(1.0)
+                                        .suffix(" %"),
+                                );
+                            }
+                        });
+                    }
+                    Scala::Misura { larghezza_mm, altezza_mm, proporzioni } => {
+                        *proporzioni = blocco;
+                        let (vecchia_l, vecchia_a) = (*larghezza_mm, *altezza_mm);
+                        ui.horizontal(|ui| {
+                            ui.label("Misura");
+                            ui.add(
+                                egui::DragValue::new(larghezza_mm)
+                                    .range(min_l..=max_l)
+                                    .speed(1.0)
+                                    .suffix(" mm"),
+                            );
+                            ui.label("×");
+                            ui.add(
+                                egui::DragValue::new(altezza_mm)
+                                    .range(min_a..=max_a)
+                                    .speed(1.0)
+                                    .suffix(" mm"),
+                            );
+                        });
+                        if blocco {
+                            if *larghezza_mm != vecchia_l {
+                                *altezza_mm = *larghezza_mm / rapporto;
+                            } else if *altezza_mm != vecchia_a {
+                                *larghezza_mm = *altezza_mm * rapporto;
+                            }
+                        }
+                    }
                 }
-            });
+                let proporzioni_visibili =
+                    modo != ModoScala::Formato && modo != ModoScala::Originale;
+                if proporzioni_visibili
+                    && ui.checkbox(&mut d.blocca_proporzioni, "Blocca proporzioni").changed()
+                {
+                    let blocco = d.blocca_proporzioni;
+                    match &mut d.lavorazione.scala {
+                        Scala::Percentuale { x, y } if blocco => *y = *x,
+                        Scala::Misura { proporzioni, .. } => *proporzioni = blocco,
+                        _ => {}
+                    }
+                }
+                match d.uscita_mm() {
+                    Some((l, a)) => {
+                        ui.label(format!("Esce: {l:.0} × {a:.0} mm{}", file::formato_iso(l, a)));
+                    }
+                    None => {
+                        ui.label("Esce: misure non note");
+                    }
+                }
+            }
         }
 
         ui.add_space(6.0);
@@ -572,6 +778,7 @@ impl App {
                     self.salva_prn(i);
                 }
             }
+        });
         });
 
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
@@ -618,6 +825,9 @@ impl App {
                         ui.label(RichText::new(&d.nome).small().strong());
                         let mut didascalia =
                             format!("{} · {}", d.info.formato.etichetta(), file::dimensione_leggibile(d.info.byte));
+                        if !d.lavorazione.scala.originale() {
+                            didascalia.push_str(&format!(" · {}", d.lavorazione.scala.didascalia()));
+                        }
                         if (0..d.info.pagine.min(PAGINE_MAX)).any(|n| d.esce_ruotata(n, self.rotolo_effettivo())) {
                             didascalia.push_str(" · 90°");
                         }

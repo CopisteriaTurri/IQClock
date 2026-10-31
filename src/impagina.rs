@@ -24,8 +24,6 @@
 //! Con "Sinistra", o se il contenuto non entra nella larghezza utile del rotolo,
 //! il file parte com'è oggi e decide la stampante.
 
-use std::path::Path;
-
 use anyhow::{Context, Result, bail};
 use image::RgbImage;
 use lopdf::{Dictionary, Object, Stream};
@@ -119,34 +117,6 @@ impl Impaginazione {
     }
 }
 
-/// Prepara il file da mandare: il file impaginato in un temporaneo, col formato
-/// con cui parte (le immagini diventano TIFF), oppure `None` se parte com'è.
-pub fn prepara(percorso: &Path, formato: Formato, imp: &Impaginazione) -> Result<Option<(FileTemporaneo, Formato)>> {
-    match formato {
-        Formato::Pdf => {
-            let dati = std::fs::read(percorso)?;
-            let Some(composto) = componi_pdf(&dati, imp)? else { return Ok(None) };
-            let dest = FileTemporaneo::nuovo("pdf");
-            std::fs::write(dest.percorso(), composto.dati).context("scrittura del PDF impaginato")?;
-            Ok(Some((dest, Formato::Pdf)))
-        }
-        Formato::Jpeg | Formato::Tiff | Formato::Png => {
-            let dpi = file::dpi_immagine(percorso, formato);
-            // Prima con le sole dimensioni: decodificare serve solo se si impagina.
-            let d = imagesize::size(percorso).context("dimensioni dell'immagine")?;
-            if imp.posiziona(d.width as f64 * 25.4 / dpi.0, d.height as f64 * 25.4 / dpi.1).is_none() {
-                return Ok(None);
-            }
-            let Ok(composto) = componi_raster(png::su_bianco(png::decodifica(percorso)?), dpi, imp) else {
-                return Ok(None);
-            };
-            let dest = composto.scrivi_tiff()?;
-            Ok(Some((dest, Formato::Tiff)))
-        }
-        Formato::PostScript | Formato::Hpgl2 => Ok(None),
-    }
-}
-
 /// PDF impaginato in memoria.
 pub struct PdfComposto {
     pub dati: Vec<u8>,
@@ -161,11 +131,26 @@ pub fn componi_pdf(dati: &[u8], imp: &Impaginazione) -> Result<Option<PdfCompost
     if doc.is_encrypted() {
         bail!("PDF cifrato: non si può impaginare (scegli l'allineamento a sinistra)");
     }
+    let (cambiate, posizioni) = applica_pdf(&mut doc, imp)?;
+    if !cambiate {
+        return Ok(None);
+    }
+    let mut out = Vec::new();
+    doc.save_to(&mut out).context("scrittura del PDF impaginato")?;
+    Ok(Some(PdfComposto { dati: out, posizioni }))
+}
+
+/// Applica l'allineamento a un PDF già caricato: è il passo dopo la scala nella
+/// pipeline comune, così il file si carica e si salva una volta sola.
+pub(crate) fn applica_pdf(
+    doc: &mut lopdf::Document,
+    imp: &Impaginazione,
+) -> Result<(bool, Vec<Option<Posizione>>)> {
     let pagina_pt = imp.larghezza_pagina_mm() * MM_PT;
     let mut posizioni = Vec::new();
     let mut cambiate = false;
     for id in doc.get_pages().into_values() {
-        let Some(([x0, y0, x1, y1], ruota)) = file::box_e_rotazione(&doc, id).filter(|(_, r)| r % 90 == 0) else {
+        let Some(([x0, y0, x1, y1], ruota)) = file::box_e_rotazione(doc, id).filter(|(_, r)| r % 90 == 0) else {
             posizioni.push(None);
             continue;
         };
@@ -190,24 +175,9 @@ pub fn componi_pdf(dati: &[u8], imp: &Impaginazione) -> Result<Option<PdfCompost
             _ => [x0, y1 + dx - pagina_pt, x1, y1 + dx],
         };
         let ritaglio = format!("q {x0:.4} {y0:.4} {:.4} {:.4} re W n\n", x1 - x0, y1 - y0);
-        let prima = doc.add_object(Stream::new(Dictionary::new(), ritaglio.into_bytes()));
-        let dopo = doc.add_object(Stream::new(Dictionary::new(), b"\nQ\n".to_vec()));
-        let mut contenuti: Vec<Object> = vec![prima.into()];
-        let originali = doc.get_dictionary(id)?.get(b"Contents").ok().cloned();
-        match originali {
-            Some(Object::Array(a)) => contenuti.extend(a),
-            // Un riferimento può puntare a un array di stream.
-            Some(Object::Reference(r)) => match doc.get_object(r) {
-                Ok(Object::Array(a)) => contenuti.extend(a.clone()),
-                _ => contenuti.push(Object::Reference(r)),
-            },
-            Some(o) => contenuti.push(o),
-            None => {}
-        }
-        contenuti.push(dopo.into());
+        aggiungi_intorno_al_contenuto(doc, id, ritaglio.into_bytes(), b"\nQ\n".to_vec())?;
         let riquadro: Vec<Object> = nuovo.iter().map(|&v| Object::Real(v as f32)).collect();
         let pagina = doc.get_dictionary_mut(id)?;
-        pagina.set("Contents", contenuti);
         pagina.set("MediaBox", riquadro.clone());
         // Il CropBox è ereditabile: va riscritto, non solo tolto.
         pagina.set("CropBox", riquadro);
@@ -216,12 +186,35 @@ pub fn componi_pdf(dati: &[u8], imp: &Impaginazione) -> Result<Option<PdfCompost
             pagina.remove(chiave);
         }
     }
-    if !cambiate {
-        return Ok(None);
+    Ok((cambiate, posizioni))
+}
+
+/// Mette uno stream prima e uno dopo il contenuto della pagina, come serve a
+/// scala e allineamento. `Contents` può essere un array, un riferimento a un
+/// array di stream o un singolo stream.
+pub(crate) fn aggiungi_intorno_al_contenuto(
+    doc: &mut lopdf::Document,
+    id: lopdf::ObjectId,
+    prima: Vec<u8>,
+    dopo: Vec<u8>,
+) -> Result<()> {
+    let prima = doc.add_object(Stream::new(Dictionary::new(), prima));
+    let dopo = doc.add_object(Stream::new(Dictionary::new(), dopo));
+    let mut contenuti: Vec<Object> = vec![prima.into()];
+    let originali = doc.get_dictionary(id)?.get(b"Contents").ok().cloned();
+    match originali {
+        Some(Object::Array(a)) => contenuti.extend(a),
+        // Un riferimento può puntare a un array di stream.
+        Some(Object::Reference(r)) => match doc.get_object(r) {
+            Ok(Object::Array(a)) => contenuti.extend(a.clone()),
+            _ => contenuti.push(Object::Reference(r)),
+        },
+        Some(o) => contenuti.push(o),
+        None => {}
     }
-    let mut out = Vec::new();
-    doc.save_to(&mut out).context("scrittura del PDF impaginato")?;
-    Ok(Some(PdfComposto { dati: out, posizioni }))
+    contenuti.push(dopo.into());
+    doc.get_dictionary_mut(id)?.set("Contents", contenuti);
+    Ok(())
 }
 
 /// Immagine impaginata: il contenuto (già ruotato se serve) e dove sta sul
@@ -497,24 +490,4 @@ pub(crate) mod test {
         assert_eq!(c.larghezza_px, (94.0 / 25.4 * 120.0_f64).round() as u32);
     }
 
-    #[test]
-    fn tiff_impaginato_ha_le_misure_del_rotolo() {
-        let dir = std::env::temp_dir().join(format!("iqclock-impagina-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join("foto.png");
-        RgbImage::from_pixel(100, 50, image::Rgb([0, 0, 0])).save(&p).unwrap();
-        let imp = Impaginazione { allineamento: Allineamento::Centro, rotolo_mm: 914.0, margine_mm: 5.0 };
-        // Senza pHYs: 300 dpi presunti, quindi la pagina da 904 mm = 10677 px.
-        let (tiff, formato) = prepara(&p, Formato::Png, &imp).unwrap().unwrap();
-        assert_eq!(formato, Formato::Tiff);
-        let letto = image::open(tiff.percorso()).unwrap().to_rgb8();
-        assert_eq!(letto.dimensions(), (10677, 50));
-        let x = (10677 - 100) / 2;
-        assert_eq!(letto.get_pixel(x as u32 - 2, 0).0, [255, 255, 255]);
-        assert_eq!(letto.get_pixel(x as u32 + 2, 0).0, [0, 0, 0]);
-        // Con "Sinistra" nessun file nuovo.
-        let sinistra = Impaginazione { allineamento: Allineamento::Sinistra, ..imp };
-        assert!(prepara(&p, Formato::Png, &sinistra).unwrap().is_none());
-        std::fs::remove_dir_all(dir).unwrap();
-    }
 }

@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use crate::file::FileTemporaneo;
-use crate::impagina;
+use crate::lavorazione;
 use crate::pjl::{self, Formato, OpzioniJob};
 use crate::png;
 
@@ -28,12 +28,17 @@ fn connetti(host: &str, porta: u16) -> Result<TcpStream> {
 }
 
 /// File che parte davvero: i PNG diventano TIFF (la stampante non li legge,
-/// vedi `png.rs`) e con un'impaginazione il file viene allargato al rotolo
-/// (vedi `impagina.rs`). L'eventuale temporaneo va tenuto vivo fino alla fine
-/// dell'invio.
+/// vedi `png.rs`), con una scala o un'impaginazione il file passa dalla pipeline
+/// comune (vedi `lavorazione.rs`). L'eventuale temporaneo va tenuto vivo fino
+/// alla fine dell'invio.
 fn da_mandare(percorso: &Path, formato: Formato, opz: &OpzioniJob) -> Result<Option<(FileTemporaneo, Formato)>> {
-    if let Some(imp) = &opz.impaginazione
-        && let Some(composto) = impagina::prepara(percorso, formato, imp).context("impaginazione sul rotolo")?
+    if let Some(composto) = lavorazione::prepara(
+        percorso,
+        formato,
+        &opz.lavorazione,
+        opz.impaginazione.as_ref(),
+    )
+    .context("preparazione del file")?
     {
         return Ok(Some(composto));
     }
