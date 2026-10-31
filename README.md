@@ -23,6 +23,10 @@ dei rispettivi proprietari e qui compaiono solo per indicare la compatibilità. 
   iqclock stampa tavola.pdf --copie 2 --rotolo 1 --grigi
   iqclock stampa tavola.pdf --prn prova.prn     # scrive il job su file senza stampare
   iqclock stampa logo.png --allinea centro       # centrato sul rotolo (vedi sotto)
+  iqclock stampa tavola.pdf --scala A3           # adattata ad A3, proporzioni intatte
+  iqclock stampa tavola.pdf --scala 50%          # metà misura
+  iqclock stampa tavola.pdf --scala 500x700      # 500 × 700 mm, proporzioni intatte
+  iqclock stampa tavola.pdf --scala 500x700!     # 500 × 700 mm, deformando
   iqclock stato                                  # stato, inchiostri, carta
   iqclock snmp 1.3.6.1.2.1.43                    # diagnostica SNMP
   ```
@@ -48,6 +52,40 @@ senza comandi PJL proprietari:
   toccato: resta vettoriale e le annotazioni restano al loro posto.
 - **JPEG, TIFF, PNG**: riscritti in TIFF con una banda bianca fino alla larghezza del
   rotolo, agli stessi DPI del file (dei TIFF multipagina parte solo la prima pagina).
+- **PostScript, HP-GL/2**: partono come sono, il controllo si disattiva (da riga di comando
+  `--scala` lo segnala con un avviso).
+
+Una pagina così larga la stampante non la ruota più: la rotazione di 90° che
+farebbe per risparmiare carta la decide IQClock prima di allargare, con la stessa regola.
+Il **margine** (bordo non stampabile per lato) è configurabile, minimo 3 mm;
+se non entra nella larghezza utile la pagina parte com'è. L'anteprima mostra il file
+impaginato, cioè quello che parte.
+Provato sulla T2600 il 30/10/2026 con margine 5 mm (pagina da 904 mm su rotolo da 914):
+un PNG 100 × 60 mm centrato e un PDF A5 verticale centrato (ruotato dall'app) escono su
+fogli corti, dritti e con la cornice intera.
+
+La **larghezza del rotolo** è quella rilevata dalla stampante via SNMP; se non arriva si
+usa quella scelta a mano e, prima di stampare, IQClock chiede conferma. Da riga di comando
+in quel caso serve `--larghezza-rotolo MM`.
+
+## Ridimensionamento
+
+Ogni documento può partire **originale** (default), adattato a un **formato** ISO A0–A4,
+a una **percentuale** (1–1000%) o a una **misura in mm** (anch'essa tra 1% e 1000% della
+misura originale: da riga di comando oltre il limite c'è un errore, nella GUI il campo si ferma). Con la percentuale e la misura
+le proporzioni sono bloccate di default (la pagina ci sta dentro senza deformarsi);
+spuntando via il lock si possono scalare X e Y separatamente, deformando. La scala vale
+solo per il documento selezionato, come le copie.
+
+- **PDF**: la scala è vettoriale, niente rasterizzazione. Il contenuto di ogni pagina
+  finisce in un Form XObject con la matrice di scala (così anche gradienti e motivi
+  seguono la scala) e la pagina riceve un nuovo MediaBox/CropBox; le annotazioni seguono
+  la stessa matrice. Se la pagina ha un CropBox, la scala parte da quello (i segni di
+  taglio fuori dal CropBox restano fuori). Con pagine di formati diversi la scala si
+  applica pagina per pagina (es. "tutto in A3"). Le pagine senza box o con `/Rotate` non
+  multiplo di 90 restano come sono. Un PDF cifrato non si può scalare.
+- **JPEG, TIFF, PNG**: riscritti in TIFF con una banda bianca fino alla larghezza del
+  rotolo, agli stessi DPI del file (dei TIFF multipagina parte solo la prima pagina).
 - **PostScript, HP-GL/2**: partono come sono, il controllo si disattiva.
 
 Una pagina così larga la stampante non la ruota più: la rotazione di 90° che
@@ -62,6 +100,29 @@ fogli corti, dritti e con la cornice intera.
 La **larghezza del rotolo** è quella rilevata dalla stampante via SNMP; se non arriva si
 usa quella scelta a mano e, prima di stampare, IQClock chiede conferma. Da riga di comando
 in quel caso serve `--larghezza-rotolo MM`.
+
+## Ridimensionamento
+
+Ogni documento può partire **originale** (default), adattato a un **formato** ISO A0–A4,
+a una **percentuale** (1–1000%) o a una **misura in mm**. Con la percentuale e la misura
+le proporzioni sono bloccate di default (la pagina ci sta dentro senza deformarsi);
+spuntando via il lock si possono scalare X e Y separatamente, deformando. La scala vale
+solo per il documento selezionato, come le copie.
+
+- **PDF**: la scala è vettoriale, niente rasterizzazione. Ogni pagina riceve un nuovo
+  MediaBox/CropBox e una matrice `q sx 0 0 sy tx ty cm` attorno al contenuto; le
+  annotazioni seguono la stessa matrice. Con pagine di formati diversi la scala si
+  applica pagina per pagina (es. "tutto in A3"). Le pagine senza box o con `/Rotate` non
+  multiplo di 90 restano come sono. Un PDF cifrato non si può scalare.
+- **JPEG, TIFF, PNG**: i pixel non vengono ricampionati, cambiano solo i DPI dichiarati
+  (`dpi' = dpi / fattore`). La T2600 rispetta i DPI, quindi un'immagine al 200% esce
+  grande il doppio con gli stessi pixel. Con una scala diversa dall'originale JPEG e
+  TIFF partono come TIFF, come già succede con l'allineamento.
+- **PostScript, HP-GL/2**: partono come sono, il controllo si disattiva.
+
+La GUI mostra sotto la scala le misure finali della prima pagina (es. `Esce: 420 × 594
+mm (A2)`); l'anteprima e gli avvisi sul rotolo usano le stesse misure scalate. In
+miniatura la didascalia aggiunge `→ A3` o `→ 50 %` quando la scala non è l'originale.
 
 ## Cosa viene mandato alla stampante
 
@@ -122,7 +183,8 @@ binari di testa che vengono scartati in lettura.
 
 - L'anteprima mostra le prime 4 pagine (PDF con pdfium, JPEG, TIFF e PNG); PostScript
   e HP-GL/2 restano senza anteprima.
-- Niente nesting o ridimensionamento: decide la stampante.
+- Niente nesting: decide la stampante. Il ridimensionamento è quello descritto sopra
+  (la scala non ricampiona le immagini).
 - Con l'allineamento a sinistra la rotazione di 90° la decide la stampante (impostazione
   del pannello): la T2600 ruota il foglio quando così entra nel rotolo o consuma meno
   carta, e l'anteprima mostra già le pagine come usciranno. Il PJL non la controlla: provato il 29/10/2026,
