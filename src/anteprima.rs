@@ -214,21 +214,23 @@ fn pagine_pdf(
     percorso: &Path,
     lav: &Lavorazione,
     imp: Option<&Impaginazione>,
-) -> Result<Vec<Pagina>, PdfiumError> {
-    // Lo stesso PDF (scalato e impaginato) che `stampante.rs` manderebbe; se non
-    // riesce, l'errore lo darà la stampa e qui resta la pagina originale.
+) -> Result<Vec<Pagina>, String> {
+    // Lo stesso PDF (scalato e impaginato) che `stampante.rs` manderebbe. Se non
+    // si riesce a comporlo (per esempio un PDF cifrato da scalare) niente
+    // anteprima: mostrare l'originale farebbe credere che parta così.
     let composto = if lav.nulla() && imp.is_none() {
         None
     } else {
-        // Se la lettura o la composizione falliscono resta la pagina originale:
-        // l'errore vero lo darà la stampa.
-        std::fs::read(percorso)
-            .ok()
-            .and_then(|dati| lavorazione::componi_pdf(&dati, lav, imp).ok().flatten())
+        let dati = std::fs::read(percorso).map_err(|e| e.to_string())?;
+        lavorazione::componi_pdf(&dati, lav, imp).map_err(|e| format!("{e:#}"))?
     };
+    let carica = |e: PdfiumError| e.to_string();
     let (doc, posizioni) = match &composto {
-        Some(c) => (pdfium.load_pdf_from_byte_slice(&c.dati, None)?, c.posizioni.as_slice()),
-        None => (pdfium.load_pdf_from_file(percorso, None)?, &[][..]),
+        Some(c) => (
+            pdfium.load_pdf_from_byte_slice(&c.dati, None).map_err(carica)?,
+            c.posizioni.as_slice(),
+        ),
+        None => (pdfium.load_pdf_from_file(percorso, None).map_err(carica)?, &[][..]),
     };
     // Come scale_page_to_display_size, ma senza ruotare le pagine orizzontali:
     // l'anteprima deve mostrare la pagina com'è.
@@ -238,7 +240,12 @@ fn pagine_pdf(
         .set_maximum_height(LATO_MAX);
     let mut out = Vec::new();
     for (n, pagina) in doc.pages().iter().take(PAGINE_MAX).enumerate() {
-        let rgba = pagina.render_with_config(&config)?.as_image()?.to_rgba8();
+        let rgba = pagina
+            .render_with_config(&config)
+            .map_err(carica)?
+            .as_image()
+            .map_err(carica)?
+            .to_rgba8();
         let dim = [rgba.width() as usize, rgba.height() as usize];
         out.push(Pagina {
             immagine: ColorImage::from_rgba_unmultiplied(dim, &rgba),
@@ -409,6 +416,14 @@ mod test {
             pagine_pdf(&pdfium, &file_temp(".pdf"), &Lavorazione::default(), None).is_err(),
             "PDF inesistente"
         );
+        // Da ridimensionare ma illeggibile: errore, non l'originale.
+        let scalato = Lavorazione {
+            scala: Scala::Percentuale { x: 50.0, y: 50.0 },
+        };
+        let corrotto = file_temp(".pdf");
+        std::fs::write(&corrotto, b"%PDF-1.5\nnon un pdf vero").unwrap();
+        assert!(pagine_pdf(&pdfium, &corrotto, &scalato, None).is_err(), "scala di un PDF illeggibile");
+        std::fs::remove_file(&corrotto).unwrap();
     }
 
     /// Senza libpdfium il messaggio dice cosa manca e che i PDF restano senza

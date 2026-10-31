@@ -393,13 +393,24 @@ fn applica_scala_pagina(doc: &mut Document, id: ObjectId, scala: &Scala) -> Resu
     for chiave in [&b"BleedBox"[..], b"TrimBox", b"ArtBox"] {
         pagina.remove(chiave);
     }
-    trasforma_annotazioni(doc, id, sx, sy);
+    trasforma_annotazioni(doc, id, (x0, y0), sx, sy);
     Ok(true)
 }
 
-/// Porta `/Rect` e `/QuadPoints` delle annotazioni nello spazio scalato. Il
-/// `/AP` si adatta da solo al nuovo `/Rect`.
-fn trasforma_annotazioni(doc: &mut Document, pagina: ObjectId, sx: f64, sy: f64) {
+/// Chiavi delle annotazioni che contengono coordinate in coppie x y (anche in
+/// array annidati, come `/InkList`).
+const CHIAVI_COORDINATE: [&[u8]; 6] = [b"Rect", b"QuadPoints", b"InkList", b"Vertices", b"L", b"CL"];
+
+/// Porta le coordinate delle annotazioni nello spazio scalato: stessa matrice
+/// del contenuto, cioè `(v - origine) * scala`. Il `/AP` si adatta da solo al
+/// nuovo `/Rect`.
+fn trasforma_annotazioni(
+    doc: &mut Document,
+    pagina: ObjectId,
+    origine: (f64, f64),
+    sx: f64,
+    sy: f64,
+) {
     let Some(valore) = doc
         .get_dictionary(pagina)
         .ok()
@@ -420,29 +431,27 @@ fn trasforma_annotazioni(doc: &mut Document, pagina: ObjectId, sx: f64, sy: f64)
         match voce {
             Object::Reference(id) => {
                 let id = *id;
-                let (rect, quad) = match doc.get_dictionary(id) {
-                    Ok(d) => (
-                        d.get(b"Rect").ok().cloned(),
-                        d.get(b"QuadPoints").ok().cloned(),
-                    ),
+                let nuovi: Vec<(&[u8], Object)> = match doc.get_dictionary(id) {
+                    Ok(d) => CHIAVI_COORDINATE
+                        .iter()
+                        .filter_map(|&chiave| {
+                            let valore = d.get(chiave).ok()?;
+                            Some((chiave, punti_scalati(doc, valore, origine, sx, sy)?))
+                        })
+                        .collect(),
                     Err(_) => continue,
                 };
-                let rect = rect.as_ref().and_then(|o| punti_scalati(doc, o, sx, sy));
-                let quad = quad.as_ref().and_then(|o| punti_scalati(doc, o, sx, sy));
                 if let Ok(d) = doc.get_dictionary_mut(id) {
-                    if let Some(r) = rect {
-                        d.set("Rect", r);
-                    }
-                    if let Some(q) = quad {
-                        d.set("QuadPoints", q);
+                    for (chiave, nuovo) in nuovi {
+                        d.set(chiave, nuovo);
                     }
                 }
             }
             // Un'annotazione può anche stare inline nell'array (rara).
             Object::Dictionary(d) => {
-                for chiave in [&b"Rect"[..], b"QuadPoints"] {
+                for chiave in CHIAVI_COORDINATE {
                     if let Ok(Object::Array(a)) = d.get(chiave)
-                        && let Some(nuovo) = punti_da_array(a, sx, sy)
+                        && let Some(nuovo) = punti_da_array(a, origine, sx, sy)
                     {
                         d.set(chiave, Object::Array(nuovo));
                     }
@@ -463,7 +472,13 @@ fn trasforma_annotazioni(doc: &mut Document, pagina: ObjectId, sx: f64, sy: f64)
     }
 }
 
-fn punti_scalati(doc: &Document, valore: &Object, sx: f64, sy: f64) -> Option<Object> {
+fn punti_scalati(
+    doc: &Document,
+    valore: &Object,
+    origine: (f64, f64),
+    sx: f64,
+    sy: f64,
+) -> Option<Object> {
     let array = match valore {
         Object::Array(a) => a,
         Object::Reference(_) => match doc.dereference(valore).ok()? {
@@ -472,18 +487,26 @@ fn punti_scalati(doc: &Document, valore: &Object, sx: f64, sy: f64) -> Option<Ob
         },
         _ => return None,
     };
-    punti_da_array(array, sx, sy).map(Object::Array)
+    punti_da_array(array, origine, sx, sy).map(Object::Array)
 }
 
-fn punti_da_array(array: &[Object], sx: f64, sy: f64) -> Option<Vec<Object>> {
+/// Coppie x y → `(v - origine) * scala`. Un elemento che è a sua volta un array
+/// (le tratte di `/InkList`) riparte da x. `None` se c'è altro che numeri.
+fn punti_da_array(array: &[Object], origine: (f64, f64), sx: f64, sy: f64) -> Option<Vec<Object>> {
     array
         .iter()
         .enumerate()
-        .map(|(i, o)| {
-            let v = numero_o(o)?;
-            Some(Object::Real(
-                (if i % 2 == 0 { v * sx } else { v * sy }) as f32,
-            ))
+        .map(|(i, o)| match o {
+            Object::Array(interno) => punti_da_array(interno, origine, sx, sy).map(Object::Array),
+            _ => {
+                let v = numero_o(o)?;
+                let n = if i % 2 == 0 {
+                    (v - origine.0) * sx
+                } else {
+                    (v - origine.1) * sy
+                };
+                Some(Object::Real(n as f32))
+            }
         })
         .collect()
 }
@@ -818,6 +841,56 @@ mod test {
         assert!((rect[2] - 110.0 * s).abs() < 0.01, "{rect:?}");
         assert!((rect[3] - 70.0 * s).abs() < 0.01, "{rect:?}");        let quad = annot.get(b"QuadPoints").unwrap().as_array().unwrap();
         assert!((numero_o(&quad[1]).unwrap() - 70.0 * s).abs() < 0.01, "{quad:?}");
+    }
+
+    #[test]
+    fn annotazioni_con_origine_spostata_seguono_il_contenuto() {
+        // Pagina con MediaBox che parte da (50, 30); l'annotazione sta sul
+        // rettangolo di contenuto (50..150, 30..80).
+        let base = impagina::test::pdf(100.0, 50.0, (50.0, 30.0), 0);
+        let mut doc = Document::load_mem(&base).unwrap();
+        let id = *doc.get_pages().values().next().unwrap();
+        let interi = |v: &[i64]| -> Vec<Object> { v.iter().map(|&n| n.into()).collect() };
+        let annotazione = doc.add_object(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Ink",
+            "Rect" => interi(&[50, 30, 150, 80]),
+            "InkList" => vec![
+                Object::Array(interi(&[50, 30, 150, 80])),
+                Object::Array(interi(&[100, 40])),
+            ],
+        });
+        doc.get_dictionary_mut(id)
+            .unwrap()
+            .set("Annots", vec![Object::Reference(annotazione)]);
+        let mut dati = Vec::new();
+        doc.save_to(&mut dati).unwrap();
+
+        let composto = componi_pdf(
+            &dati,
+            &Lavorazione {
+                scala: Scala::Percentuale {
+                    x: 200.0,
+                    y: 200.0,
+                },
+            },
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let (doc, id) = pagina(&composto.dati);
+        let annot = doc.get_dictionary(id).unwrap().get(b"Annots").unwrap().as_array().unwrap()[0]
+            .as_reference()
+            .unwrap();
+        let annot = doc.get_dictionary(annot).unwrap();
+        let numeri = |o: &Object| -> Vec<f64> {
+            o.as_array().unwrap().iter().map(|o| numero_o(o).unwrap()).collect()
+        };
+        // (v - origine) * 2: il rettangolo di contenuto diventa 0..200 × 0..100.
+        assert_eq!(numeri(annot.get(b"Rect").unwrap()), [0.0, 0.0, 200.0, 100.0]);
+        let ink = annot.get(b"InkList").unwrap().as_array().unwrap();
+        assert_eq!(numeri(&ink[0]), [0.0, 0.0, 200.0, 100.0]);
+        assert_eq!(numeri(&ink[1]), [100.0, 20.0]);
     }
 
     #[test]

@@ -84,36 +84,6 @@ solo per il documento selezionato, come le copie.
   taglio fuori dal CropBox restano fuori). Con pagine di formati diversi la scala si
   applica pagina per pagina (es. "tutto in A3"). Le pagine senza box o con `/Rotate` non
   multiplo di 90 restano come sono. Un PDF cifrato non si può scalare.
-- **JPEG, TIFF, PNG**: riscritti in TIFF con una banda bianca fino alla larghezza del
-  rotolo, agli stessi DPI del file (dei TIFF multipagina parte solo la prima pagina).
-- **PostScript, HP-GL/2**: partono come sono, il controllo si disattiva.
-
-Una pagina così larga la stampante non la ruota più: la rotazione di 90° che
-farebbe per risparmiare carta la decide IQClock prima di allargare, con la stessa regola.
-Il **margine** (bordo non stampabile per lato) è configurabile, minimo 3 mm;
-se non entra nella larghezza utile la pagina parte com'è. L'anteprima mostra il file
-impaginato, cioè quello che parte.
-Provato sulla T2600 il 30/10/2026 con margine 5 mm (pagina da 904 mm su rotolo da 914):
-un PNG 100 × 60 mm centrato e un PDF A5 verticale centrato (ruotato dall'app) escono su
-fogli corti, dritti e con la cornice intera.
-
-La **larghezza del rotolo** è quella rilevata dalla stampante via SNMP; se non arriva si
-usa quella scelta a mano e, prima di stampare, IQClock chiede conferma. Da riga di comando
-in quel caso serve `--larghezza-rotolo MM`.
-
-## Ridimensionamento
-
-Ogni documento può partire **originale** (default), adattato a un **formato** ISO A0–A4,
-a una **percentuale** (1–1000%) o a una **misura in mm**. Con la percentuale e la misura
-le proporzioni sono bloccate di default (la pagina ci sta dentro senza deformarsi);
-spuntando via il lock si possono scalare X e Y separatamente, deformando. La scala vale
-solo per il documento selezionato, come le copie.
-
-- **PDF**: la scala è vettoriale, niente rasterizzazione. Ogni pagina riceve un nuovo
-  MediaBox/CropBox e una matrice `q sx 0 0 sy tx ty cm` attorno al contenuto; le
-  annotazioni seguono la stessa matrice. Con pagine di formati diversi la scala si
-  applica pagina per pagina (es. "tutto in A3"). Le pagine senza box o con `/Rotate` non
-  multiplo di 90 restano come sono. Un PDF cifrato non si può scalare.
 - **JPEG, TIFF, PNG**: i pixel non vengono ricampionati, cambiano solo i DPI dichiarati
   (`dpi' = dpi / fattore`). La T2600 rispetta i DPI, quindi un'immagine al 200% esce
   grande il doppio con gli stessi pixel. Con una scala diversa dall'originale JPEG e
