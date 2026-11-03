@@ -333,6 +333,9 @@ impl App {
             let chiave = (imp, d.lavorazione);
             if chiave != d.anteprima {
                 d.anteprima = chiave;
+                // Le pagine vecchie non sono più il file che parte: meglio la
+                // pagina bianca del formato finché non arrivano le nuove.
+                d.pagine.clear();
                 anteprime.richiedi(d.id, d.percorso.clone(), d.info.formato, d.lavorazione, imp);
             }
         }
@@ -1110,9 +1113,10 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.gestisci_eventi(ctx);
+        // Prima le chiavi aggiornate, poi i risultati: così quelli superati si scartano.
         self.file_trascinati(ctx);
         self.aggiorna_anteprime();
+        self.gestisci_eventi(ctx);
         self.foto_finestra(ctx);
     }
 

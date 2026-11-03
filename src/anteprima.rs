@@ -291,7 +291,7 @@ fn immagine(
     let ridotta = png::su_bianco(ridotta);
     let Some(imp) = imp else {
         return Some(Pagina {
-            immagine: colori(&image::DynamicImage::ImageRgb8(ridotta).to_rgba8()),
+            immagine: colori(&image::DynamicImage::ImageRgb8(deforma(ridotta, sx, sy)).to_rgba8()),
             mm,
             impaginata: false,
             ruotata: false,
@@ -304,12 +304,25 @@ fn immagine(
             Some(Pagina { immagine: colori(&rotolo.to_rgba8()), mm: Some(mm), impaginata: true, ruotata: c.ruotata })
         }
         Err(ridotta) => Some(Pagina {
-            immagine: colori(&image::DynamicImage::ImageRgb8(ridotta).to_rgba8()),
+            immagine: colori(&image::DynamicImage::ImageRgb8(deforma(ridotta, sx, sy)).to_rgba8()),
             mm,
             impaginata: false,
             ruotata: false,
         }),
     }
+}
+
+/// Miniatura con le proporzioni di stampa: con fattori diversi su x e y
+/// (percentuale o misura senza proporzioni) l'immagine esce deformata, e così
+/// deve vederla l'anteprima. Il lato lungo resta quello della miniatura.
+fn deforma(img: image::RgbImage, sx: f64, sy: f64) -> image::RgbImage {
+    if (sx / sy - 1.0).abs() < 1e-6 {
+        return img;
+    }
+    let (l, a) = (img.width() as f64 * sx, img.height() as f64 * sy);
+    let k = img.width().max(img.height()) as f64 / l.max(a);
+    let (l, a) = ((l * k).round().max(1.0) as u32, (a * k).round().max(1.0) as u32);
+    image::imageops::resize(&img, l, a, image::imageops::FilterType::Triangle)
 }
 
 #[cfg(test)]
@@ -518,6 +531,20 @@ mod test {
         let [l, a] = img.immagine.size;
         assert_eq!(l, LATO_MAX as usize);
         assert_eq!(a, LATO_MAX as usize / 2);
+    }
+
+    #[test]
+    fn immagine_con_proporzioni_libere_esce_deformata() {
+        // 600 × 300 px al 200 % × 50 %: in stampa 1200 × 150, cioè 8:1, non 2:1.
+        let p = png_valido(600, 300);
+        let lav = Lavorazione { scala: Scala::Percentuale { x: 200.0, y: 50.0 } };
+        let img = immagine(&p, Formato::Png, &lav, None).expect("PNG valido");
+        std::fs::remove_file(&p).unwrap();
+        let [l, a] = img.immagine.size;
+        assert!(l.max(a) <= LATO_MAX as usize);
+        assert!((l as f64 / a as f64 - 8.0).abs() < 0.1, "{l} × {a}");
+        let (l_mm, a_mm) = img.mm.unwrap();
+        assert!((l_mm / a_mm - 8.0).abs() < 0.01);
     }
 
     /// Il thread anteprime consegna comunque le immagini (con o senza pdfium):
