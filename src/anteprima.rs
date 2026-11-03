@@ -15,6 +15,7 @@ use pdfium_render::prelude::*;
 
 use crate::file;
 use crate::impagina::{self, Impaginazione};
+use crate::lavorazione::{self, Lavorazione};
 use crate::pjl::Formato;
 use crate::png;
 
@@ -40,17 +41,23 @@ struct Richiesta {
     id: u64,
     percorso: PathBuf,
     formato: Formato,
+    lavorazione: Lavorazione,
     impaginazione: Option<Impaginazione>,
 }
+
+/// Cosa è stato chiesto: impaginazione e lavorazione. Torna con le pagine,
+/// così chi le riceve scarta i risultati di una richiesta ormai superata.
+pub type Chiave = (Option<Impaginazione>, Lavorazione);
 
 pub struct Anteprime {
     richieste: Sender<Richiesta>,
 }
 
 impl Anteprime {
-    /// Avvia il thread. `consegna` riceve l'id del documento e le sue pagine.
+    /// Avvia il thread. `consegna` riceve l'id del documento, la chiave della
+    /// richiesta e le pagine.
     /// Restituisce anche l'errore di caricamento di pdfium, se c'è stato.
-    pub fn avvia(consegna: impl Fn(u64, Vec<Pagina>) + Send + 'static) -> (Self, Option<String>) {
+    pub fn avvia(consegna: impl Fn(u64, Chiave, Vec<Pagina>) + Send + 'static) -> (Self, Option<String>) {
         let (richieste, rx) = channel::<Richiesta>();
         let (esito_tx, esito_rx) = channel();
         thread::spawn(move || {
@@ -65,7 +72,17 @@ impl Anteprime {
                     ultime.push(r);
                 }
                 for r in ultime {
-                    consegna(r.id, pagine_per_richiesta(&pdfium, &r.percorso, r.formato, r.impaginazione.as_ref()));
+                    consegna(
+                        r.id,
+                        (r.impaginazione, r.lavorazione),
+                        pagine_per_richiesta(
+                            &pdfium,
+                            &r.percorso,
+                            r.formato,
+                            &r.lavorazione,
+                            r.impaginazione.as_ref(),
+                        ),
+                    );
                 }
             }
         });
@@ -73,10 +90,17 @@ impl Anteprime {
         (Self { richieste }, errore)
     }
 
-    /// Con un'impaginazione l'anteprima è quella del file impaginato, cioè
-    /// quello che parte davvero.
-    pub fn richiedi(&self, id: u64, percorso: PathBuf, formato: Formato, impaginazione: Option<Impaginazione>) {
-        let _ = self.richieste.send(Richiesta { id, percorso, formato, impaginazione });
+    /// L'anteprima passa da scala e impaginazione, cioè è il file che parte
+    /// davvero.
+    pub fn richiedi(
+        &self,
+        id: u64,
+        percorso: PathBuf,
+        formato: Formato,
+        lavorazione: Lavorazione,
+        impaginazione: Option<Impaginazione>,
+    ) {
+        let _ = self.richieste.send(Richiesta { id, percorso, formato, lavorazione, impaginazione });
     }
 }
 
@@ -86,14 +110,17 @@ fn pagine_per_richiesta(
     pdfium: &Result<Pdfium, String>,
     percorso: &Path,
     formato: Formato,
+    lav: &Lavorazione,
     imp: Option<&Impaginazione>,
 ) -> Vec<Pagina> {
     match formato {
         Formato::Pdf => match pdfium {
-            Ok(p) => pagine_pdf(p, percorso, imp).unwrap_or_default(),
+            Ok(p) => pagine_pdf(p, percorso, lav, imp).unwrap_or_default(),
             Err(_) => Vec::new(),
         },
-        Formato::Jpeg | Formato::Tiff | Formato::Png => immagine(percorso, formato, imp).into_iter().collect(),
+        Formato::Jpeg | Formato::Tiff | Formato::Png => {
+            immagine(percorso, formato, lav, imp).into_iter().collect()
+        }
         Formato::PostScript | Formato::Hpgl2 => Vec::new(),
     }
 }
@@ -188,16 +215,28 @@ fn estrai_pdfium() -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
-fn pagine_pdf(pdfium: &Pdfium, percorso: &Path, imp: Option<&Impaginazione>) -> Result<Vec<Pagina>, PdfiumError> {
-    // Lo stesso PDF impaginato che `stampante.rs` manderebbe; se l'impaginazione
-    // non riesce, l'errore lo darà la stampa e qui resta la pagina originale.
-    let composto = imp.and_then(|imp| {
-        let dati = std::fs::read(percorso).ok()?;
-        impagina::componi_pdf(&dati, imp).ok().flatten()
-    });
+fn pagine_pdf(
+    pdfium: &Pdfium,
+    percorso: &Path,
+    lav: &Lavorazione,
+    imp: Option<&Impaginazione>,
+) -> Result<Vec<Pagina>, String> {
+    // Lo stesso PDF (scalato e impaginato) che `stampante.rs` manderebbe. Se non
+    // si riesce a comporlo (per esempio un PDF cifrato da scalare) niente
+    // anteprima: mostrare l'originale farebbe credere che parta così.
+    let composto = if lav.nulla() && imp.is_none() {
+        None
+    } else {
+        let dati = std::fs::read(percorso).map_err(|e| e.to_string())?;
+        lavorazione::componi_pdf(&dati, lav, imp).map_err(|e| format!("{e:#}"))?
+    };
+    let carica = |e: PdfiumError| e.to_string();
     let (doc, posizioni) = match &composto {
-        Some(c) => (pdfium.load_pdf_from_byte_slice(&c.dati, None)?, c.posizioni.as_slice()),
-        None => (pdfium.load_pdf_from_file(percorso, None)?, &[][..]),
+        Some(c) => (
+            pdfium.load_pdf_from_byte_slice(&c.dati, None).map_err(carica)?,
+            c.posizioni.as_slice(),
+        ),
+        None => (pdfium.load_pdf_from_file(percorso, None).map_err(carica)?, &[][..]),
     };
     // Come scale_page_to_display_size, ma senza ruotare le pagine orizzontali:
     // l'anteprima deve mostrare la pagina com'è.
@@ -207,7 +246,12 @@ fn pagine_pdf(pdfium: &Pdfium, percorso: &Path, imp: Option<&Impaginazione>) -> 
         .set_maximum_height(LATO_MAX);
     let mut out = Vec::new();
     for (n, pagina) in doc.pages().iter().take(PAGINE_MAX).enumerate() {
-        let rgba = pagina.render_with_config(&config)?.as_image()?.to_rgba8();
+        let rgba = pagina
+            .render_with_config(&config)
+            .map_err(carica)?
+            .as_image()
+            .map_err(carica)?
+            .to_rgba8();
         let dim = [rgba.width() as usize, rgba.height() as usize];
         out.push(Pagina {
             immagine: ColorImage::from_rgba_unmultiplied(dim, &rgba),
@@ -219,42 +263,76 @@ fn pagine_pdf(pdfium: &Pdfium, percorso: &Path, imp: Option<&Impaginazione>) -> 
     Ok(out)
 }
 
-/// Anteprima di un'immagine. Impaginata, passa dalla stessa `componi_raster`
-/// della stampa, solo a risoluzione ridotta.
-fn immagine(percorso: &Path, formato: Formato, imp: Option<&Impaginazione>) -> Option<Pagina> {
+/// Anteprima di un'immagine. La scala cambia solo i DPI (i pixel restano) e,
+/// se c'è, l'impaginazione passa dalla stessa `componi_raster` della stampa.
+fn immagine(
+    percorso: &Path,
+    formato: Formato,
+    lav: &Lavorazione,
+    imp: Option<&Impaginazione>,
+) -> Option<Pagina> {
     let originale = image::open(percorso).ok()?;
     let ridotta = originale.thumbnail(LATO_MAX as u32, LATO_MAX as u32);
     let colori = |img: &image::RgbaImage| {
         ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img)
     };
-    let Some(imp) = imp else {
-        return Some(Pagina { immagine: colori(&ridotta.to_rgba8()), mm: None, impaginata: false, ruotata: false });
-    };
-    // DPI della miniatura: quelli del file, scalati come i pixel.
     let (dpi_x, dpi_y) = file::dpi_immagine(percorso, formato);
-    let dpi = (
-        dpi_x * ridotta.width() as f64 / originale.width() as f64,
-        dpi_y * ridotta.height() as f64 / originale.height() as f64,
+    let (larghezza, altezza) = (
+        originale.width() as f64 * 25.4 / dpi_x,
+        originale.height() as f64 * 25.4 / dpi_y,
     );
-    match impagina::componi_raster(png::su_bianco(ridotta), dpi, imp) {
+    let (sx, sy) = lavorazione::fattori(&lav.scala, larghezza, altezza);
+    let mm = Some((larghezza * sx, altezza * sy));
+    // DPI della miniatura: quelli del file, scalati come i pixel e dalla scala.
+    let dpi = (
+        dpi_x * ridotta.width() as f64 / originale.width() as f64 / sx,
+        dpi_y * ridotta.height() as f64 / originale.height() as f64 / sy,
+    );
+    let ridotta = png::su_bianco(ridotta);
+    let Some(imp) = imp else {
+        return Some(Pagina {
+            immagine: colori(&image::DynamicImage::ImageRgb8(deforma(ridotta, sx / dpi_x, sy / dpi_y)).to_rgba8()),
+            mm,
+            impaginata: false,
+            ruotata: false,
+        });
+    };
+    match impagina::componi_raster(ridotta, dpi, imp) {
         Ok(c) => {
             let mm = (c.larghezza_px as f64 * 25.4 / c.dpi.0, c.altezza_px() as f64 * 25.4 / c.dpi.1);
-            let rotolo = image::DynamicImage::ImageRgb8(c.su_rotolo()).thumbnail(LATO_MAX as u32, LATO_MAX as u32);
+            // Pixel a DPI diversi su x e y: prima le proporzioni di stampa, poi la riduzione.
+            let rotolo = deforma(c.su_rotolo(), 1.0 / c.dpi.0, 1.0 / c.dpi.1);
+            let rotolo = image::DynamicImage::ImageRgb8(rotolo).thumbnail(LATO_MAX as u32, LATO_MAX as u32);
             Some(Pagina { immagine: colori(&rotolo.to_rgba8()), mm: Some(mm), impaginata: true, ruotata: c.ruotata })
         }
         Err(ridotta) => Some(Pagina {
-            immagine: colori(&image::DynamicImage::ImageRgb8(ridotta).to_rgba8()),
-            mm: None,
+            immagine: colori(&image::DynamicImage::ImageRgb8(deforma(ridotta, sx / dpi_x, sy / dpi_y)).to_rgba8()),
+            mm,
             impaginata: false,
             ruotata: false,
         }),
     }
 }
 
+/// Miniatura con le proporzioni di stampa. `fx` e `fy` sono i mm per pixel a
+/// meno di una costante (scala diviso DPI): con valori diversi l'immagine esce
+/// deformata (percentuale o misura senza proporzioni, oppure DPI diversi su x e
+/// y), e così deve vederla l'anteprima. Il lato lungo resta quello della miniatura.
+fn deforma(img: image::RgbImage, fx: f64, fy: f64) -> image::RgbImage {
+    if (fx / fy - 1.0).abs() < 1e-6 {
+        return img;
+    }
+    let (l, a) = (img.width() as f64 * fx, img.height() as f64 * fy);
+    let k = img.width().max(img.height()) as f64 / l.max(a);
+    let (l, a) = ((l * k).round().max(1.0) as u32, (a * k).round().max(1.0) as u32);
+    image::imageops::resize(&img, l, a, image::imageops::FilterType::Triangle)
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::impagina::Allineamento;
+    use crate::lavorazione::{FormatoIso, Scala};
     use lopdf::dictionary;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
@@ -312,7 +390,7 @@ mod test {
         // Una pagina A1 (1684 × 2384 pt) vuota.
         let pdf = crea_pdf(&[(1684, 2384)]);
 
-        let pagine = pagine_pdf(&pdfium, &pdf, None).unwrap();
+        let pagine = pagine_pdf(&pdfium, &pdf, &Lavorazione::default(), None).unwrap();
         std::fs::remove_file(&pdf).unwrap();
         assert_eq!(pagine.len(), 1);
         let [l, a] = pagine[0].immagine.size;
@@ -323,11 +401,28 @@ mod test {
     }
 
     #[test]
+    fn anteprima_di_un_pdf_scalato() {
+        let Some(pdfium) = pdfium_o_salta() else { return };
+        // A1 (1684 × 2384 pt) adattata ad A4: 209,8 × 297 mm.
+        let pdf = crea_pdf(&[(1684, 2384)]);
+        let lav = Lavorazione { scala: Scala::Formato(FormatoIso::A4) };
+        let pagine = pagine_pdf(&pdfium, &pdf, &lav, None).unwrap();
+        std::fs::remove_file(&pdf).unwrap();
+        assert_eq!(pagine.len(), 1);
+        let (l_mm, a_mm) = pagine[0].mm.unwrap();
+        assert!((l_mm - 210.0).abs() < 1.0 && (a_mm - 297.0).abs() < 1.0, "{l_mm} × {a_mm}");
+        let [l, a] = pagine[0].immagine.size;
+        assert!((l as f64 / a as f64 - 210.0 / 297.0).abs() < 0.01);
+        // Non è un'impaginazione sul rotolo: la pagina resta dov'è.
+        assert!(!pagine[0].impaginata && !pagine[0].ruotata);
+    }
+
+    #[test]
     fn mostra_solo_le_prime_quattro_pagine() {
         let Some(pdfium) = pdfium_o_salta() else { return };
         // Sei pagine A4 vuote: l'anteprima ne mostra al massimo PAGINE_MAX.
         let pdf = crea_pdf(&[(595, 842); 6]);
-        let pagine = pagine_pdf(&pdfium, &pdf, None).unwrap();
+        let pagine = pagine_pdf(&pdfium, &pdf, &Lavorazione::default(), None).unwrap();
         std::fs::remove_file(&pdf).unwrap();
         assert_eq!(pagine.len(), PAGINE_MAX);
     }
@@ -337,9 +432,20 @@ mod test {
         let Some(pdfium) = pdfium_o_salta() else { return };
         let corrotto = file_temp(".pdf");
         std::fs::write(&corrotto, b"%PDF-1.5\nnon un pdf vero").unwrap();
-        assert!(pagine_pdf(&pdfium, &corrotto, None).is_err(), "PDF corrotto");
+        assert!(pagine_pdf(&pdfium, &corrotto, &Lavorazione::default(), None).is_err(), "PDF corrotto");
         std::fs::remove_file(&corrotto).unwrap();
-        assert!(pagine_pdf(&pdfium, &file_temp(".pdf"), None).is_err(), "PDF inesistente");
+        assert!(
+            pagine_pdf(&pdfium, &file_temp(".pdf"), &Lavorazione::default(), None).is_err(),
+            "PDF inesistente"
+        );
+        // Da ridimensionare ma illeggibile: errore, non l'originale.
+        let scalato = Lavorazione {
+            scala: Scala::Percentuale { x: 50.0, y: 50.0 },
+        };
+        let corrotto = file_temp(".pdf");
+        std::fs::write(&corrotto, b"%PDF-1.5\nnon un pdf vero").unwrap();
+        assert!(pagine_pdf(&pdfium, &corrotto, &scalato, None).is_err(), "scala di un PDF illeggibile");
+        std::fs::remove_file(&corrotto).unwrap();
     }
 
     /// Senza libpdfium il messaggio dice cosa manca e che i PDF restano senza
@@ -367,38 +473,116 @@ mod test {
     fn senza_pdfium_pdf_vuoto_ma_immagini_funzionano() {
         let senza: Result<Pdfium, String> = Err(messaggio_pdfium_mancante());
         let pdf = crea_pdf(&[(595, 842)]);
-        assert!(pagine_per_richiesta(&senza, &pdf, Formato::Pdf, None).is_empty());
+        assert!(
+            pagine_per_richiesta(&senza, &pdf, Formato::Pdf, &Lavorazione::default(), None).is_empty()
+        );
         std::fs::remove_file(&pdf).unwrap();
-        assert!(pagine_per_richiesta(&senza, &file_temp(".pdf"), Formato::PostScript, None).is_empty());
-        assert!(pagine_per_richiesta(&senza, &file_temp(".pdf"), Formato::Hpgl2, None).is_empty());
+        assert!(
+            pagine_per_richiesta(
+                &senza,
+                &file_temp(".pdf"),
+                Formato::PostScript,
+                &Lavorazione::default(),
+                None
+            )
+            .is_empty()
+        );
+        assert!(
+            pagine_per_richiesta(
+                &senza,
+                &file_temp(".pdf"),
+                Formato::Hpgl2,
+                &Lavorazione::default(),
+                None
+            )
+            .is_empty()
+        );
 
         let png = png_valido(60, 40);
-        let pagine = pagine_per_richiesta(&senza, &png, Formato::Png, None);
+        let pagine = pagine_per_richiesta(&senza, &png, Formato::Png, &Lavorazione::default(), None);
         std::fs::remove_file(&png).unwrap();
         assert_eq!(pagine.len(), 1);
-        assert!(pagine[0].mm.is_none());
+        // Le misure ci sono sempre, anche senza impaginazione: 60 × 40 px a
+        // 300 dpi presunti.
+        let (l, a) = pagine[0].mm.unwrap();
+        assert!((l - 60.0 * 25.4 / 300.0).abs() < 0.01 && (a - 40.0 * 25.4 / 300.0).abs() < 0.01);
     }
 
     #[test]
     fn immagine_corrotta_da_zero_pagine() {
         let p = file_temp(".png");
         std::fs::write(&p, b"non un'immagine").unwrap();
-        assert!(immagine(&p, Formato::Png, None).is_none());
+        assert!(immagine(&p, Formato::Png, &Lavorazione::default(), None).is_none());
         let senza: Result<Pdfium, String> = Err(messaggio_pdfium_mancante());
-        assert!(pagine_per_richiesta(&senza, &p, Formato::Png, None).is_empty());
-        assert!(pagine_per_richiesta(&senza, &p, Formato::Jpeg, None).is_empty());
-        assert!(pagine_per_richiesta(&senza, &p, Formato::Tiff, None).is_empty());
+        assert!(
+            pagine_per_richiesta(&senza, &p, Formato::Png, &Lavorazione::default(), None).is_empty()
+        );
+        assert!(
+            pagine_per_richiesta(&senza, &p, Formato::Jpeg, &Lavorazione::default(), None).is_empty()
+        );
+        assert!(
+            pagine_per_richiesta(&senza, &p, Formato::Tiff, &Lavorazione::default(), None).is_empty()
+        );
         std::fs::remove_file(&p).unwrap();
     }
 
     #[test]
     fn immagine_grande_viene_ridotta_mantenendo_le_proporzioni() {
         let p = png_valido(2000, 1000);
-        let img = immagine(&p, Formato::Png, None).expect("PNG valido");
+        let img = immagine(&p, Formato::Png, &Lavorazione::default(), None).expect("PNG valido");
         std::fs::remove_file(&p).unwrap();
         let [l, a] = img.immagine.size;
         assert_eq!(l, LATO_MAX as usize);
         assert_eq!(a, LATO_MAX as usize / 2);
+    }
+
+    #[test]
+    fn immagine_con_proporzioni_libere_esce_deformata() {
+        // 600 × 300 px al 200 % × 50 %: in stampa 1200 × 150, cioè 8:1, non 2:1.
+        let p = png_valido(600, 300);
+        let lav = Lavorazione { scala: Scala::Percentuale { x: 200.0, y: 50.0 } };
+        let img = immagine(&p, Formato::Png, &lav, None).expect("PNG valido");
+        std::fs::remove_file(&p).unwrap();
+        let [l, a] = img.immagine.size;
+        assert!(l.max(a) <= LATO_MAX as usize);
+        assert!((l as f64 / a as f64 - 8.0).abs() < 0.1, "{l} × {a}");
+        let (l_mm, a_mm) = img.mm.unwrap();
+        assert!((l_mm / a_mm - 8.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn immagine_con_dpi_diversi_su_x_e_y() {
+        // 600 × 300 px a 300 × 150 dpi: in stampa 50,8 × 50,8 mm, quadrata.
+        let p = png_valido(600, 300);
+        let dati = crate::png::test::con_phys_xy(&std::fs::read(&p).unwrap(), 11811, 5906);
+        std::fs::write(&p, dati).unwrap();
+        let img = immagine(&p, Formato::Png, &Lavorazione::default(), None).expect("PNG valido");
+        std::fs::remove_file(&p).unwrap();
+        let [l, a] = img.immagine.size;
+        assert!((l as f64 / a as f64 - 1.0).abs() < 0.01, "{l} × {a}");
+        let (l_mm, a_mm) = img.mm.unwrap();
+        assert!((l_mm - 50.8).abs() < 0.1 && (a_mm - 50.8).abs() < 0.1, "{l_mm} × {a_mm}");
+    }
+
+    #[test]
+    fn immagine_impaginata_con_dpi_diversi_o_scala_libera() {
+        // 600 × 300 px al centro di una pagina da 190 mm. Prima a 300 × 150 dpi
+        // (50,8 × 50,8 mm), poi a 300 dpi al 100 % × 50 % (50,8 × 12,7 mm): in
+        // tutti e due i casi i pixel composti hanno DPI diversi su x e y.
+        let imp = Impaginazione { allineamento: Allineamento::Centro, rotolo_mm: 200.0, margine_mm: 5.0 };
+        let libera = Lavorazione { scala: Scala::Percentuale { x: 100.0, y: 50.0 } };
+        for (phys, lav, alta) in [((11811, 5906), Lavorazione::default(), 50.8), ((11811, 11811), libera, 12.7)] {
+            let p = png_valido(600, 300);
+            let dati = crate::png::test::con_phys_xy(&std::fs::read(&p).unwrap(), phys.0, phys.1);
+            std::fs::write(&p, dati).unwrap();
+            let pagina = immagine(&p, Formato::Png, &lav, Some(&imp)).unwrap();
+            std::fs::remove_file(&p).unwrap();
+            let (l_mm, a_mm) = pagina.mm.unwrap();
+            assert!((l_mm - 190.0).abs() < 0.5 && (a_mm - alta).abs() < 0.5, "{l_mm} × {a_mm}");
+            let [lp, ap] = pagina.immagine.size;
+            let (atteso, reale) = (l_mm / a_mm, lp as f64 / ap as f64);
+            assert!((reale / atteso - 1.0).abs() < 0.02, "{lp} × {ap} px per {l_mm} × {a_mm} mm");
+        }
     }
 
     /// Il thread anteprime consegna comunque le immagini (con o senza pdfium):
@@ -407,10 +591,10 @@ mod test {
     fn il_thread_consegna_le_immagini() {
         let png = png_valido(60, 40);
         let (tx, rx) = std::sync::mpsc::channel();
-        let (anteprime, _) = Anteprime::avvia(move |id, pagine| {
+        let (anteprime, _) = Anteprime::avvia(move |id, _, pagine| {
             let _ = tx.send((id, pagine.len()));
         });
-        anteprime.richiedi(7, png.clone(), Formato::Png, None);
+        anteprime.richiedi(7, png.clone(), Formato::Png, Lavorazione::default(), None);
         let (id, n) = rx.recv_timeout(Duration::from_secs(10)).expect("consegna anteprima");
         std::fs::remove_file(&png).unwrap();
         assert_eq!((id, n), (7, 1));
@@ -431,7 +615,7 @@ mod test {
                 let imp = Impaginazione { allineamento, rotolo_mm: 400.0, margine_mm: 10.0 };
                 let pdf = file_temp(".pdf");
                 std::fs::write(&pdf, crate::impagina::test::pdf(l * mm_pt, a * mm_pt, (20.0, 40.0), 0)).unwrap();
-                let pagine = pagine_pdf(&pdfium, &pdf, Some(&imp)).unwrap();
+                let pagine = pagine_pdf(&pdfium, &pdf, &Lavorazione::default(), Some(&imp)).unwrap();
                 std::fs::remove_file(&pdf).unwrap();
                 assert!(pagine[0].impaginata);
                 assert_eq!(pagine[0].ruotata, ruotata);
@@ -455,7 +639,7 @@ mod test {
         let p = file_temp(".png");
         image::RgbImage::new(600, 300).save(&p).unwrap();
         let imp = Impaginazione { allineamento: Allineamento::Centro, rotolo_mm: 200.0, margine_mm: 5.0 };
-        let pagina = immagine(&p, Formato::Png, Some(&imp)).unwrap();
+        let pagina = immagine(&p, Formato::Png, &Lavorazione::default(), Some(&imp)).unwrap();
         std::fs::remove_file(&p).unwrap();
         let (l_mm, a_mm) = pagina.mm.unwrap();
         assert!((l_mm - 190.0).abs() < 0.5 && (a_mm - 25.4).abs() < 0.5, "{l_mm} × {a_mm}");

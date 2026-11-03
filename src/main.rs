@@ -9,6 +9,7 @@ mod desktop;
 mod file;
 mod gui;
 mod impagina;
+mod lavorazione;
 mod pjl;
 mod png;
 mod rotazione;
@@ -22,14 +23,17 @@ use anyhow::{Context, Result, bail};
 
 use config::Config;
 use impagina::{Allineamento, Impaginazione};
+use lavorazione::{Lavorazione, Scala};
 use pjl::{OpzioniJob, Sorgente};
 
 const USO: &str = "\
 Senza argomenti (o con dei file) apre l'interfaccia. Da riga di comando:
   iqclock stampa FILE... [--host IP] [--copie N] [--rotolo 1|2|auto] [--grigi] [--prn OUT]
                  [--allinea sinistra|centro|destra] [--larghezza-rotolo MM] [--margine MM]
+                 [--scala A3|50%|500x700|500x700!]
       Con --allinea centro/destra la larghezza del rotolo si legge dalla stampante (SNMP);
       --larghezza-rotolo la indica a mano.
+      --scala 500x700 tiene le proporzioni, 500x700! deforma.
   iqclock stato [--host IP]
   iqclock snmp OID [--host IP]      (diagnostica: elenca le voci sotto OID)";
 
@@ -127,6 +131,13 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
         prendi(&mut args, "--larghezza-rotolo")?.map(|m| m.parse()).transpose().context("--larghezza-rotolo")?;
     let margine_mm =
         prendi(&mut args, "--margine")?.map(|m| m.parse()).transpose().context("--margine")?.unwrap_or(config.margine_mm);
+    let lavorazione = match prendi(&mut args, "--scala")? {
+        None => Lavorazione::default(),
+        Some(t) => Lavorazione {
+            scala: Scala::da_testo(&t)
+                .with_context(|| format!("--scala vuole A0..A4, 50% o 500x700 (non {t})"))?,
+        },
+    };
     if args.is_empty() {
         bail!("nessun file da stampare\n{USO}");
     }
@@ -151,12 +162,26 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
 
     for f in args.iter().map(PathBuf::from) {
         let info = file::analizza(&f).with_context(|| f.display().to_string())?;
+        if !lavorazione.nulla() {
+            if !lavorazione::lavorabile(info.formato) {
+                eprintln!("attenzione: {} è PostScript/HP-GL/2, la scala non si applica", f.display());
+            } else if let Some((l, a)) = info.mm
+                && lavorazione::fuori_limiti(&lavorazione.scala, l, a)
+            {
+                bail!(
+                    "{}: la scala {} supera i limiti (da 1% a 1000% della misura originale)",
+                    f.display(),
+                    lavorazione.scala.etichetta()
+                );
+            }
+        }
         let opz = OpzioniJob {
             nome: f.file_name().unwrap_or_default().to_string_lossy().into_owned(),
             copie,
             sorgente,
             scala_di_grigi,
             impaginazione,
+            lavorazione,
             ..Default::default()
         };
         match &prn {

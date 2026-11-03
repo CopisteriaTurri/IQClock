@@ -394,16 +394,27 @@ pub(crate) fn ereditato<'a>(
     None
 }
 
-/// MediaBox normalizzato `[x0, y0, x1, y1]` (in punti, con x0 < x1 e y0 < y1)
-/// e /Rotate in gradi (0, 90, 180 o 270).
-pub(crate) fn box_e_rotazione(doc: &lopdf::Document, pagina: lopdf::ObjectId) -> Option<([f64; 4], i64)> {
-    let mb = ereditato(doc, pagina, b"MediaBox")?.as_array().ok()?;
-    let v: Vec<f64> = mb.iter().filter_map(|o| o.as_float().ok().map(f64::from)).collect();
+/// Riquadro `[x0, y0, x1, y1]` normalizzato (x0 < x1, y0 < y1) da un array PDF.
+fn riquadro(o: &lopdf::Object) -> Option<[f64; 4]> {
+    let v: Vec<f64> = o.as_array().ok()?.iter().filter_map(|o| o.as_float().ok().map(f64::from)).collect();
     if v.len() != 4 {
         return None;
     }
+    Some([v[0].min(v[2]), v[1].min(v[3]), v[0].max(v[2]), v[1].max(v[3])])
+}
+
+/// Parte visibile della pagina `[x0, y0, x1, y1]` (in punti, con x0 < x1 e
+/// y0 < y1): il CropBox dentro il MediaBox se c'è, altrimenti il MediaBox. E
+/// /Rotate in gradi (0, 90, 180 o 270).
+pub(crate) fn box_e_rotazione(doc: &lopdf::Document, pagina: lopdf::ObjectId) -> Option<([f64; 4], i64)> {
+    let media = riquadro(ereditato(doc, pagina, b"MediaBox")?)?;
+    let visibile = ereditato(doc, pagina, b"CropBox")
+        .and_then(riquadro)
+        .map(|c| [c[0].max(media[0]), c[1].max(media[1]), c[2].min(media[2]), c[3].min(media[3])])
+        .filter(|c| c[0] < c[2] && c[1] < c[3])
+        .unwrap_or(media);
     let ruota = ereditato(doc, pagina, b"Rotate").and_then(|o| o.as_i64().ok()).unwrap_or(0);
-    Some(([v[0].min(v[2]), v[1].min(v[3]), v[0].max(v[2]), v[1].max(v[3])], ruota.rem_euclid(360)))
+    Some((visibile, ruota.rem_euclid(360)))
 }
 
 /// Lati della pagina in mm come appare (con /Rotate applicato).
@@ -414,16 +425,18 @@ fn dimensioni_pagina_mm(doc: &lopdf::Document, pagina: lopdf::ObjectId) -> Optio
     Some(if ruota % 180 == 90 { (a, l) } else { (l, a) })
 }
 
+/// Misure ISO A (lato corto, lato lungo), comuni a lista, scala e misure finali.
+pub(crate) const ISO: [(&str, f64, f64); 6] = [
+    ("A0", 841.0, 1189.0),
+    ("A1", 594.0, 841.0),
+    ("A2", 420.0, 594.0),
+    ("A3", 297.0, 420.0),
+    ("A4", 210.0, 297.0),
+    ("A5", 148.0, 210.0),
+];
+
 /// Formato ISO A corrispondente alle misure, con 2 mm di tolleranza.
 fn iso(l: f64, a: f64) -> Option<&'static str> {
-    const ISO: [(&str, f64, f64); 6] = [
-        ("A0", 841.0, 1189.0),
-        ("A1", 594.0, 841.0),
-        ("A2", 420.0, 594.0),
-        ("A3", 297.0, 420.0),
-        ("A4", 210.0, 297.0),
-        ("A5", 148.0, 210.0),
-    ];
     let (corto, lungo) = if l < a { (l, a) } else { (a, l) };
     ISO.iter()
         .find(|(_, c, g)| (corto - c).abs() < 2.0 && (lungo - g).abs() < 2.0)
@@ -431,7 +444,7 @@ fn iso(l: f64, a: f64) -> Option<&'static str> {
 }
 
 /// " (A1)" se le misure corrispondono a un formato ISO A.
-fn formato_iso(l: f64, a: f64) -> String {
+pub(crate) fn formato_iso(l: f64, a: f64) -> String {
     iso(l, a).map(|n| format!(" ({n})")).unwrap_or_default()
 }
 
