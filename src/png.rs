@@ -257,11 +257,16 @@ pub(crate) mod test {
 
     /// Inserisce un chunk `pHYs` subito dopo IHDR (come fa chi dichiara i DPI).
     pub(crate) fn con_phys(png: &[u8], pixel_per_metro: u32) -> Vec<u8> {
+        con_phys_xy(png, pixel_per_metro, pixel_per_metro)
+    }
+
+    /// Come [`con_phys`], con risoluzioni diverse in orizzontale e verticale.
+    pub(crate) fn con_phys_xy(png: &[u8], x: u32, y: u32) -> Vec<u8> {
         let fine_ihdr = 8 + 4 + 4 + 13 + 4;
         assert_eq!(&png[12..16], b"IHDR");
         let mut corpo = b"pHYs".to_vec();
-        corpo.extend_from_slice(&pixel_per_metro.to_be_bytes());
-        corpo.extend_from_slice(&pixel_per_metro.to_be_bytes());
+        corpo.extend_from_slice(&x.to_be_bytes());
+        corpo.extend_from_slice(&y.to_be_bytes());
         corpo.push(1); // unità: pixel per metro
         let mut out = png[..fine_ihdr].to_vec();
         out.extend_from_slice(&9u32.to_be_bytes());
