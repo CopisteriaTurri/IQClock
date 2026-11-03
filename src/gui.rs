@@ -11,7 +11,7 @@ use eframe::egui::{
     Sense, Stroke, StrokeKind, TextStyle, TextureHandle, TextureOptions, Vec2,
 };
 
-use crate::anteprima::{Anteprime, PAGINE_MAX, Pagina};
+use crate::anteprima::{Anteprime, Chiave, PAGINE_MAX, Pagina};
 use crate::config::Config;
 use crate::file::{self, InfoFile};
 use crate::impagina::{self, Allineamento, Impaginazione};
@@ -135,7 +135,7 @@ struct Documento {
     /// Lock delle proporzioni per percentuale e misura custom.
     blocca_proporzioni: bool,
     /// Impaginazione e lavorazione con cui sono state chieste le anteprime.
-    anteprima: (Option<Impaginazione>, Lavorazione),
+    anteprima: Chiave,
     /// Prime pagine renderizzate (vuoto finché non arrivano, o se l'anteprima
     /// non è disponibile).
     pagine: Vec<PaginaMostrata>,
@@ -188,7 +188,7 @@ enum Evento {
     Avanzamento(u64, f32),
     Finito(u64, Result<(), String>),
     Stato(Result<StatoStampante, String>),
-    Pagine(u64, Vec<Pagina>),
+    Pagine(u64, Chiave, Vec<Pagina>),
 }
 
 pub struct App {
@@ -229,8 +229,8 @@ impl App {
         configura_stile(&cc.egui_ctx);
         let (tx, rx) = channel();
         let (tx_pagine, ctx_pagine) = (tx.clone(), cc.egui_ctx.clone());
-        let (anteprime, errore_pdfium) = Anteprime::avvia(move |id, pagine| {
-            let _ = tx_pagine.send(Evento::Pagine(id, pagine));
+        let (anteprime, errore_pdfium) = Anteprime::avvia(move |id, chiave, pagine| {
+            let _ = tx_pagine.send(Evento::Pagine(id, chiave, pagine));
             ctx_pagine.request_repaint();
         });
         let mut app = Self {
@@ -437,8 +437,10 @@ impl App {
                     self.stato_stampante = Some(r);
                     self.verifica_in_corso = false;
                 }
-                Evento::Pagine(id, pagine) => {
-                    if let Some(d) = self.documenti.iter_mut().find(|d| d.id == id) {
+                Evento::Pagine(id, chiave, pagine) => {
+                    // Se nel frattempo è cambiata scala o impaginazione, queste
+                    // pagine sono superate: arriveranno quelle giuste.
+                    if let Some(d) = self.documenti.iter_mut().find(|d| d.id == id && d.anteprima == chiave) {
                         d.pagine = pagine
                             .into_iter()
                             .enumerate()

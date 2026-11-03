@@ -45,14 +45,19 @@ struct Richiesta {
     impaginazione: Option<Impaginazione>,
 }
 
+/// Cosa è stato chiesto: impaginazione e lavorazione. Torna con le pagine,
+/// così chi le riceve scarta i risultati di una richiesta ormai superata.
+pub type Chiave = (Option<Impaginazione>, Lavorazione);
+
 pub struct Anteprime {
     richieste: Sender<Richiesta>,
 }
 
 impl Anteprime {
-    /// Avvia il thread. `consegna` riceve l'id del documento e le sue pagine.
+    /// Avvia il thread. `consegna` riceve l'id del documento, la chiave della
+    /// richiesta e le pagine.
     /// Restituisce anche l'errore di caricamento di pdfium, se c'è stato.
-    pub fn avvia(consegna: impl Fn(u64, Vec<Pagina>) + Send + 'static) -> (Self, Option<String>) {
+    pub fn avvia(consegna: impl Fn(u64, Chiave, Vec<Pagina>) + Send + 'static) -> (Self, Option<String>) {
         let (richieste, rx) = channel::<Richiesta>();
         let (esito_tx, esito_rx) = channel();
         thread::spawn(move || {
@@ -69,6 +74,7 @@ impl Anteprime {
                 for r in ultime {
                     consegna(
                         r.id,
+                        (r.impaginazione, r.lavorazione),
                         pagine_per_richiesta(
                             &pdfium,
                             &r.percorso,
@@ -520,7 +526,7 @@ mod test {
     fn il_thread_consegna_le_immagini() {
         let png = png_valido(60, 40);
         let (tx, rx) = std::sync::mpsc::channel();
-        let (anteprime, _) = Anteprime::avvia(move |id, pagine| {
+        let (anteprime, _) = Anteprime::avvia(move |id, _, pagine| {
             let _ = tx.send((id, pagine.len()));
         });
         anteprime.richiedi(7, png.clone(), Formato::Png, Lavorazione::default(), None);
