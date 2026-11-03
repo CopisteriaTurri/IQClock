@@ -300,7 +300,9 @@ fn immagine(
     match impagina::componi_raster(ridotta, dpi, imp) {
         Ok(c) => {
             let mm = (c.larghezza_px as f64 * 25.4 / c.dpi.0, c.altezza_px() as f64 * 25.4 / c.dpi.1);
-            let rotolo = image::DynamicImage::ImageRgb8(c.su_rotolo()).thumbnail(LATO_MAX as u32, LATO_MAX as u32);
+            // Pixel a DPI diversi su x e y: prima le proporzioni di stampa, poi la riduzione.
+            let rotolo = deforma(c.su_rotolo(), 1.0 / c.dpi.0, 1.0 / c.dpi.1);
+            let rotolo = image::DynamicImage::ImageRgb8(rotolo).thumbnail(LATO_MAX as u32, LATO_MAX as u32);
             Some(Pagina { immagine: colori(&rotolo.to_rgba8()), mm: Some(mm), impaginata: true, ruotata: c.ruotata })
         }
         Err(ridotta) => Some(Pagina {
@@ -560,6 +562,27 @@ mod test {
         assert!((l as f64 / a as f64 - 1.0).abs() < 0.01, "{l} × {a}");
         let (l_mm, a_mm) = img.mm.unwrap();
         assert!((l_mm - 50.8).abs() < 0.1 && (a_mm - 50.8).abs() < 0.1, "{l_mm} × {a_mm}");
+    }
+
+    #[test]
+    fn immagine_impaginata_con_dpi_diversi_o_scala_libera() {
+        // 600 × 300 px al centro di una pagina da 190 mm. Prima a 300 × 150 dpi
+        // (50,8 × 50,8 mm), poi a 300 dpi al 100 % × 50 % (50,8 × 12,7 mm): in
+        // tutti e due i casi i pixel composti hanno DPI diversi su x e y.
+        let imp = Impaginazione { allineamento: Allineamento::Centro, rotolo_mm: 200.0, margine_mm: 5.0 };
+        let libera = Lavorazione { scala: Scala::Percentuale { x: 100.0, y: 50.0 } };
+        for (phys, lav, alta) in [((11811, 5906), Lavorazione::default(), 50.8), ((11811, 11811), libera, 12.7)] {
+            let p = png_valido(600, 300);
+            let dati = crate::png::test::con_phys_xy(&std::fs::read(&p).unwrap(), phys.0, phys.1);
+            std::fs::write(&p, dati).unwrap();
+            let pagina = immagine(&p, Formato::Png, &lav, Some(&imp)).unwrap();
+            std::fs::remove_file(&p).unwrap();
+            let (l_mm, a_mm) = pagina.mm.unwrap();
+            assert!((l_mm - 190.0).abs() < 0.5 && (a_mm - alta).abs() < 0.5, "{l_mm} × {a_mm}");
+            let [lp, ap] = pagina.immagine.size;
+            let (atteso, reale) = (l_mm / a_mm, lp as f64 / ap as f64);
+            assert!((reale / atteso - 1.0).abs() < 0.02, "{lp} × {ap} px per {l_mm} × {a_mm} mm");
+        }
     }
 
     /// Il thread anteprime consegna comunque le immagini (con o senza pdfium):
