@@ -307,9 +307,18 @@ fn dpi_documento(doc: &PdfDocument<'_>, fattori_scala: &[(f64, f64)]) -> (Option
         // Fattori effettivi nello spazio utente, già scambiati su /Rotate
         // 90/270 dalla composizione. Una pagina scartata resta a scala 1.
         let (sx, sy) = fattori_scala.get(n).copied().unwrap_or((1.0, 1.0));
+        // FPDF_GetPageBoundingBox restituisce l'intersezione MediaBox/CropBox
+        // nello spazio utente originale, come i bounds degli oggetti.
+        let visibile = pagina.boundaries().bounding().ok().map(|b| b.bounds);
         for oggetto in pagina.objects().iter() {
             let PdfPageObject::Image(immagine) = oggetto else { continue };
             let Ok(riquadro) = immagine.bounds() else { continue };
+            if visibile.is_some_and(|v| {
+                riquadro.right() <= v.left() || riquadro.left() >= v.right()
+                    || riquadro.top() <= v.bottom() || riquadro.bottom() >= v.top()
+            }) {
+                continue;
+            }
             let (l, a) = (
                 f64::from(riquadro.width().to_mm()),
                 f64::from(riquadro.height().to_mm()),
@@ -323,8 +332,17 @@ fn dpi_documento(doc: &PdfDocument<'_>, fattori_scala: &[(f64, f64)]) -> (Option
             if px <= 0 || py <= 0 {
                 continue;
             }
-            let dpi = (file::dpi_effettivi(px as u32, l) / sx)
-                .min(file::dpi_effettivi(py as u32, a) / sy);
+            let Ok(matrice) = immagine.matrix() else { continue };
+            // La matrice porta il quadrato unitario dell'immagine sulla pagina.
+            // Ogni asse pixel segue il proprio vettore, anche ruotato o inclinato;
+            // la scala pagina agisce sulle componenti prima di misurare la lunghezza.
+            let lato_x = (f64::from(matrice.a()) * sx).hypot(f64::from(matrice.b()) * sy);
+            let lato_y = (f64::from(matrice.c()) * sx).hypot(f64::from(matrice.d()) * sy);
+            if !(lato_x.is_finite() && lato_y.is_finite() && lato_x > 0.0 && lato_y > 0.0) {
+                continue;
+            }
+            let dpi = file::dpi_effettivi(px as u32, lato_x * 25.4 / 72.0)
+                .min(file::dpi_effettivi(py as u32, lato_y * 25.4 / 72.0));
             minimo = Some(minimo.map_or(dpi, |m: f64| m.min(dpi)));
         }
     }
@@ -460,22 +478,26 @@ mod test {
     /// `larghezza_pt` × `altezza_pt` punti (a 72 pt un pollice, 300 dpi) e
     /// l'eventuale `/Rotate` di pagina in gradi.
     fn pdf_con_immagine(larghezza_pt: f64, altezza_pt: f64, ruota: i64) -> PathBuf {
+        pdf_con_raster(300, 300, &format!("{larghezza_pt} 0 0 {altezza_pt} 20 20"), ruota)
+    }
+
+    fn pdf_con_raster(px: usize, py: usize, matrice: &str, ruota: i64) -> PathBuf {
         let mut doc = lopdf::Document::with_version("1.5");
         let pagine_id = doc.new_object_id();
         let immagine = doc.add_object(lopdf::Stream::new(
             dictionary! {
                 "Type" => "XObject",
                 "Subtype" => "Image",
-                "Width" => 300,
-                "Height" => 300,
+                "Width" => px as i64,
+                "Height" => py as i64,
                 "ColorSpace" => "DeviceGray",
                 "BitsPerComponent" => 8,
             },
-            vec![0x80; 300 * 300],
+            vec![0x80; px * py],
         ));
         let contenuto = doc.add_object(lopdf::Stream::new(
             lopdf::Dictionary::new(),
-            format!("q {larghezza_pt} 0 0 {altezza_pt} 20 20 cm /Im0 Do Q").into_bytes(),
+            format!("q {matrice} cm /Im0 Do Q").into_bytes(),
         ));
         let pagina = doc.add_object(dictionary! {
             "Type" => "Page",
@@ -632,6 +654,61 @@ mod test {
         let pagine = pagine_pdf(&pdfium, &pdf, &lav, None).unwrap();
         assert_eq!(pagine.len(), 2);
         assert!((pagine[0].dpi_min.unwrap() - 300.0).abs() < 0.5);
+        std::fs::remove_file(pdf).unwrap();
+    }
+
+    #[test]
+    fn dpi_pdf_seguono_gli_assi_dell_immagine() {
+        let Some(pdfium) = pdfium_o_salta() else { return };
+        for (matrice, ruota, x, y, attesi) in [
+            ("0 72 -115.2 0 200 20", 0, 100.0, 100.0, 187.5),
+            ("0 72 -115.2 0 200 20", 0, 200.0, 100.0, 93.75),
+            // /Rotate scambia gli assi della scala; la CTM ruota il raster.
+            ("0 72 -115.2 0 200 20", 90, 100.0, 200.0, 93.75),
+            // Immagine a 45°: conta la lunghezza del vettore, non il suo bounds.
+            ("72 72 -115.2 115.2 200 20", 0, 100.0, 100.0, 187.5 / 2.0_f64.sqrt()),
+        ] {
+            let pdf = pdf_con_raster(400, 300, matrice, ruota);
+            let lav = Lavorazione { scala: Scala::Percentuale { x, y } };
+            let pagine = pagine_pdf(&pdfium, &pdf, &lav, None).unwrap();
+            let dpi = pagine[0].dpi_min.unwrap();
+            assert!((dpi - attesi).abs() < 0.5, "{dpi} invece di {attesi}");
+            assert!(file::DpiStampa { dpi, presunti: false }.avviso(200.0).is_some());
+            std::fs::remove_file(pdf).unwrap();
+        }
+    }
+
+    #[test]
+    fn dpi_pdf_ignorano_solo_immagini_interamente_fuori_pagina() {
+        let Some(pdfium) = pdfium_o_salta() else { return };
+        for ruota in [0, 90] {
+            for (posizione, attesi) in [("250 400", None), ("190 120", Some(75.0))] {
+                let pdf = pdf_con_raster(300, 300, &format!("288 0 0 288 {posizione}"), ruota);
+                let mut doc = lopdf::Document::load(&pdf).unwrap();
+                let id = *doc.get_pages().values().next().unwrap();
+                // CropBox decentrato ed ereditato: i bounds restano nello
+                // spazio utente, anche con /Rotate o con scala di stampa.
+                let padre = doc.get_dictionary(id).unwrap().get(b"Parent").unwrap().as_reference().unwrap();
+                doc.get_dictionary_mut(padre).unwrap().set(
+                    "CropBox", vec![100.into(), 100.into(), 200.into(), 200.into()],
+                );
+                doc.save(&pdf).unwrap();
+                for scala in [100.0, 200.0] {
+                    let lav = Lavorazione { scala: Scala::Percentuale { x: scala, y: scala } };
+                    let pagine = pagine_pdf(&pdfium, &pdf, &lav, None).unwrap();
+                    match (pagine[0].dpi_min, attesi) {
+                        (None, None) => {},
+                        (Some(dpi), Some(attesi)) => assert!((dpi - attesi * 100.0 / scala).abs() < 0.5),
+                        esito => panic!("{esito:?}, rotazione {ruota}, scala {scala}"),
+                    }
+                }
+                std::fs::remove_file(pdf).unwrap();
+            }
+        }
+        // Senza CropBox esplicito il limite è il MediaBox.
+        let pdf = pdf_con_raster(300, 300, "288 0 0 288 700 900", 0);
+        let pagine = pagine_pdf(&pdfium, &pdf, &Lavorazione::default(), None).unwrap();
+        assert_eq!(pagine[0].dpi_min, None);
         std::fs::remove_file(pdf).unwrap();
     }
 
