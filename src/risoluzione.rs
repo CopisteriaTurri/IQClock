@@ -103,6 +103,7 @@ fn riscrivi_jpeg(f: &mut File, dpi: (f64, f64)) -> Result<Option<bool>> {
         return Ok(None);
     }
     let (mut jfif, mut exif) = (None, false);
+    let mut adobe_senza_trasformazione = false;
     while let Some((marcatore, inizio, lunghezza)) = file::prossimo_app_pos(f) {
         let fine = inizio + lunghezza;
         if fine > fine_file {
@@ -133,6 +134,12 @@ fn riscrivi_jpeg(f: &mut File, dpi: (f64, f64)) -> Result<Option<bool>> {
                 exif = esito == EsitoTiff::Riscritto;
             }
         }
+        if marcatore == 0xEE && lunghezza >= 12 {
+            let mut adobe = [0u8; 12];
+            f.seek(SeekFrom::Start(inizio))?;
+            f.read_exact(&mut adobe)?;
+            adobe_senza_trasformazione |= adobe.starts_with(b"Adobe") && adobe[11] == 0;
+        }
         f.seek(SeekFrom::Start(fine))?;
     }
     if let Some(inizio) = jfif {
@@ -149,6 +156,10 @@ fn riscrivi_jpeg(f: &mut File, dpi: (f64, f64)) -> Result<Option<bool>> {
         Ok(Some(true))
     } else if exif {
         Ok(Some(true))
+    } else if adobe_senza_trasformazione {
+        // Aggiungere JFIF può far interpretare i campioni RGB Adobe come YCbCr.
+        // Senza risoluzione da riscrivere si usa la decodifica del chiamante.
+        Ok(None)
     } else if densita(dpi.0).is_some() && densita(dpi.1).is_some() {
         Ok(Some(false))
     } else {
@@ -968,6 +979,54 @@ mod test {
                     verifica_jpeg(&p, (150.0, 150.0));
                 }
             }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn jpeg_adobe_senza_trasformazione_non_riceve_jfif() {
+        let dir = cartella("jpeg-adobe");
+        for transform in [0u8, 1, 2] {
+            let mut adobe = vec![0xFF, 0xEE, 0, 14];
+            adobe.extend_from_slice(b"Adobe");
+            adobe.extend_from_slice(&[0, 100, 0, 0, 0, 0, transform]);
+            for risoluzione in [None, Some(jfif(1, 300, 300)), Some(exif(300))] {
+                let mut segmenti = vec![adobe.clone()];
+                if let Some(risoluzione) = &risoluzione {
+                    segmenti.push(risoluzione.clone());
+                }
+                let p = jpeg_con(&dir, "adobe.jpg", &segmenti);
+                let prima = std::fs::read(&p).unwrap();
+                let temp = con_dpi(&p, Formato::Jpeg, (150.0, 150.0)).unwrap();
+                if transform == 0 && risoluzione.is_none() {
+                    assert!(temp.is_none(), "APP14 Adobe senza trasformazione");
+                } else {
+                    let temp = temp.expect("riscrittura o inserimento consentiti");
+                    assert_eq!(
+                        file::dpi_immagine(temp.percorso(), Formato::Jpeg),
+                        (150.0, 150.0)
+                    );
+                    assert!(
+                        std::fs::read(temp.percorso())
+                            .unwrap()
+                            .windows(adobe.len())
+                            .any(|w| w == adobe)
+                    );
+                }
+                assert_eq!(std::fs::read(&p).unwrap(), prima);
+            }
+        }
+        // Un APP14 corto o di un altro produttore non è il marker Adobe.
+        for payload in [b"Adobe".as_slice(), b"Other\0\x64\0\0\0\0\0".as_slice()] {
+            let mut app14 = vec![0xFF, 0xEE];
+            app14.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+            app14.extend_from_slice(payload);
+            let p = jpeg_con(&dir, "altro.jpg", &[app14]);
+            assert!(
+                con_dpi(&p, Formato::Jpeg, (150.0, 150.0))
+                    .unwrap()
+                    .is_some()
+            );
         }
         std::fs::remove_dir_all(dir).unwrap();
     }

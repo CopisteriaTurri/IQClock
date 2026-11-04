@@ -174,7 +174,9 @@ fn dpi_jpeg<R: Read + Seek>(r: &mut R) -> Option<(f64, f64)> {
     while let Some((marcatore, dati)) = prossimo_app(r) {
         if marcatore == 0xE0 {
             jfif = jfif.or_else(|| dpi_jfif(&dati).and_then(|(x, y)| dpi_plausibili(x, y)));
-        } else if let Some(contenuto) = dati.strip_prefix(b"Exif\0\0") {
+        } else if marcatore == 0xE1
+            && let Some(contenuto) = dati.strip_prefix(b"Exif\0\0")
+        {
             exif = exif.or_else(|| {
                 risoluzione_tiff(&mut Cursor::new(contenuto)).and_then(|(x, y)| dpi_plausibili(x, y))
             });
@@ -183,7 +185,7 @@ fn dpi_jpeg<R: Read + Seek>(r: &mut R) -> Option<(f64, f64)> {
     exif.or(jfif)
 }
 
-/// Prossimo segmento APP0 o APP1 del JPEG, con i suoi dati; gli altri (ICC,
+/// Prossimo segmento APP0, APP1 o APP14 del JPEG, con i suoi dati; gli altri (ICC,
 /// XMP, Photoshop…, anche di molti KB) si saltano senza leggerli. `None` da SOS
 /// in poi, a fine file o su un marcatore rovinato.
 fn prossimo_app<R: Read + Seek>(r: &mut R) -> Option<(u8, Vec<u8>)> {
@@ -217,7 +219,7 @@ pub(crate) fn prossimo_app_pos<R: Read + Seek>(r: &mut R) -> Option<(u8, u64, u6
             return None;
         }
         let resto = u64::from(lunghezza - 2);
-        if matches!(marcatore, 0xE0 | 0xE1) {
+        if matches!(marcatore, 0xE0 | 0xE1 | 0xEE) {
             let offset = r.stream_position().ok()?;
             return Some((marcatore, offset, resto));
         }
