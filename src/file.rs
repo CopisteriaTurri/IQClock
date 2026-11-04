@@ -187,6 +187,15 @@ fn dpi_jpeg<R: Read + Seek>(r: &mut R) -> Option<(f64, f64)> {
 /// XMP, Photoshop…, anche di molti KB) si saltano senza leggerli. `None` da SOS
 /// in poi, a fine file o su un marcatore rovinato.
 fn prossimo_app<R: Read + Seek>(r: &mut R) -> Option<(u8, Vec<u8>)> {
+    let (marcatore, offset, lunghezza) = prossimo_app_pos(r)?;
+    let dati = leggi_a(r, offset, usize::try_from(lunghezza).ok()?)?;
+    Some((marcatore, dati))
+}
+
+/// Come [`prossimo_app`], ma al posto dei dati restituisce la loro posizione
+/// nel file e la lunghezza: serve a chi deve riscriverli sul posto senza
+/// caricare lo stream (vedi `risoluzione.rs`).
+pub(crate) fn prossimo_app_pos<R: Read + Seek>(r: &mut R) -> Option<(u8, u64, u64)> {
     loop {
         if leggi(r, 1)?[0] != 0xFF {
             return None;
@@ -207,11 +216,12 @@ fn prossimo_app<R: Read + Seek>(r: &mut R) -> Option<(u8, Vec<u8>)> {
         if lunghezza < 2 {
             return None;
         }
-        let resto = usize::from(lunghezza - 2);
+        let resto = u64::from(lunghezza - 2);
         if matches!(marcatore, 0xE0 | 0xE1) {
-            return Some((marcatore, leggi(r, resto)?));
+            let offset = r.stream_position().ok()?;
+            return Some((marcatore, offset, resto));
         }
-        r.seek(SeekFrom::Current(resto as i64)).ok()?;
+        r.seek(SeekFrom::Current(i64::try_from(resto).ok()?)).ok()?;
     }
 }
 
@@ -287,7 +297,7 @@ fn leggi<R: Read>(r: &mut R, n: usize) -> Option<Vec<u8>> {
     Some(b)
 }
 
-fn leggi_a<R: Read + Seek>(r: &mut R, offset: u64, n: usize) -> Option<Vec<u8>> {
+pub(crate) fn leggi_a<R: Read + Seek>(r: &mut R, offset: u64, n: usize) -> Option<Vec<u8>> {
     r.seek(SeekFrom::Start(offset)).ok()?;
     leggi(r, n)
 }
@@ -296,14 +306,16 @@ fn be16(dati: &[u8], i: usize) -> Option<u16> {
     Some(u16::from_be_bytes(dati.get(i..i + 2)?.try_into().ok()?))
 }
 
+/// Ordine dei byte di un TIFF (o dell'EXIF dentro un JPEG): `II` little
+/// endian, `MM` big endian.
 #[derive(Clone, Copy)]
-enum Ordine {
+pub(crate) enum Ordine {
     Piccolo,
     Grande,
 }
 
 impl Ordine {
-    fn u16(self, dati: &[u8], i: usize) -> Option<u16> {
+    pub(crate) fn u16(self, dati: &[u8], i: usize) -> Option<u16> {
         let b: [u8; 2] = dati.get(i..i + 2)?.try_into().ok()?;
         Some(match self {
             Ordine::Piccolo => u16::from_le_bytes(b),
@@ -311,12 +323,28 @@ impl Ordine {
         })
     }
 
-    fn u32(self, dati: &[u8], i: usize) -> Option<u32> {
+    pub(crate) fn u32(self, dati: &[u8], i: usize) -> Option<u32> {
         let b: [u8; 4] = dati.get(i..i + 4)?.try_into().ok()?;
         Some(match self {
             Ordine::Piccolo => u32::from_le_bytes(b),
             Ordine::Grande => u32::from_be_bytes(b),
         })
+    }
+
+    pub(crate) fn scrivi_u16(self, dati: &mut [u8], i: usize, v: u16) {
+        let b = match self {
+            Ordine::Piccolo => v.to_le_bytes(),
+            Ordine::Grande => v.to_be_bytes(),
+        };
+        dati[i..i + 2].copy_from_slice(&b);
+    }
+
+    pub(crate) fn scrivi_u32(self, dati: &mut [u8], i: usize, v: u32) {
+        let b = match self {
+            Ordine::Piccolo => v.to_le_bytes(),
+            Ordine::Grande => v.to_be_bytes(),
+        };
+        dati[i..i + 4].copy_from_slice(&b);
     }
 }
 

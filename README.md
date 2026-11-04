@@ -86,8 +86,12 @@ solo per il documento selezionato, come le copie.
   multiplo di 90 restano come sono. Un PDF cifrato non si può scalare.
 - **JPEG, TIFF, PNG**: i pixel non vengono ricampionati, cambiano solo i DPI dichiarati
   (`dpi' = dpi / fattore`). La T2600 rispetta i DPI, quindi un'immagine al 200% esce
-  grande il doppio con gli stessi pixel. Con una scala diversa dall'originale JPEG e
-  TIFF partono come TIFF, come già succede con l'allineamento.
+  grande il doppio con gli stessi pixel. Con la sola scala JPEG e TIFF partono **nel loro
+  formato**, uguali all'originale tranne i campi della risoluzione: un TIFF CMYK, in
+  grigi, a 16 bit o con profilo ICC (e un JPEG CMYK) non passa dal decodificatore e non
+  perde né colori né profondità. Il PNG invece viene sempre convertito in TIFF (la
+  stampante non lo legge) e, se c'è anche l'allineamento sul rotolo, JPEG e TIFF passano
+  dalla conversione in TIFF RGB 8 bit per ricomporre la pagina.
 - **PostScript, HP-GL/2**: partono come sono, il controllo si disattiva.
 
 La GUI mostra sotto la scala le misure finali della prima pagina (es. `Esce: 420 × 594
@@ -119,6 +123,16 @@ I PNG vengono convertiti prima dell'invio: la stampante non li legge dal canale 
 quindi il file viene riscritto in TIFF RGB 8 bit (LZW con predittore), appiattendo la
 trasparenza sul bianco della carta e mantenendo i DPI del chunk `pHYs` (300 se
 assenti). Il TIFF vive in un file temporaneo, cancellato quando il job è finito.
+
+Con la sola scala anche JPEG e TIFF partono com'erano, con i soli campi della
+risoluzione corretti in una copia temporanea: il resto del file è identico byte per
+byte. Nei JPEG si riscrive sempre il JFIF (densità intere, quindi con DPI non interi
+l'errore è sotto 0,5 dpi) e anche l'EXIF, che è esatto; se manca sia il JFIF sia la
+risoluzione nell'EXIF si aggiunge un segmento JFIF dopo l'intestazione. Nei TIFF senza
+`XResolution`/`YResolution` si aggiunge in fondo al file un IFD0 nuovo con le stesse
+voci più le due mancanti (se il file era BigTIFF o rovinato si torna a decode e TIFF
+RGB, come prima). TIFF multipagina: viene corretta solo la prima pagina, non
+verificato sulla T2600.
 
 Prima di fidarsi delle opzioni, conviene stampare una volta da HP Click o dal driver
 Windows "su file" e confrontare l'intestazione PJL che usano.
