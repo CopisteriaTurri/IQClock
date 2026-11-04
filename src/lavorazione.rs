@@ -327,6 +327,13 @@ pub fn componi_pdf(
             None => Ok(None),
         };
     }
+    // Conserva la decisione prima di modificare box e contenuti: l'anteprima
+    // deve misurare i DPI con la stessa scala che viene mandata in stampa.
+    let fattori_scala = doc
+        .get_pages()
+        .into_values()
+        .map(|id| scala_pagina(&doc, id, &lav.scala).map_or((1.0, 1.0), |p| p.fattori))
+        .collect();
     let mut cambiato = applica_scala(&mut doc, lav)?;
     let posizioni = match imp {
         Some(imp) => {
@@ -345,6 +352,7 @@ pub fn componi_pdf(
     Ok(Some(impagina::PdfComposto {
         dati: out,
         posizioni,
+        fattori_scala,
     }))
 }
 

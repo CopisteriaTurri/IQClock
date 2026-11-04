@@ -31,8 +31,9 @@ dei rispettivi proprietari e qui compaiono solo per indicare la compatibilità. 
   iqclock snmp 1.3.6.1.2.1.43                    # diagnostica SNMP
   ```
 
-Le impostazioni (IP, porta, larghezza rotolo, margine) stanno in `%APPDATA%\iqclock\config.txt`.
-Di default: `192.168.10.72:9100`, rotolo 36", margine 5 mm.
+Le impostazioni (IP, porta, larghezza rotolo, margine, soglia dei DPI) stanno in
+`%APPDATA%\iqclock\config.txt`. Di default: `192.168.10.72:9100`, rotolo 36", margine
+5 mm, avviso sotto 200 dpi.
 
 Per i PDF la lista mostra quante pagine ci sono per formato (es. `A4: 9  |  A3: 2  |
 320 × 450 mm: 1`): i formati ISO A per nome, gli altri con le misure al mm, senza
@@ -97,6 +98,26 @@ solo per il documento selezionato, come le copie.
 La GUI mostra sotto la scala le misure finali della prima pagina (es. `Esce: 420 × 594
 mm (A2)`); l'anteprima e gli avvisi sul rotolo usano le stesse misure scalate. In
 miniatura la didascalia aggiunge `→ A3` o `→ 50 %` quando la scala non è l'originale.
+
+## Risoluzione effettiva (DPI)
+
+In miniatura, accanto ai DPI del file, compare la risoluzione con cui il documento
+esce davvero: i pixel rapportati alla misura finale, cioè dopo la scala. Una riga
+`212 dpi` vuol dire che va bene; `140 dpi — sotto 200` (in arancione) che il
+risultato è sotto la soglia, e l'anteprima aggiunge `Attenzione: risoluzione 140
+dpi, sotto la soglia di 200`. La stampa non viene mai bloccata: l'avviso serve a
+decidere se ridurre la scala o accettare un disegno più morbido.
+
+- **Immagini**: i DPI dichiarati dal file divisi per i due fattori di scala (che
+  differiscono solo senza il blocco delle proporzioni); si mostra il minore. Se i
+  DPI del file sono presunti la riga lo dice: `≈ 300 dpi (DPI del file presunti)`.
+- **PDF**: si misurano le immagini raster incorporate (pixel e riquadro occupato
+  sulla pagina, in punti), sull'originale e divise per la scala. Contano solo le
+  immagini che escono con entrambi i lati di almeno 10 mm: loghi e timbri si
+  ignorano. Le pagine senza immagini raster sono indicate come `vettoriale`.
+
+La soglia è modificabile in **Avanzate** (50–600 dpi) e si salva come `soglia_dpi`
+nel file di configurazione; con la finestra impostazioni (#18) si sposterà lì.
 
 ## Cosa viene mandato alla stampante
 
@@ -173,6 +194,10 @@ binari di testa che vengono scartati in lettura.
   del pannello): la T2600 ruota il foglio quando così entra nel rotolo o consuma meno
   carta, e l'anteprima mostra già le pagine come usciranno. Il PJL non la controlla: provato il 29/10/2026,
   `@PJL SET AUTOROTATE=OFF` viene ignorato e `ON` non cambia niente.
+- L'indicatore dei DPI legge le immagini raster di primo livello delle pagine di un
+  PDF: quelle dentro un Form XObject (capita nelle esportazioni CAD) non si vedono e
+  la pagina risulta `vettoriale`. Per i PDF con più di 200 pagine si misurano solo le
+  prime 200, e l'anteprima lo scrive.
 - Per le immagini si usano i DPI dichiarati dal file (EXIF/JFIF per JPEG, tag di
   risoluzione per TIFF, chunk `pHYs` per PNG); se mancano o non sono plausibili
   (0, 1, ecc.) si presumono 300 dpi. La lista indica i DPI usati e se sono presunti;
