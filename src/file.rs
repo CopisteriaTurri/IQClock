@@ -244,7 +244,7 @@ fn dpi_jfif(dati: &[u8]) -> Option<(f64, f64)> {
 /// dentro un JPEG), convertite in dpi. Si legge solo quello che serve, saltando
 /// agli offset: chi scrive con libtiff (o col crate `tiff`) mette l'IFD0 dopo i
 /// dati dell'immagine, in fondo al file.
-fn risoluzione_tiff<R: Read + Seek>(r: &mut R) -> Option<(f64, f64)> {
+pub(crate) fn risoluzione_tiff<R: Read + Seek>(r: &mut R) -> Option<(f64, f64)> {
     let testa = leggi_a(r, 0, 8)?;
     let ordine = match &testa[..2] {
         b"II" => Ordine::Piccolo,
@@ -255,6 +255,14 @@ fn risoluzione_tiff<R: Read + Seek>(r: &mut R) -> Option<(f64, f64)> {
         return None;
     }
     let ifd = u64::from(ordine.u32(&testa, 4)?);
+    risoluzione_ifd(r, ordine, ifd)
+}
+
+pub(crate) fn risoluzione_ifd<R: Read + Seek>(
+    r: &mut R,
+    ordine: Ordine,
+    ifd: u64,
+) -> Option<(f64, f64)> {
     let voci = usize::from(ordine.u16(&leggi_a(r, ifd, 2)?, 0)?);
     let tabella = leggi_a(r, ifd + 2, voci * 12)?;
     let (mut x, mut y) = (None, None);

@@ -15,8 +15,8 @@
 //!
 //! Quando la struttura non si sa riscrivere (`Ok(None)`: BigTIFF, file
 //! troncato, densità JFIF fuori da `u16`), il chiamante ripiega sulla decodifica
-//! come prima. TIFF multipagina: corretta solo la prima pagina, non verificato
-//! sulla T2600.
+//! come prima. Nei TIFF multipagina lo stesso fattore di scala si applica
+//! ai DPI originali di ciascuna pagina.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -33,13 +33,17 @@ const DENOMINATORE: u32 = 10_000;
 /// Copia `sorgente` in un file temporaneo con la risoluzione dichiarata cambiata
 /// in `dpi`. `Ok(None)` se il file ha una struttura che non sappiamo riscrivere
 /// (il chiamante ripiega sulla decodifica, come oggi).
-pub fn con_dpi(sorgente: &Path, formato: Formato, dpi: (f64, f64)) -> Result<Option<FileTemporaneo>> {
+pub fn con_dpi(
+    sorgente: &Path,
+    formato: Formato,
+    dpi: (f64, f64),
+) -> Result<Option<FileTemporaneo>> {
     match formato {
         Formato::Tiff => {
             let temp = copia(sorgente, "tiff")?;
             let mut f = apri(&temp)?;
             let lunghezza = f.metadata()?.len();
-            if riscrivi_risoluzione_tiff(&mut f, 0, lunghezza, dpi, true)? {
+            if riscrivi_risoluzione_tiff(&mut f, 0, lunghezza, dpi, true)? == EsitoTiff::Riscritto {
                 Ok(Some(temp))
             } else {
                 Ok(None)
@@ -113,11 +117,20 @@ fn riscrivi_jpeg(f: &mut File, dpi: (f64, f64)) -> Result<Option<bool>> {
         } else if marcatore == 0xE1 && !exif && lunghezza > 6 {
             let mut testa = [0u8; 6];
             f.seek(SeekFrom::Start(inizio))?;
-            if f.read_exact(&mut testa).is_ok()
-                && &testa == b"Exif\0\0"
-                && riscrivi_risoluzione_tiff(f, inizio + 6, lunghezza - 6, dpi, false)?
-            {
-                exif = true;
+            if f.read_exact(&mut testa).is_ok() && &testa == b"Exif\0\0" {
+                let dati = leggi_a(f, inizio + 6, (lunghezza - 6) as usize);
+                let leggibile = dati.as_ref().is_some_and(|dati| {
+                    file::risoluzione_tiff(&mut std::io::Cursor::new(dati))
+                        .and_then(|(x, y)| file::dpi_plausibili(x, y))
+                        .is_some()
+                });
+                let esito = riscrivi_risoluzione_tiff(f, inizio + 6, lunghezza - 6, dpi, false)?;
+                if esito == EsitoTiff::ConflittoRazionali
+                    || (leggibile && esito != EsitoTiff::Riscritto)
+                {
+                    return Ok(None);
+                }
+                exif = esito == EsitoTiff::Riscritto;
             }
         }
         f.seek(SeekFrom::Start(fine))?;
@@ -165,19 +178,25 @@ fn app0_jfif(dpi: (f64, f64)) -> Option<[u8; 18]> {
     Some(b)
 }
 
-/// Correzione dei tag di risoluzione di un TIFF che comincia a `base`: `true`
-/// se il file ha ora la risoluzione chiesta. Con `aggiungi` (solo per i TIFF
-/// veri, non per l'EXIF dentro un JPEG) un IFD0 nuovo in fondo al file prende il
-/// posto di quello vecchio se X o Y mancano. `false` = struttura non
-/// riscrivibile, nessuna garanzia su quello che è già stato scritto.
+#[derive(Debug, PartialEq, Eq)]
+enum EsitoTiff {
+    Riscritto,
+    NonRiscrivibile,
+    ConflittoRazionali,
+}
+
+/// Correzione dei tag di risoluzione di un TIFF che comincia a `base`.
+/// Con `aggiungi` (solo per i TIFF veri, non per l'EXIF dentro un JPEG) un
+/// IFD nuovo in fondo al file prende il posto di quello vecchio se X o Y mancano. Le scritture vengono preparate
+/// solo dopo aver verificato tutti gli IFD, inclusi i razionali condivisi.
 fn riscrivi_risoluzione_tiff(
     f: &mut File,
     base: u64,
     lunghezza: u64,
     dpi: (f64, f64),
     aggiungi: bool,
-) -> Result<bool> {
-    Ok(riscrivi_tiff(f, base, lunghezza, dpi, aggiungi).unwrap_or(false))
+) -> Result<EsitoTiff> {
+    Ok(riscrivi_tiff(f, base, lunghezza, dpi, aggiungi).unwrap_or(EsitoTiff::NonRiscrivibile))
 }
 
 /// Una voce dell'IFD: 12 byte nel file, qui i campi e i 4 byte del valore.
@@ -194,7 +213,7 @@ fn riscrivi_tiff(
     lunghezza: u64,
     dpi: (f64, f64),
     aggiungi: bool,
-) -> Option<bool> {
+) -> Option<EsitoTiff> {
     let testa = leggi_a(f, base, 8)?;
     let ordine = match &testa[..2] {
         b"II" => Ordine::Piccolo,
@@ -209,20 +228,96 @@ fn riscrivi_tiff(
     if ifd < 8 {
         return None;
     }
-    let quante = usize::from(ordine.u16(&leggi_a(f, base + ifd, 2)?, 0)?);
-    let tabella = leggi_a(f, base + ifd + 2, quante * 12)?;
-    let prossimo = ordine.u32(&leggi_a(f, base + ifd + 2 + (quante as u64) * 12, 4)?, 0)?;
-
-    let mut elenco = Vec::with_capacity(quante + 2);
-    for voce in tabella.as_chunks::<12>().0 {
-        elenco.push(VoceTiff {
-            tag: ordine.u16(voce, 0)?,
-            tipo: ordine.u16(voce, 2)?,
-            count: ordine.u32(voce, 4)?,
-            valore: voce[8..12].try_into().ok()?,
-        });
+    // Legge e pianifica tutte le pagine prima di toccare il file: anche gli
+    // offset condivisi fra IFD non devono alterare i DPI originali da leggere.
+    let originali = if aggiungi {
+        file::risoluzione_ifd(f, ordine, ifd)
+            .and_then(|(x, y)| file::dpi_plausibili(x, y))
+            .unwrap_or((300.0, 300.0))
+    } else {
+        dpi
+    };
+    let fattore = (dpi.0 / originali.0, dpi.1 / originali.1);
+    let mut ifd = ifd;
+    let mut puntatore = base + 4;
+    let mut visitati = std::collections::HashSet::new();
+    let mut scritture = Vec::new();
+    let mut fondo = base.checked_add(lunghezza)?;
+    while ifd != 0 {
+        if ifd < 8 || ifd + 2 > lunghezza || !visitati.insert(ifd) {
+            return None;
+        }
+        let originali = if aggiungi {
+            file::risoluzione_ifd(f, ordine, ifd)
+                .and_then(|(x, y)| file::dpi_plausibili(x, y))
+                .unwrap_or((300.0, 300.0))
+        } else {
+            (0.0, 0.0)
+        };
+        let dpi_pagina = if aggiungi {
+            (originali.0 * fattore.0, originali.1 * fattore.1)
+        } else {
+            dpi
+        };
+        let quante = usize::from(ordine.u16(&leggi_a(f, base + ifd, 2)?, 0)?);
+        let fine_ifd = ifd + 2 + quante as u64 * 12;
+        if fine_ifd + 4 > lunghezza {
+            return None;
+        }
+        let prossimo = ordine.u32(&leggi_a(f, base + fine_ifd, 4)?, 0)?;
+        let tabella = leggi_a(f, base + ifd + 2, quante * 12)?;
+        let mut elenco = Vec::with_capacity(quante + 2);
+        for voce in tabella.as_chunks::<12>().0 {
+            elenco.push(VoceTiff {
+                tag: ordine.u16(voce, 0)?,
+                tipo: ordine.u16(voce, 2)?,
+                count: ordine.u32(voce, 4)?,
+                valore: voce[8..12].try_into().ok()?,
+            });
+        }
+        let pagina = pianifica_ifd(
+            ordine,
+            base,
+            lunghezza,
+            dpi_pagina,
+            aggiungi,
+            ifd,
+            prossimo,
+            puntatore,
+            &mut fondo,
+            elenco,
+            &mut scritture,
+        )?;
+        match pagina {
+            Ok(successivo) => puntatore = successivo,
+            Err(esito) => return Some(esito),
+        }
+        if !aggiungi {
+            break; // EXIF: la risoluzione è nell'IFD0, non nelle miniature.
+        }
+        ifd = u64::from(prossimo);
     }
+    for (posizione, dati) in scritture {
+        f.seek(SeekFrom::Start(posizione)).ok()?;
+        f.write_all(&dati).ok()?;
+    }
+    Some(EsitoTiff::Riscritto)
+}
 
+#[allow(clippy::too_many_arguments)]
+fn pianifica_ifd(
+    ordine: Ordine,
+    base: u64,
+    lunghezza: u64,
+    dpi: (f64, f64),
+    aggiungi: bool,
+    ifd: u64,
+    prossimo: u32,
+    puntatore: u64,
+    fondo: &mut u64,
+    mut elenco: Vec<VoceTiff>,
+    scritture: &mut Vec<(u64, Vec<u8>)>,
+) -> Option<std::result::Result<u64, EsitoTiff>> {
     // Offset dei due RATIONAL, relativi all'inizio del TIFF: un valore di 8 byte
     // non sta nella voce, quindi la voce punta a dove sta davvero. Conta solo
     // se i suoi 8 byte stanno davvero dentro il TIFF/EXIF: un offset costruito
@@ -248,14 +343,24 @@ fn riscrivi_tiff(
     }
     let completa = x.is_some() && y.is_some();
     if !completa && !aggiungi {
-        return Some(false);
+        return Some(Err(EsitoTiff::NonRiscrivibile));
     }
 
-    if let Some(offset) = x {
-        scrivi_razionale(f, ordine, base + offset, dpi.0)?;
+    if x.is_some() && x == y && numeratore(dpi.0)? != numeratore(dpi.1)? {
+        return Some(Err(EsitoTiff::ConflittoRazionali));
     }
-    if let Some(offset) = y {
-        scrivi_razionale(f, ordine, base + offset, dpi.1)?;
+    for (offset, dpi) in [(x, dpi.0), (y, dpi.1)] {
+        if let Some(offset) = offset {
+            let dati = razionale(ordine, dpi)?;
+            // Lo stesso RATIONAL può essere condiviso anche fra pagine.
+            if scritture
+                .iter()
+                .any(|(p, d)| *p == base + offset && *d != dati)
+            {
+                return Some(Err(EsitoTiff::ConflittoRazionali));
+            }
+            scritture.push((base + offset, dati));
+        }
     }
     // ResolutionUnit diversa da 2 (3 = centimetri, 1 = nessuna unità
     // assoluta): si dichiara in pollici, come i valori scritti, altrimenti i
@@ -266,13 +371,14 @@ fn riscrivi_tiff(
     {
         ordine.scrivi_u16(&mut elenco[i].valore, 0, 2);
         if completa {
-            f.seek(SeekFrom::Start(base + ifd + 2 + (i as u64) * 12 + 8))
-                .ok()?;
-            f.write_all(&elenco[i].valore).ok()?;
+            scritture.push((
+                base + ifd + 2 + (i as u64) * 12 + 8,
+                elenco[i].valore.to_vec(),
+            ));
         }
     }
     if completa {
-        return Some(true);
+        return Some(Ok(base + ifd + 2 + elenco.len() as u64 * 12));
     }
 
     // Voci di X/Y che c'erano con un tipo strano: si rimpiazzano con quelle
@@ -291,14 +397,13 @@ fn riscrivi_tiff(
         mancanti.push((283u16, dpi.1));
     }
 
-    // IFD0 nuovo in fondo al file, allineato a un offset pari, i due RATIONAL
+    // IFD nuovo in fondo al file, allineato a un offset pari, i due RATIONAL
     // subito dopo e lo stesso puntatore all'IFD successivo. Gli offset delle
     // altre voci restano validi perché il resto del file non si sposta.
-    let fondo = base + lunghezza;
-    let inizio = if lunghezza.is_multiple_of(2) {
-        fondo
+    let inizio = if (*fondo - base).is_multiple_of(2) {
+        *fondo
     } else {
-        fondo + 1
+        *fondo + 1
     };
     let razionali = inizio + 2 + ((elenco.len() + mancanti.len()) as u64) * 12 + 4;
     for (i, (tag, _)) in mancanti.iter().enumerate() {
@@ -336,17 +441,15 @@ fn riscrivi_tiff(
         ordine.scrivi_u32(&mut r, 4, DENOMINATORE);
         fuori.extend_from_slice(&r);
     }
-    f.seek(SeekFrom::Start(fondo)).ok()?;
-    if inizio > fondo {
-        f.write_all(&[0]).ok()?;
-    }
-    f.write_all(&fuori).ok()?;
-    // L'intestazione (byte 4–7) punta al nuovo IFD0.
+    let successivo = inizio + 2 + elenco.len() as u64 * 12;
+    *fondo = inizio + fuori.len() as u64;
+    scritture.push((inizio, fuori));
+    // Il puntatore alla pagina (nell'header o nell'IFD precedente) cambia
+    // senza spostare i pixel né gli altri tag.
     let mut nuovo = [0u8; 4];
     ordine.scrivi_u32(&mut nuovo, 0, u32::try_from(inizio - base).ok()?);
-    f.seek(SeekFrom::Start(base + 4)).ok()?;
-    f.write_all(&nuovo).ok()?;
-    Some(true)
+    scritture.push((puntatore, nuovo.to_vec()));
+    Some(Ok(successivo))
 }
 
 /// DPI × 10000, arrotondato: il numeratore del RATIONAL.
@@ -355,13 +458,11 @@ fn numeratore(dpi: f64) -> Option<u32> {
     (n >= 1.0 && n <= f64::from(u32::MAX)).then_some(n as u32)
 }
 
-fn scrivi_razionale(f: &mut File, ordine: Ordine, posizione: u64, dpi: f64) -> Option<()> {
+fn razionale(ordine: Ordine, dpi: f64) -> Option<Vec<u8>> {
     let mut b = [0u8; 8];
     ordine.scrivi_u32(&mut b, 0, numeratore(dpi)?);
     ordine.scrivi_u32(&mut b, 4, DENOMINATORE);
-    f.seek(SeekFrom::Start(posizione)).ok()?;
-    f.write_all(&b).ok()?;
-    Some(())
+    Some(b.to_vec())
 }
 
 #[cfg(test)]
@@ -406,7 +507,8 @@ mod test {
         }
 
         fn intestazione(&mut self, ifd: u32) {
-            self.v.extend_from_slice(if self.grande { b"MM" } else { b"II" });
+            self.v
+                .extend_from_slice(if self.grande { b"MM" } else { b"II" });
             self.u16(42);
             self.u32(ifd);
         }
@@ -483,6 +585,105 @@ mod test {
         b.voce(284, 3, 1, 1); // PlanarConfiguration
         b.u32(0);
         b.v
+    }
+
+    #[test]
+    fn razionali_condivisi_richiedono_numeratori_uguali() {
+        let dir = cartella("condivisi");
+        for grande in [false, true] {
+            let ordine = if grande {
+                Ordine::Grande
+            } else {
+                Ordine::Piccolo
+            };
+            let mut dati = tiff_con_risoluzione(grande, 300, 2);
+            ordine.scrivi_u32(&mut dati, 54, 74); // Y punta allo stesso RATIONAL di X.
+            let p = scrivi(&dir, "condiviso.tif", &dati);
+            let mut f = OpenOptions::new().read(true).write(true).open(&p).unwrap();
+            assert_eq!(
+                riscrivi_risoluzione_tiff(&mut f, 0, dati.len() as u64, (150.0, 75.0), true)
+                    .unwrap(),
+                EsitoTiff::ConflittoRazionali
+            );
+            assert_eq!(
+                std::fs::read(&p).unwrap(),
+                dati,
+                "nessuna scrittura prima del conflitto"
+            );
+            assert!(con_dpi(&p, Formato::Tiff, (150.0, 75.0)).unwrap().is_none());
+            let temp = con_dpi(&p, Formato::Tiff, (150.0, 150.0)).unwrap().unwrap();
+            assert_eq!(
+                file::dpi_immagine(temp.percorso(), Formato::Tiff),
+                (150.0, 150.0)
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tiff_multipagina_scala_i_dpi_di_ogni_pagina() {
+        let dir = cartella("multipagina");
+        for grande in [false, true] {
+            let ordine = if grande {
+                Ordine::Grande
+            } else {
+                Ordine::Piccolo
+            };
+            // Anche le pagine senza risoluzione richiedono un nuovo IFD:
+            // controlla il collegamento sia prima sia dopo la sostituzione.
+            for senza in [false, true] {
+                let mut dati = if senza {
+                    tiff_grigio_senza_risoluzione(grande)
+                } else {
+                    tiff_con_risoluzione(grande, 300, 2)
+                };
+                let prima_ifd = ordine.u32(&dati, 4).unwrap() as usize;
+                let quante = ordine.u16(&dati, prima_ifd).unwrap() as usize;
+                let seconda_ifd = dati.len() as u32;
+                ordine.scrivi_u32(&mut dati, prima_ifd + 2 + quante * 12, seconda_ifd);
+                let mut seconda = tiff_con_risoluzione(grande, 200, 3);
+                // La seconda pagina ha X/Y diversi e risoluzione in centimetri.
+                ordine.scrivi_u32(&mut seconda, 82, 100);
+                for pos in [42, 54] {
+                    let offset = ordine.u32(&seconda, pos).unwrap();
+                    ordine.scrivi_u32(&mut seconda, pos, offset + seconda_ifd - 8);
+                }
+                dati.extend_from_slice(&seconda[8..]);
+                let p = scrivi(&dir, "multi.tif", &dati);
+                let temp = con_dpi(&p, Formato::Tiff, (150.0, 75.0)).unwrap().unwrap();
+                let mut f = File::open(temp.percorso()).unwrap();
+                let header = leggi_a(&mut f, 0, 8).unwrap();
+                let ifd = u64::from(ordine.u32(&header, 4).unwrap());
+                assert_eq!(
+                    file::risoluzione_ifd(&mut f, ordine, ifd),
+                    Some((150.0, 75.0))
+                );
+                let n = ordine.u16(&leggi_a(&mut f, ifd, 2).unwrap(), 0).unwrap();
+                let prossimo = ordine
+                    .u32(&leggi_a(&mut f, ifd + 2 + u64::from(n) * 12, 4).unwrap(), 0)
+                    .unwrap();
+                assert_eq!(
+                    file::risoluzione_ifd(&mut f, ordine, u64::from(prossimo)),
+                    Some((254.0, 63.5))
+                );
+                assert_eq!(std::fs::read(&p).unwrap(), dati);
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn catena_ifd_ciclica_ripiega_sulla_decodifica() {
+        let dir = cartella("ciclo");
+        let mut dati = tiff_con_risoluzione(false, 300, 2);
+        Ordine::Piccolo.scrivi_u32(&mut dati, 70, 8);
+        let p = scrivi(&dir, "ciclo.tif", &dati);
+        assert!(
+            con_dpi(&p, Formato::Tiff, (150.0, 150.0))
+                .unwrap()
+                .is_none()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -624,26 +825,43 @@ mod test {
         };
         for (nome, dati) in [
             ("bigtiff.tif", bigtiff),
-            ("troncato.tif", tiff_con_risoluzione(false, 300, 2)[..10].to_vec()),
+            (
+                "troncato.tif",
+                tiff_con_risoluzione(false, 300, 2)[..10].to_vec(),
+            ),
             ("vuoto.tif", Vec::new()),
             ("non-tiff.tif", b"ciao, non sono un tiff".to_vec()),
         ] {
             let p = scrivi(&dir, nome, &dati);
             assert!(
-                con_dpi(&p, Formato::Tiff, (150.0, 150.0)).unwrap().is_none(),
+                con_dpi(&p, Formato::Tiff, (150.0, 150.0))
+                    .unwrap()
+                    .is_none(),
                 "{nome}"
             );
         }
         let non_jpeg = scrivi(&dir, "non.jpg", &tiff_con_risoluzione(false, 300, 2));
-        assert!(con_dpi(&non_jpeg, Formato::Jpeg, (150.0, 150.0)).unwrap().is_none());
+        assert!(
+            con_dpi(&non_jpeg, Formato::Jpeg, (150.0, 150.0))
+                .unwrap()
+                .is_none()
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn jpeg_troncato_non_si_riscrive() {
         let dir = cartella("jpeg-troncato");
-        let p = scrivi(&dir, "troncato.jpg", &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 1, 2, 3, 4]);
-        assert!(con_dpi(&p, Formato::Jpeg, (150.0, 150.0)).unwrap().is_none());
+        let p = scrivi(
+            &dir,
+            "troncato.jpg",
+            &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 1, 2, 3, 4],
+        );
+        assert!(
+            con_dpi(&p, Formato::Jpeg, (150.0, 150.0))
+                .unwrap()
+                .is_none()
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -720,6 +938,38 @@ mod test {
         let letta = image::open(tmp.percorso()).unwrap().to_rgb8();
         assert_eq!(letta.dimensions(), (32, 24));
         std::fs::read(tmp.percorso()).unwrap()
+    }
+
+    #[test]
+    fn jpeg_con_exif_leggibile_non_riscrivibile_ripiega_sulla_decodifica() {
+        let dir = cartella("jpeg-exif-non-riscrivibile");
+        for con_jfif in [false, true] {
+            for condiviso in [false, true] {
+                let mut app1 = exif(300);
+                // L'EXIF parte a 10: SRATIONAL è leggibile ma non riscrivibile.
+                if condiviso {
+                    Ordine::Piccolo.scrivi_u32(&mut app1, 10 + 54, 74);
+                } else {
+                    Ordine::Piccolo.scrivi_u16(&mut app1, 10 + 36, 10);
+                    Ordine::Piccolo.scrivi_u16(&mut app1, 10 + 48, 10);
+                }
+                let mut segmenti = vec![app1];
+                if con_jfif {
+                    segmenti.insert(0, jfif(1, 72, 72));
+                }
+                let p = jpeg_con(&dir, "non-riscrivibile.jpg", &segmenti);
+                assert_eq!(file::dpi_immagine(&p, Formato::Jpeg), (300.0, 300.0));
+                let prima = std::fs::read(&p).unwrap();
+                let mut f = OpenOptions::new().read(true).write(true).open(&p).unwrap();
+                assert_eq!(riscrivi_jpeg(&mut f, (150.0, 75.0)).unwrap(), None);
+                assert_eq!(std::fs::read(&p).unwrap(), prima);
+                assert!(con_dpi(&p, Formato::Jpeg, (150.0, 75.0)).unwrap().is_none());
+                if condiviso {
+                    verifica_jpeg(&p, (150.0, 150.0));
+                }
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
