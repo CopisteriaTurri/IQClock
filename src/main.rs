@@ -12,6 +12,7 @@ mod impagina;
 mod lavorazione;
 mod pjl;
 mod png;
+mod risoluzione;
 mod rotazione;
 mod snmp;
 mod stampante;

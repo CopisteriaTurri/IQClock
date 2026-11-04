@@ -3,8 +3,9 @@
 //! Per ora c'è solo la scala (#10): originale, formato ISO A0–A4, percentuale o
 //! misura in mm. I PDF si scalano in vettoriale (nuovo MediaBox e una matrice
 //! `cm` attorno al contenuto, annotazioni comprese); le immagini non vengono
-//! ricampionate, cambiano solo i DPI dichiarati nel TIFF. PostScript e HP-GL/2
-//! partono sempre come sono.
+//! ricampionate, cambiano solo i DPI dichiarati. Con la sola scala JPEG e TIFF
+//! partono nel loro formato, con i soli campi della risoluzione riscritti (vedi
+//! `risoluzione.rs`). PostScript e HP-GL/2 partono sempre come sono.
 //!
 //! L'ordine dei passi è quello comune a tutte le issue: prima la scala, poi
 //! l'allineamento (qui rifattorizzato in `impagina::applica_pdf`).
@@ -18,6 +19,7 @@ use crate::file::{self, FileTemporaneo};
 use crate::impagina::{self, Impaginazione};
 use crate::pjl::Formato;
 use crate::png;
+use crate::risoluzione;
 
 const MM_PT: f64 = 72.0 / 25.4;
 /// Fattori ammessi: sotto l'1% o sopra il 1000% la pagina non è più utile.
@@ -301,7 +303,29 @@ pub fn componi_pdf(
     }
     let mut doc = Document::load_mem(dati).context("apertura del PDF")?;
     if doc.is_encrypted() {
-        bail!("PDF cifrato: non si può ridimensionare (scegli originale)");
+        // Le misure delle pagine sono numeri, non stringhe cifrate: se si
+        // leggono anche senza password e la scala non cambierebbe niente (es.
+        // "Formato A4" su un PDF già tutto A4) non c'è motivo di rifiutare il
+        // documento. Oggi però lopdf, quando la password non c'è, si ferma
+        // prima di leggere il resto del documento (`get_pages` vuoto): in quel
+        // caso resta il rifiuto, come prima.
+        let pagine: Vec<ObjectId> = doc.get_pages().into_values().collect();
+        if pagine.is_empty() {
+            bail!("PDF cifrato: non si può ridimensionare (pagine non leggibili); scegli originale");
+        }
+        let cambierebbero = pagine
+            .iter()
+            .filter(|&&id| scala_pagina(&doc, id, &lav.scala).is_some())
+            .count();
+        if cambierebbero > 0 {
+            bail!(
+                "PDF cifrato: non si può ridimensionare ({cambierebbero} pagine cambierebbero misura); scegli originale"
+            );
+        }
+        return match imp {
+            Some(imp) => impagina::componi_pdf(dati, imp),
+            None => Ok(None),
+        };
     }
     let mut cambiato = applica_scala(&mut doc, lav)?;
     let posizioni = match imp {
@@ -335,14 +359,28 @@ fn applica_scala(doc: &mut Document, lav: &Lavorazione) -> Result<bool> {
     Ok(cambiato)
 }
 
-/// Scala una pagina in vettoriale. Le pagine senza box o con `/Rotate` non
-/// multiplo di 90 restano come sono.
-fn applica_scala_pagina(doc: &mut Document, id: ObjectId, scala: &Scala) -> Result<bool> {
-    let Some(([x0, y0, x1, y1], ruota)) = file::box_e_rotazione(doc, id) else {
-        return Ok(false);
-    };
+/// Cosa serve per scalare una pagina.
+struct ScalaPagina {
+    /// Riquadro visibile `[x0, y0, x1, y1]` nello spazio utente.
+    riquadro: [f64; 4],
+    /// Fattori da applicare nello spazio utente: con `/Rotate` 90/270 la x
+    /// visiva è la y dello spazio utente, quindi sono già scambiati.
+    fattori: (f64, f64),
+}
+
+/// Tolleranza per "la scala non cambia la pagina". Larga abbastanza da
+/// assorbire le misure in punti di un PDF: un A4 da 595,28 pt è 210,0014 mm, e
+/// chiedere "A4" su un A4 non deve rimpicciolirlo di qualche milionesimo.
+const TOLLERANZA_SCALA: f64 = 1e-4;
+
+/// Fattori per una pagina, o `None` se non c'è niente da cambiare (pagina
+/// senza box, `/Rotate` non multiplo di 90, oppure scala ≈ 100 %). È la sola
+/// regola "questa pagina cambia?", usata sia per scalare sia per decidere se un
+/// PDF cifrato si può lasciare com'è.
+fn scala_pagina(doc: &Document, id: ObjectId, scala: &Scala) -> Option<ScalaPagina> {
+    let ([x0, y0, x1, y1], ruota) = file::box_e_rotazione(doc, id)?;
     if ruota % 90 != 0 {
-        return Ok(false);
+        return None;
     }
     let (larghezza, altezza) = ((x1 - x0) / MM_PT, (y1 - y0) / MM_PT);
     let (larghezza, altezza) = if ruota % 180 == 90 {
@@ -351,14 +389,29 @@ fn applica_scala_pagina(doc: &mut Document, id: ObjectId, scala: &Scala) -> Resu
         (larghezza, altezza)
     };
     let (sx_vis, sy_vis) = fattori(scala, larghezza, altezza);
-    if (sx_vis - 1.0).abs() < 1e-9 && (sy_vis - 1.0).abs() < 1e-9 {
-        return Ok(false);
+    if (sx_vis - 1.0).abs() < TOLLERANZA_SCALA && (sy_vis - 1.0).abs() < TOLLERANZA_SCALA {
+        return None;
     }
-    // Con /Rotate 90/270 la x visiva è la y dello spazio utente.
-    let (sx, sy) = if ruota % 180 == 90 {
+    let fattori = if ruota % 180 == 90 {
         (sy_vis, sx_vis)
     } else {
         (sx_vis, sy_vis)
+    };
+    Some(ScalaPagina {
+        riquadro: [x0, y0, x1, y1],
+        fattori,
+    })
+}
+
+/// Scala una pagina in vettoriale. Le pagine senza box o con `/Rotate` non
+/// multiplo di 90 restano come sono.
+fn applica_scala_pagina(doc: &mut Document, id: ObjectId, scala: &Scala) -> Result<bool> {
+    let Some(ScalaPagina {
+        riquadro: [x0, y0, x1, y1],
+        fattori: (sx, sy),
+    }) = scala_pagina(doc, id, scala)
+    else {
+        return Ok(false);
     };
 
     // Il contenuto diventa un Form XObject con la matrice di scala: a differenza
@@ -520,7 +573,9 @@ fn numero_o(o: &Object) -> Option<f64> {
 }
 
 /// Immagini: la scala non ricampiona, cambia solo i DPI (la T2600 li rispetta).
-/// Con una scala diversa dall'originale JPEG e TIFF partono come TIFF.
+/// JPEG e TIFF partono nel loro formato, con i soli campi della risoluzione
+/// riscritti (vedi `risoluzione.rs`); restano decodifica e TIFF RGB per PNG e
+/// per l'allineamento sul rotolo, che devono ricomporre l'immagine.
 fn prepara_immagine(
     percorso: &Path,
     formato: Formato,
@@ -539,6 +594,16 @@ fn prepara_immagine(
     let impagina = imp.is_some_and(|imp| imp.posiziona(larghezza * sx, altezza * sy).is_some());
     if !scala && !impagina {
         return Ok(None);
+    }
+    // Solo scala su JPEG e TIFF: si correggono i DPI dichiarati, senza
+    // decodificare (CMYK, grigi, 16 bit e profili ICC non si toccano). Se la
+    // struttura non si sa riscrivere si ripiega sulla decodifica, come prima.
+    if scala
+        && !impagina
+        && matches!(formato, Formato::Jpeg | Formato::Tiff)
+        && let Some(tmp) = risoluzione::con_dpi(percorso, formato, dpi_scalati)?
+    {
+        return Ok(Some((tmp, formato)));
     }
 
     let immagine = png::su_bianco(png::decodifica(percorso)?);
@@ -1130,11 +1195,147 @@ mod test {
     }
 
     #[test]
+    fn la_pagina_cambia_solo_se_la_scala_la_tocca() {
+        let doc = Document::load_mem(&pdf_a4_con_annotazione()).unwrap();
+        let id = *doc.get_pages().values().next().unwrap();
+        assert!(scala_pagina(&doc, id, &Scala::Formato(FormatoIso::A4)).is_none());
+        assert!(scala_pagina(&doc, id, &Scala::Percentuale { x: 100.0, y: 100.0 }).is_none());
+        assert!(scala_pagina(&doc, id, &Scala::Formato(FormatoIso::A3)).is_some());
+        assert!(scala_pagina(&doc, id, &Scala::Percentuale { x: 50.0, y: 50.0 }).is_some());
+
+        // Le misure "vere" di un A4 in punti (595,28 × 841,89) non sono un
+        // cambio: la tolleranza assorbe i millesimi di millimetro.
+        let dati = impagina::test::pdf(595.28, 841.89, (0.0, 0.0), 0);
+        let doc = Document::load_mem(&dati).unwrap();
+        let id = *doc.get_pages().values().next().unwrap();
+        assert!(scala_pagina(&doc, id, &Scala::Formato(FormatoIso::A4)).is_none());
+    }
+
+    #[test]
+    fn jpeg_al_200_percento_resta_jpeg_con_meta_dpi() {
+        let dir = cartella("jpeg-scala");
+        let p = dir.join("foto.jpg");
+        image::RgbImage::from_fn(40, 30, |x, y| image::Rgb([x as u8, y as u8, 9]))
+            .save_with_format(&p, image::ImageFormat::Jpeg)
+            .unwrap();
+        let lav = Lavorazione {
+            scala: Scala::Percentuale { x: 200.0, y: 200.0 },
+        };
+        let (tmp, formato) = prepara(&p, Formato::Jpeg, &lav, None).unwrap().unwrap();
+        // Non passa più da un TIFF RGB: resta un JPEG con i DPI dimezzati.
+        assert_eq!(formato, Formato::Jpeg);
+        assert_eq!(
+            file::dpi_immagine(tmp.percorso(), Formato::Jpeg),
+            (150.0, 150.0)
+        );
+        let letta = image::open(tmp.percorso()).unwrap().to_rgb8();
+        assert_eq!(letta.dimensions(), (40, 30), "i pixel non si toccano");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tiff_cmyk_con_sola_scala_resta_cmyk() {
+        use tiff::decoder::{DecodingResult, Decoder as Lettore};
+        use tiff::encoder::{Rational, TiffEncoder, colortype};
+        let dir = cartella("cmyk");
+        let p = dir.join("cmyk.tif");
+        let dati: Vec<u8> = (0..30 * 20 * 4).map(|i| (i % 251) as u8).collect();
+        {
+            let mut enc = TiffEncoder::new(std::fs::File::create(&p).unwrap()).unwrap();
+            let mut img = enc.new_image::<colortype::CMYK8>(30, 20).unwrap();
+            img.resolution_unit(tiff::tags::ResolutionUnit::Inch);
+            img.x_resolution(Rational { n: 300, d: 1 });
+            img.y_resolution(Rational { n: 300, d: 1 });
+            img.write_data(&dati).unwrap();
+        }
+        let lav = Lavorazione {
+            scala: Scala::Percentuale { x: 200.0, y: 200.0 },
+        };
+        let (tmp, formato) = prepara(&p, Formato::Tiff, &lav, None).unwrap().unwrap();
+        assert_eq!(formato, Formato::Tiff);
+        let mut lettore = Lettore::new(std::fs::File::open(tmp.percorso()).unwrap()).unwrap();
+        // Se fosse passato dalla decodifica sarebbe un TIFF RGB 8 bit.
+        assert_eq!(lettore.colortype().unwrap(), tiff::ColorType::CMYK(8));
+        assert_eq!(lettore.dimensions().unwrap(), (30, 20));
+        let pixel = match lettore.read_image().unwrap() {
+            DecodingResult::U8(v) => v,
+            _ => panic!("pixel inattesi"),
+        };
+        assert_eq!(pixel, dati);
+        assert_eq!(
+            file::dpi_immagine(tmp.percorso(), Formato::Tiff),
+            (150.0, 150.0)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn composto_nessuna_modifica_resta_none() {
         assert!(
             componi_pdf(&pdf_a4_con_annotazione(), &Lavorazione::default(), None)
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// PDF cifrato con lopdf (password vuota).
+    fn cifra(dati: &[u8]) -> Vec<u8> {
+        use lopdf::encryption::{EncryptionState, EncryptionVersion, Permissions};
+        // La cifratura vuole un /ID nel trailer; due copie con lo stesso ID,
+        // una per lo stato di cifratura e una da cifrare.
+        let con_id = || {
+            let mut doc = Document::load_mem(dati).unwrap();
+            let id = |n: u8| Object::String(vec![n; 16], lopdf::StringFormat::Hexadecimal);
+            doc.trailer.set("ID", vec![id(1), id(2)]);
+            doc
+        };
+        // Lo stato di cifratura si costruisce su un documento di riferimento:
+        // lo stesso di cui poi si cifra una copia.
+        let riferimento = con_id();
+        let stato = EncryptionState::try_from(EncryptionVersion::V2 {
+            document: &riferimento,
+            // Con la password vuota lopdf lo decifra da solo al caricamento:
+            // ne serve una vera per restare cifrato.
+            owner_password: "segreta",
+            user_password: "segreta",
+            key_length: 128,
+            permissions: Permissions::all(),
+        })
+        .unwrap();
+        let mut doc = con_id();
+        doc.encrypt(&stato).unwrap();
+        // Il dizionario /Encrypt nel trailer: senza, il file riletto sembra
+        // normale (con gli oggetti però già cifrati).
+        let cifratura = doc.add_object(Object::Dictionary(stato.encode().unwrap()));
+        doc.trailer.set("Encrypt", Object::Reference(cifratura));
+        // Senza object stream, come tanti PDF veri: il dizionario delle pagine
+        // resta leggibile anche cifrato (la cifratura tocca stringhe e stream).
+        let mut out = Vec::new();
+        doc.save_with_options(
+            &mut out,
+            lopdf::SaveOptions {
+                use_object_streams: false,
+                use_xref_streams: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        out
+    }
+
+    #[test]
+    fn pdf_cifrato_senza_password_resta_da_originale() {
+        // lopdf, senza la password, si ferma prima di leggere il resto del
+        // documento: le pagine non ci sono e la scala non si può controllare.
+        // Resta il rifiuto (fino a quando lopdf non leggerà i box anche
+        // cifrati: lì il ramo in `componi_pdf` scala solo ciò che cambia).
+        let cifrato = cifra(&impagina::test::pdf(pt(210.0), pt(297.0), (0.0, 0.0), 0));
+        let lav = Lavorazione {
+            scala: Scala::Formato(FormatoIso::A4),
+        };
+        let Err(err) = componi_pdf(&cifrato, &lav, None) else {
+            panic!("un PDF cifrato senza password non può essere composto");
+        };
+        assert!(err.to_string().contains("pagine non leggibili"), "{err}");
     }
 }

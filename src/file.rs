@@ -174,7 +174,9 @@ fn dpi_jpeg<R: Read + Seek>(r: &mut R) -> Option<(f64, f64)> {
     while let Some((marcatore, dati)) = prossimo_app(r) {
         if marcatore == 0xE0 {
             jfif = jfif.or_else(|| dpi_jfif(&dati).and_then(|(x, y)| dpi_plausibili(x, y)));
-        } else if let Some(contenuto) = dati.strip_prefix(b"Exif\0\0") {
+        } else if marcatore == 0xE1
+            && let Some(contenuto) = dati.strip_prefix(b"Exif\0\0")
+        {
             exif = exif.or_else(|| {
                 risoluzione_tiff(&mut Cursor::new(contenuto)).and_then(|(x, y)| dpi_plausibili(x, y))
             });
@@ -183,36 +185,48 @@ fn dpi_jpeg<R: Read + Seek>(r: &mut R) -> Option<(f64, f64)> {
     exif.or(jfif)
 }
 
-/// Prossimo segmento APP0 o APP1 del JPEG, con i suoi dati; gli altri (ICC,
+/// Prossimo segmento APP0, APP1 o APP14 del JPEG, con i suoi dati; gli altri (ICC,
 /// XMP, Photoshop…, anche di molti KB) si saltano senza leggerli. `None` da SOS
 /// in poi, a fine file o su un marcatore rovinato.
 fn prossimo_app<R: Read + Seek>(r: &mut R) -> Option<(u8, Vec<u8>)> {
+    let (marcatore, offset, lunghezza) = prossimo_app_pos(r)?;
+    let dati = leggi_a(r, offset, usize::try_from(lunghezza).ok()?)?;
+    Some((marcatore, dati))
+}
+
+/// Come [`prossimo_app`], ma al posto dei dati restituisce la loro posizione
+/// nel file e la lunghezza: serve a chi deve riscriverli sul posto senza
+/// caricare lo stream (vedi `risoluzione.rs`).
+pub(crate) fn prossimo_app_pos<R: Read + Seek>(r: &mut R) -> Option<(u8, u64, u64)> {
     loop {
-        if leggi(r, 1)?[0] != 0xFF {
-            return None;
-        }
-        // Prima del marcatore possono esserci più 0xFF di riempimento.
-        let mut marcatore = leggi(r, 1)?[0];
-        while marcatore == 0xFF {
-            marcatore = leggi(r, 1)?[0];
-        }
+        let (marcatore, offset, lunghezza) = prossimo_segmento_jpeg(r)?;
         match marcatore {
-            // Marcatori senza lunghezza.
-            0x01 | 0xD0..=0xD8 => continue,
-            // Da SOS in poi non ci sono più segmenti APPn.
             0xDA | 0xD9 => return None,
+            0xE0 | 0xE1 | 0xEE => return Some((marcatore, offset, lunghezza)),
             _ => {}
         }
-        let lunghezza = be16(&leggi(r, 2)?, 0)?;
-        if lunghezza < 2 {
-            return None;
-        }
-        let resto = usize::from(lunghezza - 2);
-        if matches!(marcatore, 0xE0 | 0xE1) {
-            return Some((marcatore, leggi(r, resto)?));
-        }
-        r.seek(SeekFrom::Current(resto as i64)).ok()?;
+        r.seek(SeekFrom::Start(offset.checked_add(lunghezza)?)).ok()?;
     }
+}
+
+/// Legge un marcatore JPEG fuori dai dati compressi. SOS ed EOI sono risultati
+/// espliciti; `None` indica un'intestazione troncata o non valida.
+pub(crate) fn prossimo_segmento_jpeg<R: Read + Seek>(r: &mut R) -> Option<(u8, u64, u64)> {
+    if leggi(r, 1)?[0] != 0xFF {
+        return None;
+    }
+    let mut marcatore = leggi(r, 1)?[0];
+    while marcatore == 0xFF {
+        marcatore = leggi(r, 1)?[0];
+    }
+    if marcatore == 0 {
+        return None; // FF00 è ammesso solo nei dati compressi.
+    }
+    let lunghezza = match marcatore {
+        0x01 | 0xD0..=0xD9 => 0,
+        _ => u64::from(be16(&leggi(r, 2)?, 0)?.checked_sub(2)?),
+    };
+    Some((marcatore, r.stream_position().ok()?, lunghezza))
 }
 
 /// Densità JFIF (APP0): unità 1 = dpi, 2 = punti per cm, 0 = solo proporzioni.
@@ -234,7 +248,7 @@ fn dpi_jfif(dati: &[u8]) -> Option<(f64, f64)> {
 /// dentro un JPEG), convertite in dpi. Si legge solo quello che serve, saltando
 /// agli offset: chi scrive con libtiff (o col crate `tiff`) mette l'IFD0 dopo i
 /// dati dell'immagine, in fondo al file.
-fn risoluzione_tiff<R: Read + Seek>(r: &mut R) -> Option<(f64, f64)> {
+pub(crate) fn risoluzione_tiff<R: Read + Seek>(r: &mut R) -> Option<(f64, f64)> {
     let testa = leggi_a(r, 0, 8)?;
     let ordine = match &testa[..2] {
         b"II" => Ordine::Piccolo,
@@ -245,6 +259,14 @@ fn risoluzione_tiff<R: Read + Seek>(r: &mut R) -> Option<(f64, f64)> {
         return None;
     }
     let ifd = u64::from(ordine.u32(&testa, 4)?);
+    risoluzione_ifd(r, ordine, ifd)
+}
+
+pub(crate) fn risoluzione_ifd<R: Read + Seek>(
+    r: &mut R,
+    ordine: Ordine,
+    ifd: u64,
+) -> Option<(f64, f64)> {
     let voci = usize::from(ordine.u16(&leggi_a(r, ifd, 2)?, 0)?);
     let tabella = leggi_a(r, ifd + 2, voci * 12)?;
     let (mut x, mut y) = (None, None);
@@ -287,7 +309,7 @@ fn leggi<R: Read>(r: &mut R, n: usize) -> Option<Vec<u8>> {
     Some(b)
 }
 
-fn leggi_a<R: Read + Seek>(r: &mut R, offset: u64, n: usize) -> Option<Vec<u8>> {
+pub(crate) fn leggi_a<R: Read + Seek>(r: &mut R, offset: u64, n: usize) -> Option<Vec<u8>> {
     r.seek(SeekFrom::Start(offset)).ok()?;
     leggi(r, n)
 }
@@ -296,14 +318,16 @@ fn be16(dati: &[u8], i: usize) -> Option<u16> {
     Some(u16::from_be_bytes(dati.get(i..i + 2)?.try_into().ok()?))
 }
 
+/// Ordine dei byte di un TIFF (o dell'EXIF dentro un JPEG): `II` little
+/// endian, `MM` big endian.
 #[derive(Clone, Copy)]
-enum Ordine {
+pub(crate) enum Ordine {
     Piccolo,
     Grande,
 }
 
 impl Ordine {
-    fn u16(self, dati: &[u8], i: usize) -> Option<u16> {
+    pub(crate) fn u16(self, dati: &[u8], i: usize) -> Option<u16> {
         let b: [u8; 2] = dati.get(i..i + 2)?.try_into().ok()?;
         Some(match self {
             Ordine::Piccolo => u16::from_le_bytes(b),
@@ -311,12 +335,28 @@ impl Ordine {
         })
     }
 
-    fn u32(self, dati: &[u8], i: usize) -> Option<u32> {
+    pub(crate) fn u32(self, dati: &[u8], i: usize) -> Option<u32> {
         let b: [u8; 4] = dati.get(i..i + 4)?.try_into().ok()?;
         Some(match self {
             Ordine::Piccolo => u32::from_le_bytes(b),
             Ordine::Grande => u32::from_be_bytes(b),
         })
+    }
+
+    pub(crate) fn scrivi_u16(self, dati: &mut [u8], i: usize, v: u16) {
+        let b = match self {
+            Ordine::Piccolo => v.to_le_bytes(),
+            Ordine::Grande => v.to_be_bytes(),
+        };
+        dati[i..i + 2].copy_from_slice(&b);
+    }
+
+    pub(crate) fn scrivi_u32(self, dati: &mut [u8], i: usize, v: u32) {
+        let b = match self {
+            Ordine::Piccolo => v.to_le_bytes(),
+            Ordine::Grande => v.to_be_bytes(),
+        };
+        dati[i..i + 4].copy_from_slice(&b);
     }
 }
 
