@@ -224,8 +224,18 @@ fn riscrivi_tiff(
     }
 
     // Offset dei due RATIONAL, relativi all'inizio del TIFF: un valore di 8 byte
-    // non sta nella voce, quindi la voce punta a dove sta davvero.
-    let razionale_valido = |v: &VoceTiff| v.tipo == 5 && v.count == 1;
+    // non sta nella voce, quindi la voce punta a dove sta davvero. Conta solo
+    // se i suoi 8 byte stanno davvero dentro il TIFF/EXIF: un offset costruito
+    // ad arte non deve far scrivere fuori dal file (o allungare il temporaneo
+    // fino ai 4 GB di un offset a 32 bit).
+    let razionale_valido = |v: &VoceTiff| {
+        v.tipo == 5
+            && v.count == 1
+            && ordine.u32(&v.valore, 0).is_some_and(|offset| {
+                let offset = u64::from(offset);
+                offset >= 8 && offset + 8 <= lunghezza
+            })
+    };
     let (mut x, mut y, mut unita) = (None, None, None);
     for (i, voce) in elenco.iter().enumerate() {
         if voce.tag == 282 && razionale_valido(voce) {
@@ -247,10 +257,12 @@ fn riscrivi_tiff(
     if let Some(offset) = y {
         scrivi_razionale(f, ordine, base + offset, dpi.1)?;
     }
-    // ResolutionUnit 3 = centimetri: si dichiara in pollici, come i valori
-    // scritti. Se manca vale già 2 (pollici) per la specifica del TIFF.
+    // ResolutionUnit diversa da 2 (3 = centimetri, 1 = nessuna unità
+    // assoluta): si dichiara in pollici, come i valori scritti, altrimenti i
+    // nuovi DPI non si leggono più (`file::risoluzione_tiff` scarta unità
+    // relative). Se la voce manca vale già 2 per la specifica del TIFF.
     if let Some(i) = unita
-        && ordine.u16(&elenco[i].valore, 0)? == 3
+        && ordine.u16(&elenco[i].valore, 0)? != 2
     {
         ordine.scrivi_u16(&mut elenco[i].valore, 0, 2);
         if completa {
@@ -510,6 +522,61 @@ mod test {
         );
         let tmp = con_dpi(&p, Formato::Tiff, (150.0, 150.0)).unwrap().unwrap();
         // 150 e non 381: l'unità è diventata "pollici" insieme ai valori.
+        assert_eq!(
+            file::dpi_immagine(tmp.percorso(), Formato::Tiff),
+            (150.0, 150.0)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tiff_senza_unita_assoluta_diventa_pollici() {
+        // Unità 1 = nessuna unità assoluta: i DPI non si leggono, quindi dopo
+        // la riscrittura il file deve dichiarare i pollici.
+        let dir = cartella("tiff-unita-1");
+        let p = scrivi(&dir, "unita1.tif", &tiff_con_risoluzione(false, 300, 1));
+        assert_eq!(
+            file::dpi_immagine(&p, Formato::Tiff),
+            (300.0, 300.0),
+            "senza unità assoluta restano i DPI presunti"
+        );
+        let tmp = con_dpi(&p, Formato::Tiff, (150.0, 150.0)).unwrap().unwrap();
+        assert_eq!(
+            file::dpi_immagine(tmp.percorso(), Formato::Tiff),
+            (150.0, 150.0)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn offset_fuori_dal_file_non_fa_crescere_il_temporaneo() {
+        // XResolution punta oltre la fine del file: non si scrive lì, la voce
+        // si rimpiazza con una sana in un IFD nuovo.
+        let dir = cartella("offset-fuori");
+        let mut b = Bytes::nuovo(false);
+        b.intestazione(8);
+        b.u16(5);
+        b.voce(256, 3, 1, 100);
+        b.voce(257, 3, 1, 50);
+        b.voce(282, 5, 1, 0xFFFF_FFF0);
+        b.voce(283, 5, 1, 82);
+        b.voce(296, 3, 1, 2);
+        b.u32(0);
+        b.u32(150);
+        b.u32(1);
+        b.u32(150);
+        b.u32(1);
+        let originale = b.v;
+        let p = scrivi(&dir, "fuori.tif", &originale);
+        let tmp = con_dpi(&p, Formato::Tiff, (150.0, 150.0)).unwrap().unwrap();
+        let dopo = std::fs::read(tmp.percorso()).unwrap();
+        // Al massimo il nuovo IFD (voci + RATIONAL), non un file da 4 GB.
+        assert!(
+            dopo.len() <= originale.len() + 200,
+            "il file è cresciuto da {} a {} byte",
+            originale.len(),
+            dopo.len()
+        );
         assert_eq!(
             file::dpi_immagine(tmp.percorso(), Formato::Tiff),
             (150.0, 150.0)
