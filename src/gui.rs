@@ -11,12 +11,12 @@ use eframe::egui::{
     Sense, Stroke, StrokeKind, TextStyle, TextureHandle, TextureOptions, Vec2,
 };
 
-use crate::anteprima::{Anteprime, Chiave, PAGINE_MAX, Pagina};
+use crate::anteprima::{Anteprime, Chiave, PAGINE_DPI_MAX, PAGINE_MAX, Pagina};
 use crate::config::Config;
 use crate::file::{self, InfoFile};
 use crate::impagina::{self, Allineamento, Impaginazione};
 use crate::lavorazione::{self, FormatoIso, Lavorazione, Scala};
-use crate::pjl::{self, OpzioniJob, Sorgente};
+use crate::pjl::{self, Formato, OpzioniJob, Sorgente};
 use crate::rotazione::{self, TOLLERANZA_MM};
 use crate::stampante;
 use crate::stato::{self, Cartuccia, StatoStampante};
@@ -139,6 +139,10 @@ struct Documento {
     /// Prime pagine renderizzate (vuoto finché non arrivano, o se l'anteprima
     /// non è disponibile).
     pagine: Vec<PaginaMostrata>,
+    /// DPI effettivi più bassi delle immagini del documento, se misurati.
+    dpi: Option<file::DpiStampa>,
+    /// true se i DPI sono solo delle prime pagine del PDF.
+    dpi_parziale: bool,
 }
 
 struct PaginaMostrata {
@@ -283,6 +287,8 @@ impl App {
                     blocca_proporzioni: true,
                     anteprima: (imp, lavorazione),
                     pagine: Vec::new(),
+                    dpi: None,
+                    dpi_parziale: false,
                 });
                 self.selezionato = Some(self.documenti.len() - 1);
             }
@@ -334,8 +340,11 @@ impl App {
             if chiave != d.anteprima {
                 d.anteprima = chiave;
                 // Le pagine vecchie non sono più il file che parte: meglio la
-                // pagina bianca del formato finché non arrivano le nuove.
+                // pagina bianca del formato finché non arrivano le nuove. Anche i
+                // DPI misurati sono superati: la scala è cambiata.
                 d.pagine.clear();
+                d.dpi = None;
+                d.dpi_parziale = false;
                 anteprime.richiedi(d.id, d.percorso.clone(), d.info.formato, d.lavorazione, imp);
             }
         }
@@ -444,6 +453,12 @@ impl App {
                     // Se nel frattempo è cambiata scala o impaginazione, queste
                     // pagine sono superate: arriveranno quelle giuste.
                     if let Some(d) = self.documenti.iter_mut().find(|d| d.id == id && d.anteprima == chiave) {
+                        // I DPI sono del documento (il minimo fra le pagine):
+                        // arrivano uguali su tutte.
+                        d.dpi = pagine.first().and_then(|p| {
+                            Some(file::DpiStampa { dpi: p.dpi_min?, presunti: p.dpi_presunti })
+                        });
+                        d.dpi_parziale = pagine.first().is_some_and(|p| p.dpi_parziale);
                         d.pagine = pagine
                             .into_iter()
                             .enumerate()
@@ -764,7 +779,20 @@ impl App {
         }
 
         ui.add_space(6.0);
-        egui::CollapsingHeader::new("Avanzate (PJL)").show(ui, |ui| {
+        egui::CollapsingHeader::new("Avanzate").show(ui, |ui| {
+            // La soglia sta qui finché non c'è la finestra impostazioni (#18).
+            ui.horizontal(|ui| {
+                ui.label("Avvisa sotto");
+                ui.add(
+                    egui::DragValue::new(&mut self.config.soglia_dpi)
+                        .range(50.0..=600.0)
+                        .speed(10.0)
+                        .suffix(" dpi"),
+                );
+            })
+            .response
+            .on_hover_text("Sotto questi DPI effettivi la miniatura e l'anteprima avvisano; la stampa non viene bloccata");
+            ui.separator();
             ui.label("Righe @PJL aggiuntive:");
             ui.add(
                 egui::TextEdit::multiline(&mut self.extra_pjl)
@@ -814,6 +842,7 @@ impl App {
 
     fn pannello_miniature(&mut self, ui: &mut egui::Ui) {
         let mut da_togliere = None;
+        let soglia = self.config.soglia_dpi;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (i, d) in self.documenti.iter().enumerate() {
                 let selezionato = self.selezionato == Some(i);
@@ -840,9 +869,33 @@ impl App {
                         if !d.info.formati_pagine.is_empty() {
                             ui.label(RichText::new(file::etichetta_formati(&d.info.formati_pagine)).small());
                         }
-                        if let Some(r) = &d.info.risoluzione {
-                            let testo = RichText::new(r.etichetta()).small();
-                            ui.label(if r.presunta { testo.color(ARANCIO) } else { testo });
+                        match d.dpi {
+                            Some(dpi) => {
+                                let testo = RichText::new(dpi.etichetta(soglia)).small();
+                                ui.label(if dpi.sotto_soglia(soglia) {
+                                    testo.color(ARANCIO).strong()
+                                } else {
+                                    testo
+                                });
+                            }
+                            // Senza immagini raster non c'è un DPI da mostrare. Con
+                            // la misura ferma alle prime pagine non si può dire che
+                            // il resto del documento sia vettoriale.
+                            None if d.info.formato == Formato::Pdf && !d.pagine.is_empty() => {
+                                let testo = if d.dpi_parziale {
+                                    format!("vettoriale finora (prime {PAGINE_DPI_MAX} pagine)")
+                                } else {
+                                    "vettoriale".to_string()
+                                };
+                                ui.label(RichText::new(testo).small());
+                            }
+                            // Anteprima non ancora arrivata: i DPI del file.
+                            None => {
+                                if let Some(r) = &d.info.risoluzione {
+                                    let testo = RichText::new(r.etichetta()).small();
+                                    ui.label(if r.presunta { testo.color(ARANCIO) } else { testo });
+                                }
+                            }
                         }
                         match &d.stato {
                             StatoJob::Pronto => {}
@@ -934,6 +987,16 @@ impl App {
         }
         if ruotate_da_iqclock {
             nota.push_str("\nIQClock ha ruotato di 90° le pagine segnate prima di allinearle, come farebbe la stampante");
+        }
+        if let Some(dpi) = d.dpi
+            && let Some(avviso) = dpi.avviso(self.config.soglia_dpi)
+        {
+            nota.push_str(&format!("\n{avviso}"));
+        }
+        // Anche senza un DPI da mostrare, la misura ferma alle prime pagine va
+        // detta: il resto del documento non è stato guardato.
+        if d.dpi_parziale {
+            nota.push_str(&format!("\nRisoluzione misurata solo sulle prime {PAGINE_DPI_MAX} pagine"));
         }
         // Didascalia centrata che va a capo: con nomi lunghi o avvisi non
         // starebbe nella larghezza dell'anteprima.

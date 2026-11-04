@@ -57,6 +57,61 @@ fn valore_dpi(dpi: f64) -> String {
     if (dpi - dpi.round()).abs() < 0.05 { format!("{dpi:.0}") } else { format!("{dpi:.1}") }
 }
 
+/// DPI effettivi di un'immagine raster: i suoi pixel divisi per il lato in mm
+/// che occuperà sulla carta. La scala non ricampiona, quindi un'immagine
+/// ingrandita al 200 % esce con metà dei DPI del file.
+pub fn dpi_effettivi(px: u32, lato_mm: f64) -> f64 {
+    px as f64 * 25.4 / lato_mm
+}
+
+/// Risoluzione di stampa di un'immagine: quella dichiarata dal file, oppure
+/// quella presunta se il file non ne dichiara una utilizzabile.
+pub fn risoluzione_immagine(percorso: &Path, formato: Formato) -> Risoluzione {
+    match risoluzione_dichiarata(percorso, formato) {
+        Some((x, y)) => Risoluzione { x, y, presunta: false },
+        None => Risoluzione { x: DPI_IMMAGINI, y: DPI_IMMAGINI, presunta: true },
+    }
+}
+
+/// Indicatore dei DPI effettivi di un documento: il valore più basso fra le sue
+/// immagini raster, e se i DPI del file sono presunti (immagini senza DPI).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DpiStampa {
+    pub dpi: f64,
+    pub presunti: bool,
+}
+
+impl DpiStampa {
+    /// Sotto la soglia scelta si avvisa, senza mai bloccare la stampa.
+    pub fn sotto_soglia(&self, soglia: f64) -> bool {
+        self.dpi < soglia
+    }
+
+    /// "212 dpi", "≈ 150 dpi (DPI del file presunti)" oppure
+    /// "140 dpi — sotto 200".
+    pub fn etichetta(&self, soglia: f64) -> String {
+        let mut testo = format!("{} dpi", valore_dpi(self.dpi));
+        if self.presunti {
+            testo = format!("≈ {testo} (DPI del file presunti)");
+        }
+        if self.sotto_soglia(soglia) {
+            testo.push_str(&format!(" — sotto {}", valore_dpi(soglia)));
+        }
+        testo
+    }
+
+    /// "Attenzione: risoluzione 140 dpi, sotto la soglia di 200", solo se serve.
+    pub fn avviso(&self, soglia: f64) -> Option<String> {
+        self.sotto_soglia(soglia).then(|| {
+            format!(
+                "Attenzione: risoluzione {} dpi, sotto la soglia di {}",
+                valore_dpi(self.dpi),
+                valore_dpi(soglia)
+            )
+        })
+    }
+}
+
 /// Risoluzione presunta delle immagini senza DPI noti, per l'anteprima sul rotolo.
 pub const DPI_IMMAGINI: f64 = 300.0;
 
@@ -154,7 +209,8 @@ fn risoluzione_dichiarata(percorso: &Path, formato: Formato) -> Option<(f64, f64
 /// DPI con cui la stampante stamperà l'immagine: quelli dichiarati, altrimenti
 /// quelli presunti.
 pub fn dpi_immagine(percorso: &Path, formato: Formato) -> (f64, f64) {
-    risoluzione_dichiarata(percorso, formato).unwrap_or((DPI_IMMAGINI, DPI_IMMAGINI))
+    let r = risoluzione_immagine(percorso, formato);
+    (r.x, r.y)
 }
 
 /// Scarta i DPI che non possono essere veri: 0, 1 e valori fuori scala.
@@ -1061,6 +1117,35 @@ mod test {
     }
 
     #[test]
+    fn dpi_effettivi_di_un_immagine() {
+        // 300 px su un pollice (25,4 mm) sono 300 dpi; gli stessi pixel su 2
+        // pollici sono 150 dpi, e su 50,8 mm 150 dpi.
+        assert!((dpi_effettivi(300, 25.4) - 300.0).abs() < 1e-9);
+        assert!((dpi_effettivi(300, 50.8) - 150.0).abs() < 1e-9);
+        // Un A4 pieno di 2480 px (300 dpi): 210 mm.
+        assert!((dpi_effettivi(2480, 210.0)).round() == 300.0);
+    }
+
+    #[test]
+    fn etichetta_e_avviso_dei_dpi_effettivi() {
+        let d = |dpi, presunti| DpiStampa { dpi, presunti };
+        assert_eq!(d(212.0, false).etichetta(200.0), "212 dpi");
+        assert_eq!(d(140.0, false).etichetta(200.0), "140 dpi — sotto 200");
+        assert_eq!(
+            d(150.0, true).etichetta(200.0),
+            "≈ 150 dpi (DPI del file presunti) — sotto 200"
+        );
+        // La soglia non è inclusa: a 200 dpi esatti non si avvisa.
+        assert_eq!(d(200.0, false).etichetta(200.0), "200 dpi");
+        assert!(!d(200.0, false).sotto_soglia(200.0));
+        assert_eq!(
+            d(140.0, false).avviso(200.0).unwrap(),
+            "Attenzione: risoluzione 140 dpi, sotto la soglia di 200"
+        );
+        assert_eq!(d(300.0, false).avviso(200.0), None);
+    }
+
+    #[test]
     fn etichette_dpi() {
         let r = |x, y, presunta| Risoluzione { x, y, presunta };
         assert_eq!(r(300.0, 300.0, true).etichetta(), "300 dpi (presunti)");
@@ -1086,6 +1171,23 @@ mod test {
         assert!((l - 25.4).abs() < 0.1 && (a - 12.7).abs() < 0.1);
         assert!(info.dettagli.contains("300 dpi (presunti)"), "{}", info.dettagli);
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn risoluzione_immagine_dice_se_e_presunta() {
+        let dir = cartella("risoluzione-immagine");
+        let p = scrivi(&dir, "dichiarata.tif", &tiff_le(300, 150, 150, 150, 2));
+        assert_eq!(
+            risoluzione_immagine(&p, Formato::Tiff),
+            Risoluzione { x: 150.0, y: 150.0, presunta: false }
+        );
+        let p = scrivi(&dir, "presunta.tif", &tiff_le(300, 150, 300, 300, 1));
+        assert_eq!(
+            risoluzione_immagine(&p, Formato::Tiff),
+            Risoluzione { x: DPI_IMMAGINI, y: DPI_IMMAGINI, presunta: true }
+        );
+        assert_eq!(dpi_immagine(&p, Formato::Tiff), (DPI_IMMAGINI, DPI_IMMAGINI));
         let _ = std::fs::remove_dir_all(dir);
     }
 

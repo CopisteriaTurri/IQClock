@@ -10,12 +10,15 @@ pub struct Config {
     pub larghezza_rotolo_mm: f64,
     /// Bordo non stampabile per lato, usato per allineare al centro o a destra.
     pub margine_mm: f64,
+    /// Sotto questi DPI effettivi miniature e anteprima avvisano (la stampa non
+    /// viene bloccata).
+    pub soglia_dpi: f64,
 }
 
 impl Default for Config {
     fn default() -> Self {
         // IP della T2600 nei log di HP Click.
-        Self { host: "192.168.10.72".into(), porta: 9100, larghezza_rotolo_mm: 914.0, margine_mm: 5.0 }
+        Self { host: "192.168.10.72".into(), porta: 9100, larghezza_rotolo_mm: 914.0, margine_mm: 5.0, soglia_dpi: 200.0 }
     }
 }
 
@@ -48,6 +51,15 @@ impl Config {
                 "porta" => c.porta = v.trim().parse().unwrap_or(c.porta),
                 "rotolo_mm" => c.larghezza_rotolo_mm = v.trim().parse().unwrap_or(c.larghezza_rotolo_mm),
                 "margine_mm" => c.margine_mm = v.trim().parse().unwrap_or(c.margine_mm),
+                "soglia_dpi" => {
+                    // Una soglia nulla o negativa avviserebbe sempre: vale il default.
+                    if let Ok(soglia) = v.trim().parse::<f64>()
+                        && soglia.is_finite()
+                        && soglia > 0.0
+                    {
+                        c.soglia_dpi = soglia;
+                    }
+                }
                 _ => {}
             }
         }
@@ -61,8 +73,8 @@ impl Config {
         let _ = std::fs::write(
             p,
             format!(
-                "host={}\nporta={}\nrotolo_mm={}\nmargine_mm={}\n",
-                self.host, self.porta, self.larghezza_rotolo_mm, self.margine_mm
+                "host={}\nporta={}\nrotolo_mm={}\nmargine_mm={}\nsoglia_dpi={}\n",
+                self.host, self.porta, self.larghezza_rotolo_mm, self.margine_mm, self.soglia_dpi
             ),
         );
     }
@@ -101,10 +113,23 @@ mod test {
     #[test]
     fn round_trip() {
         let p = temporanea("roundtrip");
-        let c = Config { host: "stampante.lan".into(), porta: 9101, larghezza_rotolo_mm: 610.0, margine_mm: 3.0 };
+        let c = Config { host: "stampante.lan".into(), porta: 9101, larghezza_rotolo_mm: 610.0, margine_mm: 3.0, soglia_dpi: 150.0 };
         c.salva_su(&p);
         let riletta = Config::carica_da(&p);
         std::fs::remove_file(&p).unwrap();
         assert_eq!(riletta, c);
+    }
+
+    #[test]
+    fn soglia_dpi_di_default_e_valori_assurdi() {
+        assert_eq!(Config::default().soglia_dpi, 200.0);
+        let p = temporanea("soglia");
+        std::fs::write(&p, "soglia_dpi=150\n").unwrap();
+        assert_eq!(Config::carica_da(&p).soglia_dpi, 150.0);
+        for assurda in ["soglia_dpi=0\n", "soglia_dpi=-20\n", "soglia_dpi=molta\n"] {
+            std::fs::write(&p, assurda).unwrap();
+            assert_eq!(Config::carica_da(&p).soglia_dpi, 200.0, "{assurda:?}");
+        }
+        std::fs::remove_file(&p).unwrap();
     }
 }
