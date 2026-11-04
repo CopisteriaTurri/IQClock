@@ -87,15 +87,25 @@ impl DpiStampa {
         self.dpi < soglia
     }
 
+    /// Se l'arrotondamento nasconde il confronto, mostra un limite esplicito.
+    fn valore(&self, soglia: f64) -> String {
+        let valore = valore_dpi(self.dpi);
+        if self.sotto_soglia(soglia) && valore == valore_dpi(soglia) {
+            format!("< {soglia}")
+        } else {
+            valore
+        }
+    }
+
     /// "212 dpi", "≈ 150 dpi (DPI del file presunti)" oppure
     /// "140 dpi — sotto 200".
     pub fn etichetta(&self, soglia: f64) -> String {
-        let mut testo = format!("{} dpi", valore_dpi(self.dpi));
+        let mut testo = format!("{} dpi", self.valore(soglia));
         if self.presunti {
             testo = format!("≈ {testo} (DPI del file presunti)");
         }
         if self.sotto_soglia(soglia) {
-            testo.push_str(&format!(" — sotto {}", valore_dpi(soglia)));
+            testo.push_str(&format!(" — sotto {soglia}"));
         }
         testo
     }
@@ -105,8 +115,8 @@ impl DpiStampa {
         self.sotto_soglia(soglia).then(|| {
             format!(
                 "Attenzione: risoluzione {} dpi, sotto la soglia di {}",
-                valore_dpi(self.dpi),
-                valore_dpi(soglia)
+                self.valore(soglia),
+                soglia
             )
         })
     }
@@ -1143,6 +1153,28 @@ mod test {
             "Attenzione: risoluzione 140 dpi, sotto la soglia di 200"
         );
         assert_eq!(d(300.0, false).avviso(200.0), None);
+    }
+
+    #[test]
+    fn dpi_vicini_alla_soglia_restano_distinguibili() {
+        for soglia in [200.0, 200.04] {
+            for dpi in [199.96, 199.999999, 200.0] {
+                let d = DpiStampa {
+                    dpi,
+                    presunti: false,
+                };
+                if dpi < soglia {
+                    assert_eq!(d.etichetta(soglia), format!("< {soglia} dpi — sotto {soglia}"));
+                    assert_eq!(
+                        d.avviso(soglia).unwrap(),
+                        format!("Attenzione: risoluzione < {soglia} dpi, sotto la soglia di {soglia}")
+                    );
+                } else {
+                    assert_eq!(d.etichetta(soglia), "200 dpi");
+                    assert_eq!(d.avviso(soglia), None);
+                }
+            }
+        }
     }
 
     #[test]

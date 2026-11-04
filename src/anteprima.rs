@@ -252,9 +252,9 @@ fn pagine_pdf(
     // chiude prima di aprire quello da disegnare: due PDF aperti insieme per
     // niente sono memoria sprecata.
     let dpi_originale = match &composto {
-        Some(_) => {
+        Some(c) => {
             let originale = pdfium.load_pdf_from_file(percorso, None).map_err(carica)?;
-            Some(dpi_documento(&originale, lav))
+            Some(dpi_documento(&originale, &c.fattori_scala))
         }
         None => None,
     };
@@ -266,7 +266,7 @@ fn pagine_pdf(
         None => (pdfium.load_pdf_from_file(percorso, None).map_err(carica)?, &[][..]),
     };
     // Senza scala né allineamento il documento aperto è già l'originale.
-    let (dpi_min, dpi_parziale) = dpi_originale.unwrap_or_else(|| dpi_documento(&doc, lav));
+    let (dpi_min, dpi_parziale) = dpi_originale.unwrap_or_else(|| dpi_documento(&doc, &[]));
     // Come scale_page_to_display_size, ma senza ruotare le pagine orizzontali:
     // l'anteprima deve mostrare la pagina com'è.
     let config = PdfRenderConfig::new()
@@ -298,26 +298,15 @@ fn pagine_pdf(
 /// DPI effettivi più bassi (alla scala scelta) fra le immagini raster del PDF, e
 /// se ci si è fermati a [`PAGINE_DPI_MAX`] pagine. `None` = nessuna immagine
 /// abbastanza grande: pagina solo vettoriale.
-fn dpi_documento(doc: &PdfDocument<'_>, lav: &Lavorazione) -> (Option<f64>, bool) {
+fn dpi_documento(doc: &PdfDocument<'_>, fattori_scala: &[(f64, f64)]) -> (Option<f64>, bool) {
     let mut minimo: Option<f64> = None;
     for (n, pagina) in doc.pages().iter().enumerate() {
         if n >= PAGINE_DPI_MAX {
             return (minimo, true);
         }
-        // La scala si applica per asse: una pagina ingrandita esce con meno DPI.
-        let (sx, sy) = lavorazione::fattori(
-            &lav.scala,
-            f64::from(pagina.width().to_mm()),
-            f64::from(pagina.height().to_mm()),
-        );
-        // Le misure di pagina sono quelle viste (con /Rotate applicato), mentre i
-        // riquadri degli oggetti sono nelle coordinate della pagina non ruotata:
-        // con /Rotate 90 o 270 gli assi si scambiano, e con una scala senza
-        // proporzioni va scambiato anche il fattore di ciascun asse.
-        let (sx, sy) = match pagina.rotation() {
-            Ok(PdfPageRenderRotation::Degrees90 | PdfPageRenderRotation::Degrees270) => (sy, sx),
-            _ => (sx, sy),
-        };
+        // Fattori effettivi nello spazio utente, già scambiati su /Rotate
+        // 90/270 dalla composizione. Una pagina scartata resta a scala 1.
+        let (sx, sy) = fattori_scala.get(n).copied().unwrap_or((1.0, 1.0));
         for oggetto in pagina.objects().iter() {
             let PdfPageObject::Image(immagine) = oggetto else { continue };
             let Ok(riquadro) = immagine.bounds() else { continue };
@@ -599,6 +588,51 @@ mod test {
         let pagine = pagine_pdf(&pdfium, &vuoto, &Lavorazione::default(), None).unwrap();
         assert_eq!(pagine[0].dpi_min, None);
         std::fs::remove_file(&vuoto).unwrap();
+    }
+
+    #[test]
+    fn dpi_pdf_usano_solo_la_scala_applicata() {
+        let Some(pdfium) = pdfium_o_salta() else {
+            return;
+        };
+        let pdf = pdf_con_immagine(72.0, 72.0, 45);
+        let lav = Lavorazione {
+            scala: Scala::Percentuale { x: 200.0, y: 200.0 },
+        };
+        // Rotazione non supportata: nessun PDF composto, resta a 300 dpi.
+        let pagine = pagine_pdf(&pdfium, &pdf, &lav, None).unwrap();
+        assert!((pagine[0].dpi_min.unwrap() - 300.0).abs() < 0.5);
+
+        let mut doc = lopdf::Document::load(&pdf).unwrap();
+        let id = *doc.get_pages().values().next().unwrap();
+        let mut seconda = doc.get_dictionary(id).unwrap().clone();
+        seconda.set("Rotate", 0);
+        let contenuto = doc.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            b"q 36 0 0 36 20 20 cm /Im0 Do Q".to_vec(),
+        ));
+        seconda.set("Contents", contenuto);
+        let seconda_id = doc.add_object(seconda);
+        let padre = doc
+            .get_dictionary(id)
+            .unwrap()
+            .get(b"Parent")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let pagine = doc.get_dictionary_mut(padre).unwrap();
+        pagine.set(
+            "Kids",
+            vec![lopdf::Object::Reference(id), seconda_id.into()],
+        );
+        pagine.set("Count", 2);
+        doc.save(&pdf).unwrap();
+        // Solo la seconda pagina viene scalata: 600 -> 300 dpi.
+        // La prima resta a 300, quindi il minimo è 300, non 150.
+        let pagine = pagine_pdf(&pdfium, &pdf, &lav, None).unwrap();
+        assert_eq!(pagine.len(), 2);
+        assert!((pagine[0].dpi_min.unwrap() - 300.0).abs() < 0.5);
+        std::fs::remove_file(pdf).unwrap();
     }
 
     #[test]

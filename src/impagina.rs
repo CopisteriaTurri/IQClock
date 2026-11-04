@@ -122,6 +122,8 @@ pub struct PdfComposto {
     pub dati: Vec<u8>,
     /// Per ogni pagina: dove IQClock l'ha messa, `None` se è rimasta com'è.
     pub posizioni: Vec<Option<Posizione>>,
+    /// Fattori realmente applicati per pagina nello spazio utente; vuoto = identità.
+    pub fattori_scala: Vec<(f64, f64)>,
 }
 
 /// Allarga alla parte stampabile del rotolo ogni pagina che ci entra. `None` se
@@ -137,7 +139,7 @@ pub fn componi_pdf(dati: &[u8], imp: &Impaginazione) -> Result<Option<PdfCompost
     }
     let mut out = Vec::new();
     doc.save_to(&mut out).context("scrittura del PDF impaginato")?;
-    Ok(Some(PdfComposto { dati: out, posizioni }))
+    Ok(Some(PdfComposto { dati: out, posizioni, fattori_scala: Vec::new() }))
 }
 
 /// Applica l'allineamento a un PDF già caricato: è il passo dopo la scala nella
