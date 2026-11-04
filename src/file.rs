@@ -199,32 +199,34 @@ fn prossimo_app<R: Read + Seek>(r: &mut R) -> Option<(u8, Vec<u8>)> {
 /// caricare lo stream (vedi `risoluzione.rs`).
 pub(crate) fn prossimo_app_pos<R: Read + Seek>(r: &mut R) -> Option<(u8, u64, u64)> {
     loop {
-        if leggi(r, 1)?[0] != 0xFF {
-            return None;
-        }
-        // Prima del marcatore possono esserci più 0xFF di riempimento.
-        let mut marcatore = leggi(r, 1)?[0];
-        while marcatore == 0xFF {
-            marcatore = leggi(r, 1)?[0];
-        }
+        let (marcatore, offset, lunghezza) = prossimo_segmento_jpeg(r)?;
         match marcatore {
-            // Marcatori senza lunghezza.
-            0x01 | 0xD0..=0xD8 => continue,
-            // Da SOS in poi non ci sono più segmenti APPn.
             0xDA | 0xD9 => return None,
+            0xE0 | 0xE1 | 0xEE => return Some((marcatore, offset, lunghezza)),
             _ => {}
         }
-        let lunghezza = be16(&leggi(r, 2)?, 0)?;
-        if lunghezza < 2 {
-            return None;
-        }
-        let resto = u64::from(lunghezza - 2);
-        if matches!(marcatore, 0xE0 | 0xE1 | 0xEE) {
-            let offset = r.stream_position().ok()?;
-            return Some((marcatore, offset, resto));
-        }
-        r.seek(SeekFrom::Current(i64::try_from(resto).ok()?)).ok()?;
+        r.seek(SeekFrom::Start(offset.checked_add(lunghezza)?)).ok()?;
     }
+}
+
+/// Legge un marcatore JPEG fuori dai dati compressi. SOS ed EOI sono risultati
+/// espliciti; `None` indica un'intestazione troncata o non valida.
+pub(crate) fn prossimo_segmento_jpeg<R: Read + Seek>(r: &mut R) -> Option<(u8, u64, u64)> {
+    if leggi(r, 1)?[0] != 0xFF {
+        return None;
+    }
+    let mut marcatore = leggi(r, 1)?[0];
+    while marcatore == 0xFF {
+        marcatore = leggi(r, 1)?[0];
+    }
+    if marcatore == 0 {
+        return None; // FF00 è ammesso solo nei dati compressi.
+    }
+    let lunghezza = match marcatore {
+        0x01 | 0xD0..=0xD9 => 0,
+        _ => u64::from(be16(&leggi(r, 2)?, 0)?.checked_sub(2)?),
+    };
+    Some((marcatore, r.stream_position().ok()?, lunghezza))
 }
 
 /// Densità JFIF (APP0): unità 1 = dpi, 2 = punti per cm, 0 = solo proporzioni.

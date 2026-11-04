@@ -19,7 +19,7 @@
 //! ai DPI originali di ciascuna pagina.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use anyhow::Result;
@@ -102,8 +102,13 @@ fn riscrivi_jpeg(f: &mut File, dpi: (f64, f64)) -> Result<Option<bool>> {
     if f.read_exact(&mut testa).is_err() || testa != [0xFF, 0xD8] {
         return Ok(None);
     }
+    let Some(componenti_rgb) = verifica_struttura_jpeg(f, fine_file) else {
+        return Ok(None);
+    };
+    f.seek(SeekFrom::Start(2))?;
     let (mut jfif, mut exif) = (None, false);
     let mut adobe_senza_trasformazione = false;
+    let mut adobe_compatibile = false;
     while let Some((marcatore, inizio, lunghezza)) = file::prossimo_app_pos(f) {
         let fine = inizio + lunghezza;
         if fine > fine_file {
@@ -139,6 +144,7 @@ fn riscrivi_jpeg(f: &mut File, dpi: (f64, f64)) -> Result<Option<bool>> {
             f.seek(SeekFrom::Start(inizio))?;
             f.read_exact(&mut adobe)?;
             adobe_senza_trasformazione |= adobe.starts_with(b"Adobe") && adobe[11] == 0;
+            adobe_compatibile |= adobe.starts_with(b"Adobe") && matches!(adobe[11], 1 | 2);
         }
         f.seek(SeekFrom::Start(fine))?;
     }
@@ -156,14 +162,95 @@ fn riscrivi_jpeg(f: &mut File, dpi: (f64, f64)) -> Result<Option<bool>> {
         Ok(Some(true))
     } else if exif {
         Ok(Some(true))
-    } else if adobe_senza_trasformazione {
-        // Aggiungere JFIF può far interpretare i campioni RGB Adobe come YCbCr.
+    } else if adobe_senza_trasformazione || (componenti_rgb && !adobe_compatibile) {
+        // Aggiungere JFIF può far interpretare i campioni RGB come YCbCr.
         // Senza risoluzione da riscrivere si usa la decodifica del chiamante.
         Ok(None)
     } else if densita(dpi.0).is_some() && densita(dpi.1).is_some() {
         Ok(Some(false))
     } else {
         Ok(None)
+    }
+}
+
+/// Verifica i segmenti fino a EOI e riconosce i componenti RGB del SOF.
+/// Non decodifica i pixel: i dati compressi si attraversano a buffer costante,
+/// rispettando byte stuffing, restart e scansioni multiple dei JPEG progressivi.
+/// Il file è già posizionato dopo SOI. `None` fa usare il fallback.
+fn verifica_struttura_jpeg(f: &mut File, lunghezza: u64) -> Option<bool> {
+    let mut r = BufReader::new(f);
+    let (mut rgb, mut ha_sof, mut ha_sos) = (false, false, false);
+    loop {
+        let (marcatore, inizio, n) = file::prossimo_segmento_jpeg(&mut r)?;
+        let fine = inizio.checked_add(n)?;
+        if fine > lunghezza {
+            return None;
+        }
+        match marcatore {
+            0xD9 => return (ha_sof && ha_sos).then_some(rgb),
+            0xD0..=0xD8 => return None, // restart fuori scan o secondo SOI
+            0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => {
+                if n < 6 {
+                    return None;
+                }
+                let testa = leggi_a(&mut r, inizio, 6)?;
+                let componenti = usize::from(testa[5]);
+                if componenti == 0 || n != 6 + componenti as u64 * 3 {
+                    return None;
+                }
+                let dati = leggi_a(&mut r, inizio + 6, componenti * 3)?;
+                rgb |= componenti == 3 && [dati[0], dati[3], dati[6]] == *b"RGB";
+                // I JPEG lossless a tre componenti possono essere RGB anche
+                // con identificatori numerici: evitare JFIF anche in quel caso.
+                rgb |= componenti == 3 && matches!(marcatore, 0xC3 | 0xC7 | 0xCB | 0xCF);
+                ha_sof = true;
+            }
+            0xDA => {
+                if !ha_sof || n < 4 {
+                    return None;
+                }
+                let componenti = usize::from(leggi_a(&mut r, inizio, 1)?[0]);
+                if componenti == 0 || n != 4 + componenti as u64 * 2 {
+                    return None;
+                }
+                ha_sos = true;
+                r.seek(SeekFrom::Start(fine)).ok()?;
+                salta_dati_jpeg(&mut r)?;
+                continue;
+            }
+            _ => {}
+        }
+        r.seek(SeekFrom::Start(fine)).ok()?;
+    }
+}
+
+/// Lascia il lettore sul prossimo marcatore dopo una scan, non su un FF00
+/// letterale o un restart. EOF nei dati compressi è un errore, non fine scan.
+fn salta_dati_jpeg<R: BufRead + Seek>(r: &mut R) -> Option<()> {
+    loop {
+        let dati = r.fill_buf().ok()?;
+        if dati.is_empty() {
+            return None;
+        }
+        let marcatore = dati.iter().position(|&b| b == 0xFF);
+        let n = marcatore.unwrap_or(dati.len());
+        r.consume(n);
+        if marcatore.is_none() {
+            continue;
+        }
+        let mut b = [0u8; 1];
+        r.read_exact(&mut b).ok()?; // FF
+        loop {
+            r.read_exact(&mut b).ok()?;
+            if b[0] != 0xFF {
+                break;
+            }
+        }
+        if b[0] == 0 || matches!(b[0], 0xD0..=0xD7) {
+            continue;
+        }
+        r.seek(SeekFrom::Current(-2)).ok()?;
+        return Some(());
     }
 }
 
@@ -1029,6 +1116,87 @@ mod test {
             );
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn jpeg_troncati_prima_e_dopo_sos_ripiegano_sulla_decodifica() {
+        let dir = cartella("jpeg-tagli");
+        for segmenti in [vec![], vec![jfif(1, 300, 300)], vec![exif(300)]] {
+            let p = jpeg_con(&dir, "intero.jpg", &segmenti);
+            let dati = std::fs::read(&p).unwrap();
+            // Ogni prefisso: header, segmenti ignorati, SOS, dati compressi,
+            // EOI assente o dimezzato. Nessuno deve risultare riscritto.
+            for fine in 2..dati.len() {
+                let troncato = scrivi(&dir, "taglio.jpg", &dati[..fine]);
+                assert!(
+                    con_dpi(&troncato, Formato::Jpeg, (150.0, 150.0))
+                        .unwrap().is_none(),
+                    "JPEG tagliato a {fine}/{}", dati.len()
+                );
+            }
+            verifica_jpeg(&p, (150.0, 150.0));
+        }
+        // EOI dentro un segmento non è la fine dell'immagine.
+        let p = jpeg_con(&dir, "falso-eoi.jpg", &[vec![0xFF, 0xFE, 0, 4, 0xFF, 0xD9]]);
+        let dati = std::fs::read(&p).unwrap();
+        let p = scrivi(&dir, "falso-eoi.jpg", &dati[..dati.len() - 2]);
+        assert!(con_dpi(&p, Formato::Jpeg, (150.0, 150.0)).unwrap().is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn jpeg_rgb_senza_marker_non_riceve_jfif() {
+        let dir = cartella("jpeg-rgb");
+        // Pixel RGB veri e componenti ASCII R/G/B, senza APP14 né JFIF.
+        let dati = include_bytes!("../tests/fixtures/rgb-senza-marker.jpg");
+        for risoluzione in [None, Some(jfif(1, 300, 300)), Some(exif(300))] {
+            let mut jpeg = dati[..2].to_vec();
+            if let Some(segmento) = &risoluzione {
+                jpeg.extend_from_slice(segmento);
+            }
+            jpeg.extend_from_slice(&dati[2..]);
+            let p = scrivi(&dir, "rgb.jpg", &jpeg);
+            let temp = con_dpi(&p, Formato::Jpeg, (150.0, 150.0)).unwrap();
+            if risoluzione.is_none() {
+                assert!(temp.is_none());
+            } else {
+                let temp = temp.expect("risoluzione esistente riscrivibile");
+                assert_eq!(file::dpi_immagine(temp.percorso(), Formato::Jpeg), (150.0, 150.0));
+                assert_eq!(image::open(&p).unwrap().to_rgb8(), image::open(temp.percorso()).unwrap().to_rgb8());
+            }
+            assert_eq!(std::fs::read(&p).unwrap(), jpeg);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn jpeg_progressivo_richiede_eoi_dopo_tutte_le_scan() {
+        let dir = cartella("jpeg-progressivo");
+        let dati = include_bytes!("../tests/fixtures/progressivo.jpg");
+        let p = scrivi(&dir, "progressivo.jpg", dati);
+        let temp = con_dpi(&p, Formato::Jpeg, (150.0, 150.0)).unwrap().unwrap();
+        assert_eq!(file::dpi_immagine(temp.percorso(), Formato::Jpeg), (150.0, 150.0));
+        assert_eq!(image::open(&p).unwrap().to_rgb8(), image::open(temp.percorso()).unwrap().to_rgb8());
+        for fine in 2..dati.len() {
+            let p = scrivi(&dir, "taglio.jpg", &dati[..fine]);
+            assert!(con_dpi(&p, Formato::Jpeg, (150.0, 150.0)).unwrap().is_none());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dati_jpeg_rispettano_stuffing_restart_e_confini_buffer() {
+        for capacita in [1, 2, 3, 8] {
+            // FF D9 letterali con stuffing, restart e FF di riempimento.
+            let dati = [7, 8, 0xFF, 0, 0xD9, 0xFF, 0xD0, 9, 0xFF, 0xFF, 0xD9];
+            let mut r = BufReader::with_capacity(capacita, std::io::Cursor::new(dati));
+            assert_eq!(salta_dati_jpeg(&mut r), Some(()));
+            assert_eq!(file::prossimo_segmento_jpeg(&mut r).unwrap().0, 0xD9);
+            for dati in [&[7, 8][..], &[0xFF][..], &[0xFF, 0][..], &[0xFF, 0xD0][..]] {
+                let mut r = BufReader::with_capacity(capacita, std::io::Cursor::new(dati));
+                assert_eq!(salta_dati_jpeg(&mut r), None);
+            }
+        }
     }
 
     #[test]
