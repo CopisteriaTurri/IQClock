@@ -255,9 +255,9 @@ fn valida_scala(
                 "attenzione: {} è PostScript/HP-GL/2, scala e cornice non si applicano",
                 percorso.display()
             );
-        } else if let Some((l, a)) = info.mm
-            && lavorazione::fuori_limiti(&lavorazione.scala, l, a)
-        {
+        } else if info.pagine_mm.iter().flatten().copied().chain(info.mm).any(|(l, a)| {
+            lavorazione::fuori_limiti(&lavorazione.scala, l, a)
+        }) {
             bail!(
                 "{}: la scala {} supera i limiti (da 1% a 1000% della misura originale)",
                 percorso.display(),
@@ -420,4 +420,40 @@ fn riga_di_comando_snmp(args: &[String]) -> Result<()> {
         println!("{} = {v}", o.join("."));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn valida_scala_controlla_anche_le_pagine_successive() {
+        let prima = (210.0, 297.0);
+        let mut info = file::InfoFile {
+            formato: Formato::Pdf,
+            byte: 0,
+            pagine: 3,
+            mm: Some(prima),
+            risoluzione: None,
+            dettagli: String::new(),
+            formati_pagine: Vec::new(),
+            pagine_mm: vec![Some(prima), None, Some((10.0, 10.0))],
+        };
+        let lav = Lavorazione {
+            scala: Scala::Formato(lavorazione::FormatoIso::A4),
+            ..Default::default()
+        };
+        let percorso = std::path::Path::new("formati-misti.pdf");
+        assert!(valida_scala(percorso, &info, &lav).is_err());
+        // Anche con la prima pagina priva di misure, le successive vanno validate.
+        info.mm = None;
+        info.pagine_mm[0] = None;
+        assert!(valida_scala(percorso, &info, &lav).is_err());
+        info.pagine_mm[2] = Some((148.0, 210.0));
+        assert!(valida_scala(percorso, &info, &lav).is_ok());
+        // Il ripiego sulle misure della prima pagina rimane valido.
+        info.pagine_mm.clear();
+        info.mm = Some((10.0, 10.0));
+        assert!(valida_scala(percorso, &info, &lav).is_err());
+    }
 }

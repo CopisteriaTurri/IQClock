@@ -130,6 +130,8 @@ struct Documento {
     percorso: PathBuf,
     nome: String,
     info: InfoFile,
+    /// Idoneità al nesting letta all'apertura, senza riaprire i TIFF a ogni frame.
+    annidabile: bool,
     copie: u32,
     stato: StatoJob,
     /// Scala scelta per questo documento (come le copie).
@@ -325,11 +327,13 @@ impl App {
                 };
                 let imp = self.impaginazione_anteprime;
                 self.anteprime.richiedi(id, percorso.clone(), info.formato, lavorazione, imp);
+                let annidabile = lavorazione::annidabile_file(&percorso, info.formato).unwrap_or(false);
                 self.documenti.push(Documento {
                     id,
                     percorso,
                     nome,
                     info,
+                    annidabile,
                     copie: 1,
                     stato: StatoJob::Pronto,
                     lavorazione,
@@ -1141,6 +1145,7 @@ impl App {
         });
     }
 
+    /// Mostra i documenti in coda e permette di selezionarli o rimuoverli.
     fn pannello_miniature(&mut self, ui: &mut egui::Ui) {
         let mut da_togliere = None;
         let soglia = self.config.soglia_dpi;
@@ -1241,6 +1246,7 @@ impl App {
         }
     }
 
+    /// Disegna il documento selezionato sul rotolo, oppure il nesting della coda.
     fn anteprima(&mut self, ui: &mut egui::Ui) {
         let area = ui.available_rect_before_wrap();
         ui.painter().rect_filled(area, 0.0, Color32::from_gray(225));
@@ -1366,7 +1372,7 @@ impl App {
         let mut senza = 0.0;
         let mut singoli = 0;
         for d in self.documenti.iter().filter(|d| matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_))) {
-            if !lavorazione::annidabile_file(&d.percorso, d.info.formato).unwrap_or(false) {
+            if !d.annidabile {
                 singoli += 1;
                 continue;
             }
@@ -1400,6 +1406,9 @@ impl App {
             .filter(|p| !nesting::entra(p, utile, self.nesting_ruota))
             .map(|p| p.id.0)
             .collect();
+        // `senza` comprende anche questi documenti: il loro consumo singolo
+        // va contato pure con il nesting, per confrontare la stessa coda.
+        let altezza_esclusi: f64 = pezzi.iter().filter(|p| fuori.contains(&p.id.0)).map(|p| p.a).sum();
         pezzi.retain(|p| !fuori.contains(&p.id.0));
         if pezzi.is_empty() {
             ui.painter().text(
@@ -1428,10 +1437,11 @@ impl App {
         }
         let fogli = &self.cache_nesting.as_ref().unwrap().fogli;
         let documenti: HashMap<_, _> = self.documenti.iter().map(|d| (d.id, d)).collect();
-        let con: f64 = fogli.iter().map(|f| f.altezza).sum();
+        let altezza_fogli: f64 = fogli.iter().map(|f| f.altezza).sum();
+        let con = altezza_fogli + altezza_esclusi;
         let disposti: usize = fogli.iter().map(|f| f.posti.len()).sum();
         let spazio = 6.0f32;
-        let totale = con as f32 + spazio * fogli.len().saturating_sub(1) as f32;
+        let totale = altezza_fogli as f32 + spazio * fogli.len().saturating_sub(1) as f32;
         let margine_px = 30.0;
         let mut nota = format!(
             "{} pezzi, {:.2} m di carta (invece di {:.2} m senza nesting)",

@@ -211,6 +211,7 @@ struct Risorsa {
     altezza: f64,
 }
 
+/// Crea il PDF di un foglio, riutilizzando gli XObject delle pagine ripetute.
 fn componi_foglio(foglio: &Foglio, sorgenti: &[Sorgente], larghezza_mm: f64) -> Result<Vec<u8>> {
     let mut doc = Document::with_version("1.5");
     let id_pagine = doc.new_object_id();
