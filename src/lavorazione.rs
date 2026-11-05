@@ -422,11 +422,12 @@ fn applica_cornice(doc: &mut Document, cornice: &Cornice) -> Result<bool> {
         // Coordinate nello spazio utente non ruotato: con /Rotate il rettangolo
         // gira con la pagina.
         let linea =
-            format!("q 0 G {s:.4} w {rx0:.4} {ry0:.4} {larghezza:.4} {altezza:.4} re S Q\n");
-        // Stream in coda al contenuto: la linea non deve finire sotto quello che
-        // viene disegnato dopo. Il ritaglio dell'allineamento arriva dopo e
-        // abbraccia il box già allargato, quindi la linea resta dentro.
-        impagina::aggiungi_intorno_al_contenuto(doc, id, Vec::new(), linea.into_bytes())?;
+            format!("\nQ\nq 0 G {s:.4} w {rx0:.4} {ry0:.4} {larghezza:.4} {altezza:.4} re S Q\n");
+        // Conserva il ritaglio visibile prima di allargare i box, così la grafica
+        // nascosta non invade lo spazio bianco. Ripristina poi lo stato iniziale:
+        // matrice, clip e tratteggio lasciati dal contenuto non toccano la cornice.
+        let ritaglio = format!("q {x0:.4} {y0:.4} {:.4} {:.4} re W n\n", x1 - x0, y1 - y0);
+        impagina::aggiungi_intorno_al_contenuto(doc, id, ritaglio.into_bytes(), linea.into_bytes())?;
         let riquadro: Vec<Object> = [x0 - d, y0 - d, x1 + d, y1 + d]
             .iter()
             .map(|&v| Object::Real(v as f32))
@@ -1483,6 +1484,86 @@ mod test {
         assert!(testo.contains("re f"), "contenuto originale: {testo}");
         assert!(testo.contains("0 G"), "linea nera: {testo}");
         assert!(testo.trim_end().ends_with("re S Q"), "linea in coda: {testo}");
+    }
+
+    #[test]
+    fn cornice_isola_lo_stato_grafico_del_contenuto() {
+        let dati = impagina::test::pdf(200.0, 300.0, (10.0, 20.0), 90);
+        let (mut doc, id) = pagina(&dati);
+        // Stato finale valido, ma diverso da quello iniziale: trasformazione,
+        // clip e tratteggio. Distribuito su più stream senza q/Q esterni.
+        let originali = [
+            b"2 0 0 2 50 60 cm\n".to_vec(),
+            b"0 0 10 10 re W n [3 2] 1 d".to_vec(),
+        ];
+        let contenuti: Vec<Object> = originali
+            .iter()
+            .map(|contenuto| {
+                doc.add_object(Stream::new(Dictionary::new(), contenuto.clone()))
+                    .into()
+            })
+            .collect();
+        doc.get_dictionary_mut(id).unwrap().set("Contents", contenuti);
+        applica_cornice(&mut doc, &Cornice::default()).unwrap();
+        let contenuto = lopdf::content::Content::decode(&doc.get_page_content(id)).unwrap();
+        let mut profondita = 0;
+        let mut modifiche = 0;
+        for op in contenuto.operations {
+            match op.operator.as_str() {
+                "q" => profondita += 1,
+                "Q" => profondita -= 1,
+                "cm" | "d" => {
+                    // Le modifiche originali devono essere protette da un save.
+                    assert_eq!(profondita, 1);
+                    modifiche += 1;
+                }
+                "S" => {
+                    // Il save della cornice deve partire dallo stato iniziale,
+                    // dopo che il restore ha chiuso quello del contenuto.
+                    assert_eq!(profondita, 1);
+                    assert_eq!(modifiche, 2);
+                }
+                _ => {}
+            }
+            assert!(profondita >= 0);
+        }
+        assert_eq!(profondita, 0);
+    }
+
+    #[test]
+    fn cornice_conserva_il_clip_visibile_prima_di_allargare_i_box() {
+        for crop in [None, Some(vec![20.into(), 30.into(), 190.into(), 280.into()])] {
+            let dati = impagina::test::pdf(200.0, 300.0, (10.0, 20.0), 0);
+            let (mut doc, id) = pagina(&dati);
+            if let Some(crop) = crop {
+                doc.get_dictionary_mut(id).unwrap().set("CropBox", crop);
+            }
+            let ([x0, y0, x1, y1], _) = file::box_e_rotazione(&doc, id).unwrap();
+            // Grafica che copre anche l'area esterna al MediaBox/CropBox.
+            let originale = doc.add_object(Stream::new(
+                Dictionary::new(),
+                b"-100 -100 1000 1000 re f".to_vec(),
+            ));
+            doc.get_dictionary_mut(id).unwrap().set("Contents", originale);
+            applica_cornice(&mut doc, &Cornice::default()).unwrap();
+            let contenuto = lopdf::content::Content::decode(&doc.get_page_content(id)).unwrap();
+            let ops = &contenuto.operations;
+            // Il clip usa il vecchio box nello spazio pagina, prima della grafica.
+            assert_eq!(ops[0].operator, "q");
+            assert_eq!(ops[1].operator, "re");
+            let rettangolo: Vec<f64> = ops[1].operands.iter()
+                .map(|v| f64::from(v.as_float().unwrap()))
+                .collect();
+            assert_eq!(rettangolo, [x0, y0, x1 - x0, y1 - y0]);
+            assert_eq!(ops[2].operator, "W");
+            assert_eq!(ops[3].operator, "n");
+            assert_eq!(ops[4].operator, "re");
+            assert_eq!(ops[5].operator, "f");
+            // La cornice è fuori dal clip originale.
+            assert_eq!(ops[6].operator, "Q");
+            assert_eq!(ops[7].operator, "q");
+            assert!(ops[8..].iter().any(|op| op.operator == "S"));
+        }
     }
 
     #[test]
