@@ -24,17 +24,18 @@ use anyhow::{Context, Result, bail};
 
 use config::Config;
 use impagina::{Allineamento, Impaginazione};
-use lavorazione::{Lavorazione, Scala};
+use lavorazione::{Cornice, Lavorazione, Scala};
 use pjl::{OpzioniJob, Sorgente};
 
 const USO: &str = "\
 Senza argomenti (o con dei file) apre l'interfaccia. Da riga di comando:
   iqclock stampa FILE... [--host IP] [--copie N] [--rotolo 1|2|auto] [--grigi] [--prn OUT]
                  [--allinea sinistra|centro|destra] [--larghezza-rotolo MM] [--margine MM]
-                 [--scala A3|50%|500x700|500x700!]
+                 [--scala A3|50%|500x700|500x700!] [--cornice]
       Con --allinea centro/destra la larghezza del rotolo si legge dalla stampante (SNMP);
       --larghezza-rotolo la indica a mano.
       --scala 500x700 tiene le proporzioni, 500x700! deforma.
+      --cornice aggiunge la linea di taglio (distanza e spessore dalla configurazione).
   iqclock stato [--host IP]
   iqclock snmp OID [--host IP]      (diagnostica: elenca le voci sotto OID)";
 
@@ -52,6 +53,8 @@ fn main() -> Result<()> {
     }
 }
 
+/// Avvia la finestra con le dimensioni configurate e i file iniziali;
+/// propaga gli errori di avvio dell’interfaccia.
 fn avvia_gui(file: Vec<PathBuf>) -> Result<()> {
     let config = Config::carica();
     #[cfg(target_os = "linux")]
@@ -60,7 +63,12 @@ fn avvia_gui(file: Vec<PathBuf>) -> Result<()> {
     }
     let mut finestra = eframe::egui::ViewportBuilder::default()
         .with_title("IQClock")
-        .with_inner_size([1200.0, 760.0])
+        // Alta abbastanza da mostrare tutte le sezioni del pannello; da
+        // configurazione si può cambiare.
+        .with_inner_size([
+            config.finestra_larghezza_px as f32,
+            config.finestra_altezza_px as f32,
+        ])
         .with_min_inner_size([800.0, 500.0])
         .with_drag_and_drop(true)
         // Su Wayland l'icona non passa dalla finestra: il desktop cerca il file
@@ -107,6 +115,9 @@ fn prendi_flag(args: &mut Vec<String>, nome: &str) -> bool {
     args.len() != c
 }
 
+/// Legge opzioni e file della CLI, applica scala, cornice e allineamento,
+/// poi invia i job alla stampante o li salva con --prn.
+/// Restituisce un errore per argomenti non validi o preparazione/invio falliti.
 fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
     let mut args = args.to_vec();
     let mut config = Config::carica();
@@ -132,13 +143,16 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
         prendi(&mut args, "--larghezza-rotolo")?.map(|m| m.parse()).transpose().context("--larghezza-rotolo")?;
     let margine_mm =
         prendi(&mut args, "--margine")?.map(|m| m.parse()).transpose().context("--margine")?.unwrap_or(config.margine_mm);
-    let lavorazione = match prendi(&mut args, "--scala")? {
-        None => Lavorazione::default(),
-        Some(t) => Lavorazione {
-            scala: Scala::da_testo(&t)
-                .with_context(|| format!("--scala vuole A0..A4, 50% o 500x700 (non {t})"))?,
-        },
+    let scala = match prendi(&mut args, "--scala")? {
+        None => Scala::Originale,
+        Some(t) => Scala::da_testo(&t)
+            .with_context(|| format!("--scala vuole A0..A4, 50% o 500x700 (non {t})"))?,
     };
+    let cornice = prendi_flag(&mut args, "--cornice").then_some(Cornice {
+        distanza_mm: config.cornice_distanza_mm,
+        spessore_mm: config.cornice_spessore_mm,
+    });
+    let lavorazione = Lavorazione { scala, cornice };
     if args.is_empty() {
         bail!("nessun file da stampare\n{USO}");
     }
@@ -165,7 +179,10 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
         let info = file::analizza(&f).with_context(|| f.display().to_string())?;
         if !lavorazione.nulla() {
             if !lavorazione::lavorabile(info.formato) {
-                eprintln!("attenzione: {} è PostScript/HP-GL/2, la scala non si applica", f.display());
+                eprintln!(
+                    "attenzione: {} è PostScript/HP-GL/2, scala e cornice non si applicano",
+                    f.display()
+                );
             } else if let Some((l, a)) = info.mm
                 && lavorazione::fuori_limiti(&lavorazione.scala, l, a)
             {

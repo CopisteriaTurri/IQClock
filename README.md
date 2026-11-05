@@ -27,13 +27,18 @@ dei rispettivi proprietari e qui compaiono solo per indicare la compatibilità. 
   iqclock stampa tavola.pdf --scala 50%          # metà misura
   iqclock stampa tavola.pdf --scala 500x700      # 500 × 700 mm, proporzioni intatte
   iqclock stampa tavola.pdf --scala 500x700!     # 500 × 700 mm, deformando
+  iqclock stampa logo.png --cornice              # con la cornice di taglio attorno
   iqclock stato                                  # stato, inchiostri, carta
   iqclock snmp 1.3.6.1.2.1.43                    # diagnostica SNMP
   ```
 
-Le impostazioni (IP, porta, larghezza rotolo, margine, soglia dei DPI) stanno in
-`%APPDATA%\iqclock\config.txt`. Di default: `192.168.10.72:9100`, rotolo 36", margine
-5 mm, avviso sotto 200 dpi.
+Le impostazioni (IP, porta, larghezza rotolo, margine, soglia dei DPI, distanza e
+spessore della cornice) stanno in `%APPDATA%\iqclock\config.txt`. Di default:
+`192.168.10.72:9100`, rotolo 36", margine 5 mm, avviso sotto 200 dpi, cornice 3 mm
+di distanza e 0,25 mm di spessore, finestra 1200 × 1000 px. La finestra si apre
+abbastanza alta da mostrare tutte le sezioni del pannello; con
+`finestra_larghezza_px` e `finestra_altezza_px` si cambia (800–4000 × 500–4000,
+fuori da lì vale il default).
 
 Per i PDF la lista mostra quante pagine ci sono per formato (es. `A4: 9  |  A3: 2  |
 320 × 450 mm: 1`): i formati ISO A per nome, gli altri con le misure al mm, senza
@@ -98,6 +103,27 @@ solo per il documento selezionato, come le copie.
 La GUI mostra sotto la scala le misure finali della prima pagina (es. `Esce: 420 × 594
 mm (A2)`); l'anteprima e gli avvisi sul rotolo usano le stesse misure scalate. In
 miniatura la didascalia aggiunge `→ A3` o `→ 50 %` quando la scala non è l'originale.
+
+## Cornice di taglio
+
+Con **Cornice di taglio** (sezione FINITURA, vale per tutti i documenti) IQClock
+aggiunge una linea continua nera **fuori** dal contenuto: il disegno resta della
+sua misura e il foglio cresce di `distanza + spessore` per lato, così il bordo
+esterno della linea cade sul bordo del foglio. Distanza (default 3 mm) e spessore
+(0,25 mm) si scelgono accanto al toggle. Un A4 con cornice 3 + 0,25 esce
+216,5 × 303,5 mm.
+
+La linea fa parte del pezzo: l'allineamento sul rotolo la conta nelle misure (la
+pagina si allarga solo per il resto) e un futuro nesting la lascerà attorno a ogni
+pezzo. La taglierina della stampante taglia comunque a fine pagina.
+
+- **PDF**: un rettangolo vettoriale in più (`re S`); il contenuto non viene toccato.
+- **JPEG, TIFF, PNG**: il file viene ricomposto in TIFF RGB, con la linea disegnata
+  mentre si scrive (un JPEG o TIFF CMYK o a 16 bit passa dal decodificatore).
+- **PostScript, HP-GL/2**: partono come sono.
+
+Da riga di comando `--cornice` la attiva con distanza e spessore della
+configurazione.
 
 ## Risoluzione effettiva (DPI)
 

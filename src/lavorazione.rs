@@ -7,8 +7,14 @@
 //! partono nel loro formato, con i soli campi della risoluzione riscritti (vedi
 //! `risoluzione.rs`). PostScript e HP-GL/2 partono sempre come sono.
 //!
-//! L'ordine dei passi è quello comune a tutte le issue: prima la scala, poi
-//! l'allineamento (qui rifattorizzato in `impagina::applica_pdf`).
+//! Poi la cornice di taglio (#9): una linea continua attorno al contenuto, per
+//! cui la pagina cresce di `distanza + spessore` per lato. Sui PDF è un
+//! rettangolo vettoriale in più, sulle immagini un bordo disegnato mentre si
+//! scrive il TIFF (così non serve una copia in più in memoria).
+//!
+//! L'ordine dei passi è quello comune a tutte le issue: prima la scala, poi la
+//! cornice, poi l'allineamento (qui rifattorizzato in `impagina::applica_pdf`):
+//! così l'allineamento misura il pezzo con la sua cornice.
 
 use std::path::Path;
 
@@ -166,15 +172,45 @@ impl Scala {
     }
 }
 
+/// Cornice di taglio attorno al contenuto: una linea continua **fuori** dal
+/// contenuto, a `distanza_mm` da esso, spessa `spessore_mm`. Il contenuto resta
+/// della sua misura e la pagina cresce di `2 × (distanza + spessore)` per lato,
+/// così il bordo esterno della linea coincide con il bordo del foglio.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Cornice {
+    pub distanza_mm: f64,
+    pub spessore_mm: f64,
+}
+
+impl Default for Cornice {
+    /// Cornice iniziale: distanza di 3 mm e spessore di 0,25 mm.
+    fn default() -> Self {
+        Self { distanza_mm: 3.0, spessore_mm: 0.25 }
+    }
+}
+
+impl Cornice {
+    /// Spazio che la cornice aggiunge al pezzo, per lato (mm).
+    pub fn ingombro_mm(&self) -> f64 {
+        (self.distanza_mm + self.spessore_mm).max(0.0)
+    }
+}
+
 /// Trasformazioni scelte per un documento.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Lavorazione {
     pub scala: Scala,
+    /// Cornice di taglio attorno al contenuto (la accende il toggle di FINITURA
+    /// nella GUI): viaggia per documento, così impaginazione e nesting la
+    /// trattano come parte del pezzo.
+    pub cornice: Option<Cornice>,
 }
 
 impl Lavorazione {
+    /// Indica se scala e cornice permettono di inviare il documento originale
+    /// senza applicare una lavorazione.
     pub fn nulla(&self) -> bool {
-        self.scala.originale()
+        self.scala.originale() && self.cornice.is_none()
     }
 }
 
@@ -335,6 +371,9 @@ pub fn componi_pdf(
         .map(|id| scala_pagina(&doc, id, &lav.scala).map_or((1.0, 1.0), |p| p.fattori))
         .collect();
     let mut cambiato = applica_scala(&mut doc, lav)?;
+    if let Some(cornice) = &lav.cornice {
+        cambiato |= applica_cornice(&mut doc, cornice)?;
+    }
     let posizioni = match imp {
         Some(imp) => {
             let (cambiate, posizioni) = impagina::applica_pdf(&mut doc, imp)?;
@@ -356,6 +395,8 @@ pub fn componi_pdf(
     }))
 }
 
+/// Applica la scala richiesta alle pagine modificabili del PDF; restituisce
+/// true se almeno una pagina cambia.
 fn applica_scala(doc: &mut Document, lav: &Lavorazione) -> Result<bool> {
     if lav.scala.originale() {
         return Ok(false);
@@ -363,6 +404,50 @@ fn applica_scala(doc: &mut Document, lav: &Lavorazione) -> Result<bool> {
     let mut cambiato = false;
     for id in doc.get_pages().into_values().collect::<Vec<_>>() {
         cambiato |= applica_scala_pagina(doc, id, &lav.scala)?;
+    }
+    Ok(cambiato)
+}
+
+/// Cornice su ogni pagina: allarga il box di `distanza + spessore` per lato e
+/// disegna la linea nera sul bordo esterno. Va prima dell'allineamento, così
+/// `posiziona` riceve le misure con la cornice (la cornice fa parte del pezzo).
+/// Distanza e spessore sono convertiti nelle unità della singola pagina:
+/// `/UserUnit` moltiplica la misura fisica dell'unità utente (default 1).
+fn applica_cornice(doc: &mut Document, cornice: &Cornice) -> Result<bool> {
+    let mut cambiato = false;
+    for id in doc.get_pages().into_values().collect::<Vec<_>>() {
+        let Some(([x0, y0, x1, y1], _)) = file::box_e_rotazione(doc, id) else {
+            continue;
+        };
+        let unita = file::unita_utente(doc, id);
+        let d = cornice.ingombro_mm() * MM_PT / unita;
+        let s = cornice.spessore_mm.max(0.0) * MM_PT / unita;
+        // Il rettangolo sta a metà dello spessore dentro il bordo della pagina:
+        // il lato esterno della linea cade sul bordo del foglio (e quello
+        // interno a `distanza` dal contenuto).
+        let (rx0, ry0) = (x0 - d + s / 2.0, y0 - d + s / 2.0);
+        let (larghezza, altezza) = (x1 - x0 + 2.0 * (d - s / 2.0), y1 - y0 + 2.0 * (d - s / 2.0));
+        // Coordinate nello spazio utente non ruotato: con /Rotate il rettangolo
+        // gira con la pagina.
+        let linea =
+            format!("\nQ\nq 0 G {s:.4} w {rx0:.4} {ry0:.4} {larghezza:.4} {altezza:.4} re S Q\n");
+        // Conserva il ritaglio visibile prima di allargare i box, così la grafica
+        // nascosta non invade lo spazio bianco. Ripristina poi lo stato iniziale:
+        // matrice, clip e tratteggio lasciati dal contenuto non toccano la cornice.
+        let ritaglio = format!("q {x0:.4} {y0:.4} {:.4} {:.4} re W n\n", x1 - x0, y1 - y0);
+        impagina::aggiungi_intorno_al_contenuto(doc, id, ritaglio.into_bytes(), linea.into_bytes())?;
+        let riquadro: Vec<Object> = [x0 - d, y0 - d, x1 + d, y1 + d]
+            .iter()
+            .map(|&v| Object::Real(v as f32))
+            .collect();
+        let pagina = doc.get_dictionary_mut(id)?;
+        pagina.set("MediaBox", riquadro.clone());
+        // Il CropBox è ereditabile: va riscritto, non solo tolto.
+        pagina.set("CropBox", riquadro);
+        for chiave in [&b"BleedBox"[..], b"TrimBox", b"ArtBox"] {
+            pagina.remove(chiave);
+        }
+        cambiato = true;
     }
     Ok(cambiato)
 }
@@ -599,27 +684,55 @@ fn prepara_immagine(
     let (sx, sy) = fattori(&lav.scala, larghezza, altezza);
     let scala = (sx - 1.0).abs() > 1e-9 || (sy - 1.0).abs() > 1e-9;
     let dpi_scalati = (dpi.0 / sx, dpi.1 / sy);
-    let impagina = imp.is_some_and(|imp| imp.posiziona(larghezza * sx, altezza * sy).is_some());
-    if !scala && !impagina {
+    let cornice = lav.cornice.as_ref();
+    // La cornice fa parte del pezzo: entra nelle misure da mettere sul rotolo.
+    let ingombro = cornice.map_or(0.0, |c| 2.0 * c.ingombro_mm());
+    let impagina = imp.is_some_and(|imp| {
+        imp.posiziona(larghezza * sx + ingombro, altezza * sy + ingombro)
+            .is_some()
+    });
+    if !scala && !impagina && cornice.is_none() {
         return Ok(None);
     }
     // Solo scala su JPEG e TIFF: si correggono i DPI dichiarati, senza
     // decodificare (CMYK, grigi, 16 bit e profili ICC non si toccano). Se la
     // struttura non si sa riscrivere si ripiega sulla decodifica, come prima.
+    // La cornice è una linea in più: lì il file va ricomposto comunque.
     if scala
         && !impagina
+        && cornice.is_none()
         && matches!(formato, Formato::Jpeg | Formato::Tiff)
         && let Some(tmp) = risoluzione::con_dpi(percorso, formato, dpi_scalati)?
     {
         return Ok(Some((tmp, formato)));
     }
 
+    // La ricomposizione raster gestisce una sola pagina: rifiuta i TIFF
+    // multipagina prima di decodificare o produrre un file incompleto.
+    // Il percorso dei soli DPI qui sopra conserva invece tutte le pagine.
+    if formato == Formato::Tiff {
+        let lettore = tiff::decoder::Decoder::new(std::io::BufReader::new(
+            std::fs::File::open(percorso).context("apertura del TIFF")?,
+        ))
+        .context("lettura delle pagine del TIFF")?;
+        if lettore.more_images() {
+            bail!("TIFF multipagina: cornice e ricomposizione raster non supportate; nessuna pagina elaborata");
+        }
+    }
+
     let immagine = png::su_bianco(png::decodifica(percorso)?);
     if impagina {
         let imp = imp.expect("impagina implica un'impaginazione");
-        let Ok(composto) = impagina::componi_raster(immagine, dpi_scalati, imp) else {
+        let Ok(composto) = impagina::componi_raster(immagine, dpi_scalati, imp, cornice) else {
             return Ok(None);
         };
+        return Ok(Some((composto.scrivi_tiff()?, Formato::Tiff)));
+    }
+
+    // Cornice senza allineamento: il pezzo esce della sua misura, con la linea
+    // disegnata riga per riga mentre si scrive il TIFF.
+    if let Some(cornice) = cornice {
+        let composto = impagina::RasterComposto::con_cornice(immagine, dpi_scalati, cornice);
         return Ok(Some((composto.scrivi_tiff()?, Formato::Tiff)));
     }
 
@@ -864,6 +977,8 @@ mod test {
             .collect()
     }
 
+    /// Verifica che il passaggio da A4 ad A5 scali insieme box, grafica
+    /// e coordinate delle annotazioni.
     #[test]
     fn pdf_a4_verso_a5_scala_box_contenuto_e_annotazioni() {
         let dati = pdf_a4_con_annotazione();
@@ -875,6 +990,7 @@ mod test {
                     altezza_mm: 210.0,
                     proporzioni: true,
                 },
+                ..Default::default()
             },
             None,
         )
@@ -916,6 +1032,8 @@ mod test {
         assert!((numero_o(&quad[1]).unwrap() - 70.0 * s).abs() < 0.01, "{quad:?}");
     }
 
+    /// Verifica che le annotazioni Ink seguano la traslazione dell’origine
+    /// e la scala del contenuto, compresi i tracciati annidati.
     #[test]
     fn annotazioni_con_origine_spostata_seguono_il_contenuto() {
         // Pagina con MediaBox che parte da (50, 30); l'annotazione sta sul
@@ -946,6 +1064,7 @@ mod test {
                     x: 200.0,
                     y: 200.0,
                 },
+                ..Default::default()
             },
             None,
         )
@@ -966,6 +1085,8 @@ mod test {
         assert_eq!(numeri(&ink[1]), [100.0, 20.0]);
     }
 
+    /// Verifica che la scala riporti a zero l’origine del box e trasli
+    /// il contenuto della stessa quantità.
     #[test]
     fn pdf_con_origine_spostata_riporta_il_contenuto_a_zero() {
         let (l, a) = (210.0 * MM_PT, 297.0 * MM_PT);
@@ -977,6 +1098,7 @@ mod test {
                     x: 50.0,
                     y: 50.0,
                 },
+                ..Default::default()
             },
             None,
         )
@@ -989,6 +1111,8 @@ mod test {
         assert!((m[4] + 25.0).abs() < 1e-4 && (m[5] + 15.0).abs() < 1e-4, "{m:?}");
     }
 
+    /// Verifica che su una pagina ruotata di 90 gradi i fattori visivi di scala
+    /// siano scambiati nello spazio utente del PDF.
     #[test]
     fn pdf_con_rotate_90_scambia_i_fattori() {
         // Pagina 210 × 297 con /Rotate 90: appare 297 × 210. Al 50% × 25% i
@@ -1003,6 +1127,7 @@ mod test {
             &dati,
             &Lavorazione {
                 scala: Scala::Percentuale { x: 50.0, y: 25.0 },
+                ..Default::default()
             },
             None,
         )
@@ -1018,6 +1143,8 @@ mod test {
         assert!((m[0] - 0.25).abs() < 1e-5 && (m[3] - 0.5).abs() < 1e-5, "{m:?}");
     }
 
+    /// Verifica che il Form XObject usato per la scala conservi le risorse
+    /// della pagina originale.
     #[test]
     fn le_risorse_della_pagina_seguono_il_contenuto_nel_form() {
         // Gradienti e motivi vivono nelle risorse: devono stare nel form, che li scala.
@@ -1030,7 +1157,7 @@ mod test {
         doc.save_to(&mut dati).unwrap();
         let composto = componi_pdf(
             &dati,
-            &Lavorazione { scala: Scala::Percentuale { x: 50.0, y: 50.0 } },
+            &Lavorazione { scala: Scala::Percentuale { x: 50.0, y: 50.0 }, ..Default::default() },
             None,
         )
         .unwrap()
@@ -1040,6 +1167,7 @@ mod test {
         assert!(form.dict.get(b"Resources").unwrap().as_dict().unwrap().has(b"Pattern"));
     }
 
+    /// Verifica che la scala usi il CropBox visibile anziché l’intero MediaBox.
     #[test]
     fn il_cropbox_decide_la_pagina_visibile() {
         // MediaBox con abbondanza, CropBox A4: la scala parte dall'A4 e il
@@ -1054,7 +1182,7 @@ mod test {
         doc.save_to(&mut dati).unwrap();
         let composto = componi_pdf(
             &dati,
-            &Lavorazione { scala: Scala::Percentuale { x: 50.0, y: 50.0 } },
+            &Lavorazione { scala: Scala::Percentuale { x: 50.0, y: 50.0 }, ..Default::default() },
             None,
         )
         .unwrap()
@@ -1064,9 +1192,11 @@ mod test {
         assert!((x1 - l * 0.5).abs() < 0.01 && (y1 - a * 0.5).abs() < 0.01, "{x1} {y1}");
     }
 
+    /// Verifica che una scala del 100% lasci passare anche un PDF illeggibile
+    /// quando non sono richieste altre lavorazioni.
     #[test]
     fn cento_percento_e_come_l_originale() {
-        let lav = Lavorazione { scala: Scala::Percentuale { x: 100.0, y: 100.0 } };
+        let lav = Lavorazione { scala: Scala::Percentuale { x: 100.0, y: 100.0 }, ..Default::default() };
         assert!(lav.nulla());
         // Un PDF illeggibile non fallisce se la scala non cambia niente.
         assert!(componi_pdf(b"non e un pdf", &lav, None).unwrap().is_none());
@@ -1082,6 +1212,8 @@ mod test {
         assert!((min_l - 2.1).abs() < 1e-9 && (max_l - 2100.0).abs() < 1e-9 && (max_a - 2970.0).abs() < 1e-9);
     }
 
+    /// Verifica che una pagina senza MediaBox sia saltata senza errori
+    /// e senza produrre un PDF composto.
     #[test]
     fn pdf_pagina_senza_box_resta_come_e() {
         // Un PDF senza MediaBox non deve rompere la scala.
@@ -1104,7 +1236,8 @@ mod test {
             componi_pdf(
                 &dati,
                 &Lavorazione {
-                    scala: Scala::Formato(FormatoIso::A4)
+                    scala: Scala::Formato(FormatoIso::A4),
+                    ..Default::default()
                 },
                 None
             )
@@ -1132,6 +1265,98 @@ mod test {
         p
     }
 
+    /// TIFF RGB con pagine distinguibili, tutte a 100 dpi.
+    fn tiff_100dpi(dir: &Path, pagine: usize) -> PathBuf {
+        use tiff::encoder::{Rational, TiffEncoder, colortype};
+
+        let p = dir.join("foto.tiff");
+        let mut encoder = TiffEncoder::new(std::fs::File::create(&p).unwrap()).unwrap();
+        for pagina in 0..pagine {
+            let mut img = encoder.new_image::<colortype::RGB8>(100, 50).unwrap();
+            img.resolution(tiff::tags::ResolutionUnit::Inch, Rational { n: 100, d: 1 });
+            img.write_data(&vec![20 + pagina as u8; 100 * 50 * 3]).unwrap();
+        }
+        p
+    }
+
+    #[test]
+    fn tiff_multipagina_rifiutato_prima_della_ricomposizione() {
+        let dir = cartella("multipagina-cornice");
+        let p = tiff_100dpi(&dir, 2);
+        let originale = std::fs::read(&p).unwrap();
+        let imp = Impaginazione {
+            allineamento: impagina::Allineamento::Centro,
+            rotolo_mm: 100.0,
+            margine_mm: 5.0,
+        };
+        for cornice in [None, Some(Cornice::default())] {
+            for scala in [Scala::Originale, Scala::Percentuale { x: 200.0, y: 200.0 }] {
+                for allineamento in [None, Some(&imp)] {
+                    if cornice.is_none() && allineamento.is_none() {
+                        continue;
+                    }
+                    let lav = Lavorazione { scala, cornice };
+                    let errore = prepara(&p, Formato::Tiff, &lav, allineamento)
+                        .err().expect("non deve produrre un TIFF con una sola pagina");
+                    assert!(errore.to_string().contains("TIFF multipagina"), "{errore:#}");
+                }
+            }
+        }
+        assert_eq!(std::fs::read(&p).unwrap(), originale);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tiff_multipagina_originale_e_sola_scala_conservano_le_pagine() {
+        let dir = cartella("multipagina-scala");
+        let p = tiff_100dpi(&dir, 2);
+        assert!(prepara(&p, Formato::Tiff, &Lavorazione::default(), None).unwrap().is_none());
+        let lav = Lavorazione {
+            scala: Scala::Percentuale { x: 200.0, y: 200.0 },
+            ..Default::default()
+        };
+        let (tmp, formato) = prepara(&p, Formato::Tiff, &lav, None).unwrap().unwrap();
+        assert_eq!(formato, Formato::Tiff);
+        let mut lettore = Decoder::new(std::fs::File::open(tmp.percorso()).unwrap()).unwrap();
+        for pagina in 0..2 {
+            assert_eq!(lettore.dimensions().unwrap(), (100, 50));
+            for tag in [Tag::XResolution, Tag::YResolution] {
+                match lettore.get_tag(tag).unwrap() {
+                    Value::Rational(n, d) => assert_eq!(n as f64 / d as f64, 50.0),
+                    valore => panic!("risoluzione non razionale: {valore:?}"),
+                }
+            }
+            match lettore.read_image().unwrap() {
+                tiff::decoder::DecodingResult::U8(pixel) => {
+                    assert_eq!(pixel, vec![20 + pagina; 100 * 50 * 3]);
+                }
+                _ => panic!("pixel inattesi"),
+            }
+            assert_eq!(lettore.more_images(), pagina == 0);
+            if lettore.more_images() {
+                lettore.next_image().unwrap();
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tiff_singola_pagina_con_cornice_conserva_contenuto_e_dpi() {
+        let dir = cartella("tiff-cornice");
+        let p = tiff_100dpi(&dir, 1);
+        let lav = Lavorazione { cornice: Some(Cornice::default()), ..Default::default() };
+        let (tmp, formato) = prepara(&p, Formato::Tiff, &lav, None).unwrap().unwrap();
+        assert_eq!(formato, Formato::Tiff);
+        let letta = image::open(tmp.percorso()).unwrap().to_rgb8();
+        assert_eq!(letta.dimensions(), (126, 76));
+        assert_eq!(letta.get_pixel(0, 0).0, [0, 0, 0]);
+        assert_eq!(letta.get_pixel(12, 30).0, [255, 255, 255]);
+        assert_eq!(letta.get_pixel(23, 23).0, [20, 20, 20]);
+        assert_eq!(dpi_tiff(tmp.percorso()), (100.0, 100.0));
+        assert!(!Decoder::new(std::fs::File::open(tmp.percorso()).unwrap()).unwrap().more_images());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     fn dpi_tiff(percorso: &Path) -> (f64, f64) {
         let mut d = Decoder::new(std::fs::File::open(percorso).unwrap()).unwrap();
         let razionale = |v: Value| match v {
@@ -1144,12 +1369,15 @@ mod test {
         )
     }
 
+    /// Verifica che l’ingrandimento di un PNG cambi i DPI del TIFF prodotto
+    /// senza ricampionare i pixel.
     #[test]
     fn immagine_al_200_percento_dimezza_i_dpi_e_tiene_i_pixel() {
         let dir = cartella("dpi");
         let p = png_100dpi(&dir);
         let lav = Lavorazione {
             scala: Scala::Percentuale { x: 200.0, y: 200.0 },
+            ..Default::default()
         };
         let (tiff, formato) = prepara(&p, Formato::Png, &lav, None).unwrap().unwrap();
         assert_eq!(formato, Formato::Tiff);
@@ -1173,6 +1401,8 @@ mod test {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Verifica che il centraggio sul rotolo usi l’ingombro fisico successivo
+    /// alla scala e mantenga i nuovi DPI.
     #[test]
     fn scala_e_allineamento_centrato_usano_le_misure_scalate() {
         // 100 × 50 px a 100 dpi, al 200%: 50,8 × 25,4 mm a 50 dpi. Rotolo da
@@ -1181,6 +1411,7 @@ mod test {
         let p = png_100dpi(&dir);
         let lav = Lavorazione {
             scala: Scala::Percentuale { x: 200.0, y: 200.0 },
+            ..Default::default()
         };
         let imp = Impaginazione {
             allineamento: impagina::Allineamento::Centro,
@@ -1219,6 +1450,8 @@ mod test {
         assert!(scala_pagina(&doc, id, &Scala::Formato(FormatoIso::A4)).is_none());
     }
 
+    /// Verifica che la sola scala di un JPEG aggiorni i DPI nei metadati
+    /// senza ricomporre il file come TIFF.
     #[test]
     fn jpeg_al_200_percento_resta_jpeg_con_meta_dpi() {
         let dir = cartella("jpeg-scala");
@@ -1228,6 +1461,7 @@ mod test {
             .unwrap();
         let lav = Lavorazione {
             scala: Scala::Percentuale { x: 200.0, y: 200.0 },
+            ..Default::default()
         };
         let (tmp, formato) = prepara(&p, Formato::Jpeg, &lav, None).unwrap().unwrap();
         // Non passa più da un TIFF RGB: resta un JPEG con i DPI dimezzati.
@@ -1241,6 +1475,8 @@ mod test {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Verifica che la sola scala di un TIFF CMYK conservi canali e pixel
+    /// aggiornando soltanto la risoluzione.
     #[test]
     fn tiff_cmyk_con_sola_scala_resta_cmyk() {
         use tiff::decoder::{DecodingResult, Decoder as Lettore};
@@ -1258,6 +1494,7 @@ mod test {
         }
         let lav = Lavorazione {
             scala: Scala::Percentuale { x: 200.0, y: 200.0 },
+            ..Default::default()
         };
         let (tmp, formato) = prepara(&p, Formato::Tiff, &lav, None).unwrap().unwrap();
         assert_eq!(formato, Formato::Tiff);
@@ -1331,6 +1568,8 @@ mod test {
         out
     }
 
+    /// Verifica il rifiuto della scala quando la cifratura impedisce di leggere
+    /// le pagine e stabilire quali richiedono modifiche.
     #[test]
     fn pdf_cifrato_senza_password_resta_da_originale() {
         // lopdf, senza la password, si ferma prima di leggere il resto del
@@ -1340,10 +1579,229 @@ mod test {
         let cifrato = cifra(&impagina::test::pdf(pt(210.0), pt(297.0), (0.0, 0.0), 0));
         let lav = Lavorazione {
             scala: Scala::Formato(FormatoIso::A4),
+            ..Default::default()
         };
         let Err(err) = componi_pdf(&cifrato, &lav, None) else {
             panic!("un PDF cifrato senza password non può essere composto");
         };
         assert!(err.to_string().contains("pagine non leggibili"), "{err}");
+    }
+
+    /// Box della pagina composta, in mm.
+    fn box_mm(doc: &Document, id: ObjectId) -> (f64, f64, f64, f64) {
+        let ([x0, y0, x1, y1], _) = file::box_e_rotazione(doc, id).unwrap();
+        (x0 / MM_PT, y0 / MM_PT, x1 / MM_PT, y1 / MM_PT)
+    }
+
+    /// Verifica che la cornice richieda l’elaborazione anche senza scala
+    /// e non lasci passare un PDF illeggibile.
+    #[test]
+    fn la_sola_cornice_non_e_nulla() {
+        let lav = Lavorazione { cornice: Some(Cornice::default()), ..Default::default() };
+        assert!(!lav.nulla());
+        // La cornice tocca le pagine: un PDF illeggibile non può partire com'è.
+        assert!(componi_pdf(b"non e un pdf", &lav, None).is_err());
+    }
+
+    /// Verifica l’ingombro fisico della cornice predefinita su A4 e la presenza
+    /// della linea nera dopo il contenuto originale.
+    #[test]
+    fn cornice_sul_pdf_allarga_il_box_e_disegna_la_linea() {
+        // A4 (210 × 297 mm) con cornice 3 + 0,25: il foglio cresce di 3,25 per
+        // lato, cioè 216,5 × 303,5 mm.
+        let composto = componi_pdf(
+            &pdf_a4_con_annotazione(),
+            &Lavorazione { cornice: Some(Cornice::default()), ..Default::default() },
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let (doc, id) = pagina(&composto.dati);
+        let (x0, y0, x1, y1) = box_mm(&doc, id);
+        assert!((x1 - x0 - 216.5).abs() < 0.01, "larghezza {x1} {x0}");
+        assert!((y1 - y0 - 303.5).abs() < 0.01, "altezza {y1} {y0}");
+        assert!((x0 + 3.25).abs() < 0.01 && (y0 + 3.25).abs() < 0.01, "{x0} {y0}");
+        let testo = String::from_utf8_lossy(&doc.get_page_content(id)).into_owned();
+        // Il contenuto originale è intatto e la linea arriva dopo.
+        assert!(testo.contains("re f"), "contenuto originale: {testo}");
+        assert!(testo.contains("0 G"), "linea nera: {testo}");
+        assert!(testo.trim_end().ends_with("re S Q"), "linea in coda: {testo}");
+    }
+
+    /// Verifica misure fisiche costanti su pagine con UserUnit assente, 1, 10 e 0,5.
+    #[test]
+    fn cornice_rispetta_le_unita_fisiche_di_ogni_pagina() {
+        let dati = impagina::test::pdf(200.0, 300.0, (10.0, 20.0), 0);
+        let (mut doc, primo) = pagina(&dati);
+        let modello = doc.get_dictionary(primo).unwrap().clone();
+        let padre = modello.get(b"Parent").unwrap().as_reference().unwrap();
+        let mut pagine = vec![(primo, 1.0)]; // /UserUnit assente: vale 1.
+        for unita in [1.0_f32, 10.0, 0.5] {
+            let mut pagina = modello.clone();
+            let riferimento = doc.add_object(Object::Real(unita));
+            pagina.set("UserUnit", riferimento);
+            pagine.push((doc.add_object(pagina), f64::from(unita)));
+        }
+        let kids: Vec<Object> = pagine.iter().map(|&(id, _)| id.into()).collect();
+        let padre = doc.get_dictionary_mut(padre).unwrap();
+        padre.set("Kids", kids);
+        padre.set("Count", pagine.len() as i64);
+
+        applica_cornice(&mut doc, &Cornice::default()).unwrap();
+        for (id, unita) in pagine {
+            let ([x0, y0, x1, y1], _) = file::box_e_rotazione(&doc, id).unwrap();
+            // L'ingombro fisico deve restare 3,25 mm su tutti e quattro i lati.
+            for delta in [10.0 - x0, 20.0 - y0, x1 - 210.0, y1 - 320.0] {
+                assert!((delta * unita / MM_PT - 3.25).abs() < 0.001);
+            }
+            let contenuto = lopdf::content::Content::decode(&doc.get_page_content(id)).unwrap();
+            let spessore = contenuto.operations.iter().find(|op| op.operator == "w").unwrap();
+            let spessore = f64::from(spessore.operands[0].as_float().unwrap());
+            assert!((spessore * unita / MM_PT - 0.25).abs() < 0.001);
+            let linea = contenuto.operations.iter().rev().find(|op| op.operator == "re").unwrap();
+            let x_linea = f64::from(linea.operands[0].as_float().unwrap());
+            let distanza = (10.0 - x_linea - spessore / 2.0) * unita / MM_PT;
+            assert!((distanza - 3.0).abs() < 0.001);
+        }
+    }
+
+    /// Verifica il bilanciamento dei salvataggi e ripristini dello stato grafico
+    /// quando più stream originali lasciano attivi matrice, clip e tratteggio.
+    #[test]
+    fn cornice_isola_lo_stato_grafico_del_contenuto() {
+        let dati = impagina::test::pdf(200.0, 300.0, (10.0, 20.0), 90);
+        let (mut doc, id) = pagina(&dati);
+        // Stato finale valido, ma diverso da quello iniziale: trasformazione,
+        // clip e tratteggio. Distribuito su più stream senza q/Q esterni.
+        let originali = [
+            b"2 0 0 2 50 60 cm\n".to_vec(),
+            b"0 0 10 10 re W n [3 2] 1 d".to_vec(),
+        ];
+        let contenuti: Vec<Object> = originali
+            .iter()
+            .map(|contenuto| {
+                doc.add_object(Stream::new(Dictionary::new(), contenuto.clone()))
+                    .into()
+            })
+            .collect();
+        doc.get_dictionary_mut(id).unwrap().set("Contents", contenuti);
+        applica_cornice(&mut doc, &Cornice::default()).unwrap();
+        let contenuto = lopdf::content::Content::decode(&doc.get_page_content(id)).unwrap();
+        let mut profondita = 0;
+        let mut modifiche = 0;
+        for op in contenuto.operations {
+            match op.operator.as_str() {
+                "q" => profondita += 1,
+                "Q" => profondita -= 1,
+                "cm" | "d" => {
+                    // Le modifiche originali devono essere protette da un save.
+                    assert_eq!(profondita, 1);
+                    modifiche += 1;
+                }
+                "S" => {
+                    // Il save della cornice deve partire dallo stato iniziale,
+                    // dopo che il restore ha chiuso quello del contenuto.
+                    assert_eq!(profondita, 1);
+                    assert_eq!(modifiche, 2);
+                }
+                _ => {}
+            }
+            assert!(profondita >= 0);
+        }
+        assert_eq!(profondita, 0);
+    }
+
+    /// Verifica che la grafica fuori dal box visibile resti ritagliata e che
+    /// la cornice sia disegnata dopo aver rimosso quel clip.
+    #[test]
+    fn cornice_conserva_il_clip_visibile_prima_di_allargare_i_box() {
+        for crop in [None, Some(vec![20.into(), 30.into(), 190.into(), 280.into()])] {
+            let dati = impagina::test::pdf(200.0, 300.0, (10.0, 20.0), 0);
+            let (mut doc, id) = pagina(&dati);
+            if let Some(crop) = crop {
+                doc.get_dictionary_mut(id).unwrap().set("CropBox", crop);
+            }
+            let ([x0, y0, x1, y1], _) = file::box_e_rotazione(&doc, id).unwrap();
+            // Grafica che copre anche l'area esterna al MediaBox/CropBox.
+            let originale = doc.add_object(Stream::new(
+                Dictionary::new(),
+                b"-100 -100 1000 1000 re f".to_vec(),
+            ));
+            doc.get_dictionary_mut(id).unwrap().set("Contents", originale);
+            applica_cornice(&mut doc, &Cornice::default()).unwrap();
+            let contenuto = lopdf::content::Content::decode(&doc.get_page_content(id)).unwrap();
+            let ops = &contenuto.operations;
+            // Il clip usa il vecchio box nello spazio pagina, prima della grafica.
+            assert_eq!(ops[0].operator, "q");
+            assert_eq!(ops[1].operator, "re");
+            let rettangolo: Vec<f64> = ops[1].operands.iter()
+                .map(|v| f64::from(v.as_float().unwrap()))
+                .collect();
+            assert_eq!(rettangolo, [x0, y0, x1 - x0, y1 - y0]);
+            assert_eq!(ops[2].operator, "W");
+            assert_eq!(ops[3].operator, "n");
+            assert_eq!(ops[4].operator, "re");
+            assert_eq!(ops[5].operator, "f");
+            // La cornice è fuori dal clip originale.
+            assert_eq!(ops[6].operator, "Q");
+            assert_eq!(ops[7].operator, "q");
+            assert!(ops[8..].iter().any(|op| op.operator == "S"));
+        }
+    }
+
+    /// Verifica che il centraggio sul rotolo consideri l’intero pezzo con cornice
+    /// e conservi sia la linea sia il contenuto originale.
+    #[test]
+    fn cornice_e_allineamento_contano_la_cornice_nel_pezzo() {
+        // A5 orizzontale (210 × 148) centrato su rotolo da 914: il pezzo è
+        // 216,5 × 154,5, quindi la pagina si allarga di quel che resta.
+        let (l, a) = (210.0 * MM_PT, 148.0 * MM_PT);
+        let dati = impagina::test::pdf(l, a, (0.0, 0.0), 0);
+        let imp = Impaginazione {
+            allineamento: impagina::Allineamento::Centro,
+            rotolo_mm: 914.0,
+            margine_mm: 5.0,
+        };
+        let composto = componi_pdf(
+            &dati,
+            &Lavorazione { cornice: Some(Cornice::default()), ..Default::default() },
+            Some(&imp),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(composto.posizioni[0].is_some());
+        let (doc, id) = pagina(&composto.dati);
+        let (x0, _, x1, _) = box_mm(&doc, id);
+        assert!((x1 - x0 - 904.0).abs() < 0.01, "pagina {x0} {x1}");
+        // Il pezzo (cornice compresa) resta centrato: la linea sta a 3,25 mm dai
+        // bordi del pezzo, non da quelli della pagina allargata.
+        let dx = (904.0 - 216.5) / 2.0;
+        assert!((x0 + dx + 3.25).abs() < 0.05, "bordo del pezzo a {x0}");
+        let testo = String::from_utf8_lossy(&doc.get_page_content(id)).into_owned();
+        assert!(testo.contains("re S"), "{testo}");
+        assert!(testo.contains("re f"), "{testo}");
+    }
+
+    /// Verifica dimensioni, linea esterna e distanza bianca del TIFF con cornice,
+    /// conservando i pixel del contenuto e i DPI originali.
+    #[test]
+    fn cornice_sull_immagine_allarga_i_pixel_e_disegna_il_bordo() {
+        let dir = cartella("cornice");
+        let p = png_100dpi(&dir);
+        let lav = Lavorazione { cornice: Some(Cornice::default()), ..Default::default() };
+        let (tiff, formato) = prepara(&p, Formato::Png, &lav, None).unwrap().unwrap();
+        assert_eq!(formato, Formato::Tiff);
+        let letta = image::open(tiff.percorso()).unwrap().to_rgb8();
+        // 3,25 mm a 100 dpi, 13 px per lato.
+        assert_eq!(letta.dimensions(), (100 + 2 * 13, 50 + 2 * 13));
+        assert_eq!(letta.get_pixel(0, 0).0, [0, 0, 0]);
+        assert_eq!(letta.get_pixel(100 + 2 * 13 - 1, 50 + 2 * 13 - 1).0, [0, 0, 0]);
+        // Contenuto al suo posto, con la distanza bianca attorno.
+        assert_eq!(letta.get_pixel(13 + 10, 13 + 10).0, [20, 40, 60]);
+        assert_eq!(letta.get_pixel(12, 30).0, [255, 255, 255]);
+        assert_eq!(letta.get_pixel(60, 12).0, [255, 255, 255]);
+        let (dx, dy) = dpi_tiff(tiff.percorso());
+        assert!((dx - 100.0).abs() < 0.1 && (dy - 100.0).abs() < 0.1, "{dx} {dy}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

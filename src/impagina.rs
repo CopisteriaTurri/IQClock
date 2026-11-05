@@ -17,8 +17,8 @@
 //!   tracciato di ritaglio sul riquadro originale nasconde quello che prima
 //!   cadeva fuori pagina.
 //! - JPEG, TIFF e PNG: si riscrivono in TIFF con una banda bianca fino alla
-//!   larghezza della pagina, mantenendo i DPI del file. Dei TIFF multipagina
-//!   parte solo la prima pagina.
+//!   larghezza della pagina, mantenendo i DPI del file. I TIFF multipagina
+//!   vengono rifiutati prima della ricomposizione in `lavorazione`.
 //! - PostScript e HP-GL/2 partono come sono.
 //!
 //! Con "Sinistra", o se il contenuto non entra nella larghezza utile del rotolo,
@@ -29,6 +29,7 @@ use image::RgbImage;
 use lopdf::{Dictionary, Object, Stream};
 
 use crate::file::{self, FileTemporaneo};
+use crate::lavorazione::Cornice;
 use crate::pjl::Formato;
 use crate::png;
 use crate::rotazione::{self, TOLLERANZA_MM};
@@ -144,11 +145,12 @@ pub fn componi_pdf(dati: &[u8], imp: &Impaginazione) -> Result<Option<PdfCompost
 
 /// Applica l'allineamento a un PDF già caricato: è il passo dopo la scala nella
 /// pipeline comune, così il file si carica e si salva una volta sola.
+/// Usa `/UserUnit` per misurare il pezzo in mm e riconverte larghezza della
+/// pagina e offset nelle sue unità utente prima di aggiornare i box.
 pub(crate) fn applica_pdf(
     doc: &mut lopdf::Document,
     imp: &Impaginazione,
 ) -> Result<(bool, Vec<Option<Posizione>>)> {
-    let pagina_pt = imp.larghezza_pagina_mm() * MM_PT;
     let mut posizioni = Vec::new();
     let mut cambiate = false;
     for id in doc.get_pages().into_values() {
@@ -156,7 +158,9 @@ pub(crate) fn applica_pdf(
             posizioni.push(None);
             continue;
         };
-        let (l, a) = ((x1 - x0) / MM_PT, (y1 - y0) / MM_PT);
+        let unita = file::unita_utente(doc, id);
+        let mm_unita = unita / MM_PT;
+        let (l, a) = ((x1 - x0) * mm_unita, (y1 - y0) * mm_unita);
         let (l, a) = if ruota % 180 == 90 { (a, l) } else { (l, a) };
         let Some(pos) = imp.posiziona(l, a) else {
             posizioni.push(None);
@@ -165,16 +169,17 @@ pub(crate) fn applica_pdf(
         posizioni.push(Some(pos));
         cambiate = true;
         let ruota = (ruota + if pos.ruota { 90 } else { 0 }) % 360;
-        let dx = pos.x_mm * MM_PT;
+        let dx = pos.x_mm / mm_unita;
+        let pagina_unita = imp.larghezza_pagina_mm() / mm_unita;
         // Con /Rotate la pagina viene girata in senso orario: il bordo che finisce
         // a sinistra è quello basso (90°), destro (180°) o alto (270°). Il box si
         // allarga lungo il lato che diventa orizzontale, così che a sinistra del
-        // contenuto restino `dx` punti e in tutto la pagina sia larga `pagina_pt`.
+        // contenuto restino `dx` unità e in tutto la pagina sia larga `pagina_unita`.
         let nuovo = match ruota {
-            0 => [x0 - dx, y0, x0 - dx + pagina_pt, y1],
-            90 => [x0, y0 - dx, x1, y0 - dx + pagina_pt],
-            180 => [x1 + dx - pagina_pt, y0, x1 + dx, y1],
-            _ => [x0, y1 + dx - pagina_pt, x1, y1 + dx],
+            0 => [x0 - dx, y0, x0 - dx + pagina_unita, y1],
+            90 => [x0, y0 - dx, x1, y0 - dx + pagina_unita],
+            180 => [x1 + dx - pagina_unita, y0, x1 + dx, y1],
+            _ => [x0, y1 + dx - pagina_unita, x1, y1 + dx],
         };
         let ritaglio = format!("q {x0:.4} {y0:.4} {:.4} {:.4} re W n\n", x1 - x0, y1 - y0);
         aggiungi_intorno_al_contenuto(doc, id, ritaglio.into_bytes(), b"\nQ\n".to_vec())?;
@@ -219,6 +224,35 @@ pub(crate) fn aggiungi_intorno_al_contenuto(
     Ok(())
 }
 
+/// Cornice attorno al contenuto, in pixel: distanza della linea dal contenuto e
+/// suo spessore, sui due assi (i DPI possono differire).
+#[derive(Clone, Copy)]
+struct CornicePx {
+    distanza: (u32, u32),
+    spessore: (u32, u32),
+}
+
+impl CornicePx {
+    /// Converte distanza e spessore ai DPI di ciascun asse, arrotondando
+    /// al pixel più vicino e garantendo almeno un pixel di linea.
+    fn da_mm(cornice: &Cornice, dpi: (f64, f64)) -> Self {
+        let px = |mm: f64, dpi: f64| (mm.max(0.0) / 25.4 * dpi).round() as u32;
+        Self {
+            distanza: (px(cornice.distanza_mm, dpi.0), px(cornice.distanza_mm, dpi.1)),
+            // Almeno un pixel: una linea più sottile di così non si vedrebbe.
+            spessore: (
+                px(cornice.spessore_mm, dpi.0).max(1),
+                px(cornice.spessore_mm, dpi.1).max(1),
+            ),
+        }
+    }
+
+    /// Spazio che la cornice occupa per lato (pixel).
+    fn ingombro(&self) -> (u32, u32) {
+        (self.distanza.0 + self.spessore.0, self.distanza.1 + self.spessore.1)
+    }
+}
+
 /// Immagine impaginata: il contenuto (già ruotato se serve) e dove sta sul
 /// rotolo. Le bande bianche si generano solo mentre si scrive.
 pub struct RasterComposto {
@@ -227,35 +261,91 @@ pub struct RasterComposto {
     pub larghezza_px: u32,
     pub x_px: u32,
     pub ruotata: bool,
+    /// Cornice attorno al contenuto: il pezzo è il contenuto più
+    /// `distanza + spessore` per lato.
+    cornice: Option<CornicePx>,
+    altezza_px: u32,
 }
 
 /// Impagina un'immagine ai DPI con cui verrà stampata; restituisce l'immagine
 /// intatta se deve partire com'è.
-pub fn componi_raster(immagine: RgbImage, dpi: (f64, f64), imp: &Impaginazione) -> Result<RasterComposto, RgbImage> {
+pub fn componi_raster(
+    immagine: RgbImage,
+    dpi: (f64, f64),
+    imp: &Impaginazione,
+    cornice: Option<&Cornice>,
+) -> Result<RasterComposto, RgbImage> {
     let (l, a) = immagine.dimensions();
-    let Some(pos) = imp.posiziona(l as f64 * 25.4 / dpi.0, a as f64 * 25.4 / dpi.1) else {
+    // La cornice fa parte del pezzo: entra nel conto dello spazio sul rotolo.
+    let ingombro = cornice.map_or(0.0, |c| 2.0 * c.ingombro_mm());
+    let Some(pos) = imp.posiziona(
+        l as f64 * 25.4 / dpi.0 + ingombro,
+        a as f64 * 25.4 / dpi.1 + ingombro,
+    ) else {
         return Err(immagine);
     };
     let (contenuto, dpi) =
         if pos.ruota { (image::imageops::rotate90(&immagine), (dpi.1, dpi.0)) } else { (immagine, dpi) };
-    let larghezza = contenuto.width();
-    let larghezza_px = ((imp.larghezza_pagina_mm() / 25.4 * dpi.0).round() as u32).max(larghezza);
-    let x_px = ((pos.x_mm / 25.4 * dpi.0).round() as u32).min(larghezza_px - larghezza);
-    Ok(RasterComposto { contenuto, dpi, larghezza_px, x_px, ruotata: pos.ruota })
+    // I pixel della cornice si misurano dopo la rotazione: i DPI si sono scambiati.
+    let cornice = cornice.map(|c| CornicePx::da_mm(c, dpi));
+    let (dx, dy) = cornice.map_or((0, 0), |c| c.ingombro());
+    let pezzo = contenuto.width() + 2 * dx;
+    let larghezza_px = ((imp.larghezza_pagina_mm() / 25.4 * dpi.0).round() as u32).max(pezzo);
+    let x_px = ((pos.x_mm / 25.4 * dpi.0).round() as u32).min(larghezza_px - pezzo);
+    let altezza_px = contenuto.height() + 2 * dy;
+    Ok(RasterComposto {
+        contenuto,
+        dpi,
+        larghezza_px,
+        x_px,
+        ruotata: pos.ruota,
+        cornice,
+        altezza_px,
+    })
 }
 
 impl RasterComposto {
-    pub fn altezza_px(&self) -> u32 {
-        self.contenuto.height()
+    /// Il contenuto con la sola cornice, senza pagina più larga: con
+    /// l'allineamento a sinistra il pezzo esce della sua misura.
+    pub fn con_cornice(contenuto: RgbImage, dpi: (f64, f64), cornice: &Cornice) -> Self {
+        let cornice = CornicePx::da_mm(cornice, dpi);
+        let (dx, dy) = cornice.ingombro();
+        let larghezza_px = contenuto.width() + 2 * dx;
+        let altezza_px = contenuto.height() + 2 * dy;
+        Self { contenuto, dpi, larghezza_px, x_px: 0, ruotata: false, cornice: Some(cornice), altezza_px }
     }
 
-    /// Riga `y` larga quanto la pagina, in RGB.
+    /// Altezza della pagina raster, compresa l’eventuale cornice.
+    pub fn altezza_px(&self) -> u32 {
+        self.altezza_px
+    }
+
+    /// Riga `y` larga quanto la pagina, in RGB: bande bianche, contenuto e, se
+    /// c'è, la linea nera sul bordo esterno del pezzo.
     fn riga(&self, y: u32, out: &mut [u8]) {
         out.fill(255);
+        let ((dx, dy), spessore) = self
+            .cornice
+            .map_or(((0, 0), (0, 0)), |c| (c.ingombro(), c.spessore));
+        // Il contenuto parte dopo la cornice (distanza + spessore).
         let byte = self.contenuto.width() as usize * 3;
-        let inizio = y as usize * byte;
-        let x = self.x_px as usize * 3;
-        out[x..x + byte].copy_from_slice(&self.contenuto.as_raw()[inizio..inizio + byte]);
+        if y >= dy && y < dy + self.contenuto.height() {
+            let inizio = (y - dy) as usize * byte;
+            let x = (self.x_px + dx) as usize * 3;
+            out[x..x + byte].copy_from_slice(&self.contenuto.as_raw()[inizio..inizio + byte]);
+        }
+        if self.cornice.is_none() {
+            return;
+        }
+        let pezzo = self.contenuto.width() + 2 * dx;
+        let byte = |a: u32, b: u32| a as usize * 3..b as usize * 3;
+        if y < spessore.1 || y + spessore.1 >= self.altezza_px {
+            out[byte(self.x_px, self.x_px + pezzo)].fill(0);
+        } else {
+            for x in [self.x_px, self.x_px + pezzo - spessore.0] {
+                out[byte(x, x + spessore.0)].fill(0);
+            }
+        }
     }
 
     pub fn scrivi_tiff(&self) -> Result<FileTemporaneo> {
@@ -461,13 +551,96 @@ pub(crate) mod test {
         assert!(componi_pdf(&dati, &imp(Allineamento::Sinistra)).unwrap().is_none());
     }
 
+    /// Verifica larghezza fisica e offset della pagina con cornice su un PDF
+    /// multipagina con unità diverse, rotazioni e allineamento centro/destra.
+    #[test]
+    fn pdf_con_cornice_e_userunit_si_allinea_in_millimetri() {
+        use crate::lavorazione::{self, Lavorazione};
+
+        for allineamento in [Allineamento::Centro, Allineamento::Destra] {
+            for ruota in [0, 90, 180, 270] {
+                let dati = pdf(210.0 * MM_PT, 148.0 * MM_PT, (50.0, 30.0), ruota);
+                let mut doc = lopdf::Document::load_mem(&dati).unwrap();
+                let primo = *doc.get_pages().values().next().unwrap();
+                let modello = doc.get_dictionary(primo).unwrap().clone();
+                let padre = modello.get(b"Parent").unwrap().as_reference().unwrap();
+                let mut ids = Vec::new();
+                for unita in [1.0_f32, 10.0, 0.5] {
+                    let mut pagina = modello.clone();
+                    pagina.set("UserUnit", unita);
+                    pagina.set("MediaBox", vec![
+                        Object::Real(50.0), Object::Real(30.0),
+                        Object::Real(50.0 + (210.0 * MM_PT) as f32 / unita),
+                        Object::Real(30.0 + (148.0 * MM_PT) as f32 / unita),
+                    ]);
+                    ids.push(doc.add_object(pagina));
+                }
+                let kids: Vec<Object> = ids.iter().map(|&id| id.into()).collect();
+                let padre = doc.get_dictionary_mut(padre).unwrap();
+                padre.set("Kids", kids);
+                padre.set("Count", 3);
+                let mut dati = Vec::new();
+                doc.save_to(&mut dati).unwrap();
+                let composto = lavorazione::componi_pdf(
+                    &dati,
+                    &Lavorazione { cornice: Some(Cornice::default()), ..Default::default() },
+                    Some(&imp(allineamento)),
+                ).unwrap().unwrap();
+                let doc = lopdf::Document::load_mem(&composto.dati).unwrap();
+                let atteso = (904.0 - 216.5) / if allineamento == Allineamento::Centro { 2.0 } else { 1.0 };
+                for ((id, pos), unita) in doc.get_pages().into_values()
+                    .zip(composto.posizioni).zip([1.0, 10.0, 0.5])
+                {
+                    let pos = pos.expect("il pezzo fisico entra nel rotolo");
+                    assert!((pos.x_mm - atteso).abs() < 0.01);
+                    let (mb, rotazione) = file::box_e_rotazione(&doc, id).unwrap();
+                    assert_eq!(rotazione, if ruota == 0 || ruota == 270 { 0 } else { 180 });
+                    let d = 3.25 * MM_PT / unita;
+                    let originale = [50.0 - d, 30.0 - d,
+                        50.0 + 210.0 * MM_PT / unita + d,
+                        30.0 + 148.0 * MM_PT / unita + d];
+                    let (x, larghezza) = offset_mm(mb, originale, rotazione);
+                    assert!((x * unita - atteso).abs() < 0.01);
+                    assert!((larghezza * unita - 904.0).abs() < 0.01);
+                    assert!(((mb[3] - mb[1]) * unita / MM_PT - 154.5).abs() < 0.01);
+                }
+            }
+        }
+    }
+
+    /// Verifica che la decisione di impaginare consideri l'ingombro fisico
+    /// della pagina con cornice, sia con UserUnit maggiore sia minore di 1.
+    #[test]
+    fn pdf_con_userunit_decide_se_entra_nel_rotolo() {
+        use crate::lavorazione::{self, Lavorazione};
+
+        for allineamento in [Allineamento::Centro, Allineamento::Destra] {
+            for (unita, lato, entra) in [(10.0_f32, 200.0, false), (0.5, 1000.0, true)] {
+                let dati = pdf(lato * MM_PT, lato * MM_PT, (0.0, 0.0), 0);
+                let mut doc = lopdf::Document::load_mem(&dati).unwrap();
+                let id = *doc.get_pages().values().next().unwrap();
+                doc.get_dictionary_mut(id).unwrap().set("UserUnit", unita);
+                let mut dati = Vec::new();
+                doc.save_to(&mut dati).unwrap();
+                let composto = lavorazione::componi_pdf(
+                    &dati,
+                    &Lavorazione { cornice: Some(Cornice::default()), ..Default::default() },
+                    Some(&imp(allineamento)),
+                ).unwrap().unwrap();
+                assert_eq!(composto.posizioni[0].is_some(), entra);
+            }
+        }
+    }
+
+    /// Verifica l’allineamento a destra e la banda bianca aggiunta sul rotolo
+    /// quando la cornice è disattivata.
     #[test]
     fn raster_allargato_con_banda_bianca() {
         // 100 × 50 px a 100 dpi (25,4 × 12,7 mm) su rotolo da 100 mm, margine 5:
         // pagina da 90 mm.
         let nero = RgbImage::from_pixel(100, 50, image::Rgb([0, 0, 0]));
         let imp = Impaginazione { allineamento: Allineamento::Destra, rotolo_mm: 100.0, margine_mm: 5.0 };
-        let c = componi_raster(nero, (100.0, 100.0), &imp).ok().unwrap();
+        let c = componi_raster(nero, (100.0, 100.0), &imp, None).ok().unwrap();
         assert!(!c.ruotata);
         assert_eq!(c.larghezza_px, 354); // 90 mm a 100 dpi
         assert_eq!(c.x_px, 354 - 100); // contro il bordo destro della pagina
@@ -479,17 +652,51 @@ pub(crate) mod test {
         assert_eq!(img.get_pixel(c.x_px - 50, 10).0, [255, 255, 255]);
     }
 
+    /// Verifica che ruotare il contenuto scambi anche i DPI dei due assi
+    /// e mantenga le dimensioni fisiche della pagina.
     #[test]
     fn raster_verticale_ruotato_e_dpi_scambiati() {
         // 50 × 200 px a 100 × 120 dpi (12,7 × 42,3 mm): verticale, si ruota per
         // risparmiare carta e i DPI dei due assi si scambiano.
         let img = RgbImage::from_fn(50, 200, |x, _| image::Rgb([x as u8, 0, 0]));
         let imp = Impaginazione { allineamento: Allineamento::Centro, rotolo_mm: 100.0, margine_mm: 3.0 };
-        let c = componi_raster(img, (100.0, 120.0), &imp).ok().unwrap();
+        let c = componi_raster(img, (100.0, 120.0), &imp, None).ok().unwrap();
         assert!(c.ruotata);
         assert_eq!(c.dpi, (120.0, 100.0));
         assert_eq!(c.altezza_px(), 50);
         assert_eq!(c.larghezza_px, (94.0 / 25.4 * 120.0_f64).round() as u32);
+    }
+
+    /// Verifica che il raster cresca per ospitare la linea esterna e lasci
+    /// la distanza bianca tra linea e contenuto.
+    #[test]
+    fn raster_con_cornice_la_disegna_attorno_al_pezzo() {
+        // 100 × 50 px a 100 dpi, cornice 3 + 0,25 mm: 13 px per lato.
+        let nero = RgbImage::from_pixel(100, 50, image::Rgb([0, 0, 0]));
+        let c = RasterComposto::con_cornice(nero, (100.0, 100.0), &Cornice::default());
+        let img = c.su_rotolo();
+        assert_eq!(img.dimensions(), (100 + 2 * 13, 50 + 2 * 13));
+        // Linea nera sul bordo esterno, contenuto al centro.
+        assert_eq!(img.get_pixel(0, 0).0, [0, 0, 0]);
+        assert_eq!(img.get_pixel(100 + 2 * 13 - 1, 50 + 2 * 13 - 1).0, [0, 0, 0]);
+        assert_eq!(img.get_pixel(12, 30).0, [255, 255, 255]);
+        assert_eq!(img.get_pixel(13 + 10, 13 + 10).0, [0, 0, 0]);
+    }
+
+    /// Verifica che l’allineamento a destra includa la cornice nell’ingombro
+    /// del pezzo senza disegnarla nella banda bianca del rotolo.
+    #[test]
+    fn raster_con_cornice_e_allineamento_la_tiene_col_pezzo() {
+        let nero = RgbImage::from_pixel(100, 50, image::Rgb([0, 0, 0]));
+        let imp = Impaginazione { allineamento: Allineamento::Destra, rotolo_mm: 100.0, margine_mm: 5.0 };
+        let c = componi_raster(nero, (100.0, 100.0), &imp, Some(&Cornice::default())).ok().unwrap();
+        // Pagina da 90 mm (354 px); il pezzo è largo 100 + 2 × 13 px e sta a destra.
+        assert_eq!(c.larghezza_px, 354);
+        assert_eq!(c.x_px, 354 - 126);
+        let img = c.su_rotolo();
+        assert_eq!(img.get_pixel(c.x_px, 0).0, [0, 0, 0]);
+        assert_eq!(img.get_pixel(c.x_px - 1, 0).0, [255, 255, 255]);
+        assert_eq!(img.get_pixel(c.x_px - 1, 20).0, [255, 255, 255]);
     }
 
 }

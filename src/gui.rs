@@ -15,7 +15,7 @@ use crate::anteprima::{Anteprime, Chiave, PAGINE_DPI_MAX, PAGINE_MAX, Pagina};
 use crate::config::Config;
 use crate::file::{self, InfoFile};
 use crate::impagina::{self, Allineamento, Impaginazione};
-use crate::lavorazione::{self, FormatoIso, Lavorazione, Scala};
+use crate::lavorazione::{self, Cornice, FormatoIso, Lavorazione, Scala};
 use crate::pjl::{self, Formato, OpzioniJob, Sorgente};
 use crate::rotazione::{self, TOLLERANZA_MM};
 use crate::stampante;
@@ -162,9 +162,15 @@ impl Documento {
         self.pagine.get(n).and_then(|p| p.mm).or_else(|| {
             self.info.mm.map(|(l, a)| {
                 let (sx, sy) = lavorazione::fattori(&self.lavorazione.scala, l, a);
-                (l * sx, a * sy)
+                let cornice = self.cornice_mm();
+                (l * sx + cornice, a * sy + cornice)
             })
         })
+    }
+
+    /// Spazio che la cornice aggiunge alle misure, in tutto (mm).
+    fn cornice_mm(&self) -> f64 {
+        self.lavorazione.cornice.map_or(0.0, |c| 2.0 * c.ingombro_mm())
     }
 
     /// Misure finali della prima pagina con la scala scelta: quelle mostrate
@@ -172,7 +178,8 @@ impl Documento {
     fn uscita_mm(&self) -> Option<(f64, f64)> {
         let (l, a) = self.info.mm?;
         let (sx, sy) = lavorazione::fattori(&self.lavorazione.scala, l, a);
-        Some((l * sx, a * sy))
+        let cornice = self.cornice_mm();
+        Some((l * sx + cornice, a * sy + cornice))
     }
 
     /// true se la stampante ruoterà la pagina `n` di 90°. Senza misure non si
@@ -204,6 +211,8 @@ pub struct App {
     sorgente: Sorgente,
     scala_di_grigi: bool,
     taglierina: Option<bool>,
+    /// Cornice di taglio attiva per tutti i documenti (sezione FINITURA).
+    cornice: bool,
     extra_pjl: String,
     larghezza_rotolo: f64,
     /// Larghezza letta dalla stampante via SNMP (nome ingresso, mm).
@@ -228,6 +237,8 @@ pub struct App {
 }
 
 impl App {
+    /// Inizializza interfaccia e servizio anteprime, aggiunge i file iniziali
+    /// e avvia la lettura asincrona dello stato della stampante.
     pub fn new(cc: &eframe::CreationContext<'_>, config: Config, iniziali: Vec<PathBuf>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
         configura_stile(&cc.egui_ctx);
@@ -251,6 +262,7 @@ impl App {
             sorgente: Sorgente::Stampante,
             scala_di_grigi: false,
             taglierina: None,
+            cornice: false,
             extra_pjl: String::new(),
             larghezza_rilevata: None,
             stato_stampante: None,
@@ -267,13 +279,18 @@ impl App {
         app
     }
 
+    /// Analizza un file, lo seleziona nella coda e ne richiede l’anteprima con
+    /// la cornice corrente. Se non è leggibile, aggiunge un avviso.
     fn aggiungi(&mut self, percorso: PathBuf) {
         let nome = percorso.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         match file::analizza(&percorso) {
             Ok(info) => {
                 let id = self.prossimo_id;
                 self.prossimo_id += 1;
-                let lavorazione = Lavorazione::default();
+                let lavorazione = Lavorazione {
+                    cornice: self.cornice.then_some(self.cornice_attuale()),
+                    ..Default::default()
+                };
                 let imp = self.impaginazione_anteprime;
                 self.anteprime.richiedi(id, percorso.clone(), info.formato, lavorazione, imp);
                 self.documenti.push(Documento {
@@ -308,6 +325,15 @@ impl App {
             let _ = tx.send(Evento::Stato(r));
             ctx.request_repaint();
         });
+    }
+
+    /// La cornice scelta in FINITURA: è un'opzione globale, ma ogni documento ne
+    /// porta una copia nella sua `Lavorazione`.
+    fn cornice_attuale(&self) -> Cornice {
+        Cornice {
+            distanza_mm: self.config.cornice_distanza_mm,
+            spessore_mm: self.config.cornice_spessore_mm,
+        }
     }
 
     fn impaginazione(&self) -> Option<Impaginazione> {
@@ -487,6 +513,8 @@ impl App {
         }
     }
 
+    /// Mostra i controlli di stampa in un pannello scorrevole e propaga
+    /// la cornice scelta alle lavorazioni dei documenti già in coda.
     fn pannello_impostazioni(&mut self, ui: &mut egui::Ui) {
         // Le sezioni sono più alte della finestra minima: scorrono, mentre il
         // pulsante Stampa resta fermo in fondo.
@@ -623,6 +651,51 @@ impl App {
         })
         .response
         .on_hover_text("CUTTER non è nel manuale PJL: verificare che la T2600 lo rispetti");
+
+        ui.add_space(6.0);
+        sezione(ui, "FINITURA");
+        ui.checkbox(&mut self.cornice, "Cornice di taglio")
+            .on_hover_text("Linea continua attorno al contenuto: il foglio cresce di distanza più spessore per lato");
+        if self.cornice {
+            // Una riga per misura: affiancate non starebbero nella colonna.
+            ui.horizontal(|ui| {
+                ui.label("Distanza");
+                ui.add(
+                    egui::DragValue::new(&mut self.config.cornice_distanza_mm)
+                        .range(0.0..=50.0)
+                        .speed(0.5)
+                        .suffix(" mm"),
+                );
+            })
+            .response
+            .on_hover_text("Dalla linea al bordo del contenuto");
+            ui.horizontal(|ui| {
+                ui.label("Spessore");
+                ui.add(
+                    egui::DragValue::new(&mut self.config.cornice_spessore_mm)
+                        .range(0.1..=5.0)
+                        .speed(0.05)
+                        .suffix(" mm"),
+                );
+            })
+            .response
+            .on_hover_text("Spessore della linea stampata");
+            if let Some(i) = self.selezionato
+                && !lavorazione::lavorabile(self.documenti[i].info.formato)
+            {
+                ui.label(
+                    RichText::new("PostScript e HP-GL/2 partono così come sono: la cornice non si applica")
+                        .small(),
+                );
+            }
+        }
+        // La cornice è un'opzione di finitura globale ma viaggia nella
+        // lavorazione di ogni documento (anteprima, impaginazione e nesting la
+        // trattano per pezzo): qui si allineano quelli già in lista.
+        let cornice = self.cornice.then_some(self.cornice_attuale());
+        for d in &mut self.documenti {
+            d.lavorazione.cornice = cornice;
+        }
 
         if let Some(i) = self.selezionato {
             ui.add_space(6.0);

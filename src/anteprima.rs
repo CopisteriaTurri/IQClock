@@ -369,7 +369,10 @@ fn immagine(
         originale.height() as f64 * 25.4 / dpi_y,
     );
     let (sx, sy) = lavorazione::fattori(&lav.scala, larghezza, altezza);
-    let mm = Some((larghezza * sx, altezza * sy));
+    // La cornice fa parte del pezzo: la misura cresce come quella che parte.
+    let cornice = lav.cornice.as_ref();
+    let ingombro = cornice.map_or(0.0, |c| 2.0 * c.ingombro_mm());
+    let mm = Some((larghezza * sx + ingombro, altezza * sy + ingombro));
     // DPI della miniatura: quelli del file, scalati come i pixel e dalla scala.
     let dpi = (
         dpi_x * ridotta.width() as f64 / originale.width() as f64 / sx,
@@ -379,9 +382,18 @@ fn immagine(
     // viene ricampionata).
     let dpi_min = Some((dpi_x / sx).min(dpi_y / sy));
     let ridotta = png::su_bianco(ridotta);
+    // Senza impaginazione il pezzo esce della sua misura: con la cornice la si
+    // disegna con la stessa funzione che scrive il TIFF che parte.
+    let senza_rotolo = |ridotta: image::RgbImage| -> image::RgbImage {
+        let img = match cornice {
+            Some(c) => impagina::RasterComposto::con_cornice(ridotta, dpi, c).su_rotolo(),
+            None => ridotta,
+        };
+        deforma(img, sx / dpi_x, sy / dpi_y)
+    };
     let Some(imp) = imp else {
         return Some(Pagina {
-            immagine: colori(&image::DynamicImage::ImageRgb8(deforma(ridotta, sx / dpi_x, sy / dpi_y)).to_rgba8()),
+            immagine: colori(&image::DynamicImage::ImageRgb8(senza_rotolo(ridotta)).to_rgba8()),
             mm,
             impaginata: false,
             ruotata: false,
@@ -390,7 +402,7 @@ fn immagine(
             dpi_parziale: false,
         });
     };
-    match impagina::componi_raster(ridotta, dpi, imp) {
+    match impagina::componi_raster(ridotta, dpi, imp, cornice) {
         Ok(c) => {
             let mm = (c.larghezza_px as f64 * 25.4 / c.dpi.0, c.altezza_px() as f64 * 25.4 / c.dpi.1);
             // Pixel a DPI diversi su x e y: prima le proporzioni di stampa, poi la riduzione.
@@ -407,7 +419,7 @@ fn immagine(
             })
         }
         Err(ridotta) => Some(Pagina {
-            immagine: colori(&image::DynamicImage::ImageRgb8(deforma(ridotta, sx / dpi_x, sy / dpi_y)).to_rgba8()),
+            immagine: colori(&image::DynamicImage::ImageRgb8(senza_rotolo(ridotta)).to_rgba8()),
             mm,
             impaginata: false,
             ruotata: false,
@@ -550,12 +562,14 @@ mod test {
         assert!((l_mm - 594.0).abs() < 1.0 && (a_mm - 841.0).abs() < 1.0);
     }
 
+    /// Verifica dimensioni e proporzioni dell’anteprima di un A1 adattato ad A4
+    /// senza allineamento sul rotolo.
     #[test]
     fn anteprima_di_un_pdf_scalato() {
         let Some(pdfium) = pdfium_o_salta() else { return };
         // A1 (1684 × 2384 pt) adattata ad A4: 209,8 × 297 mm.
         let pdf = crea_pdf(&[(1684, 2384)]);
-        let lav = Lavorazione { scala: Scala::Formato(FormatoIso::A4) };
+        let lav = Lavorazione { scala: Scala::Formato(FormatoIso::A4), ..Default::default() };
         let pagine = pagine_pdf(&pdfium, &pdf, &lav, None).unwrap();
         std::fs::remove_file(&pdf).unwrap();
         assert_eq!(pagine.len(), 1);
@@ -567,6 +581,8 @@ mod test {
         assert!(!pagine[0].impaginata && !pagine[0].ruotata);
     }
 
+    /// Verifica i DPI dei raster nel PDF dopo scala e rotazione, escludendo
+    /// i timbri troppo piccoli e le pagine solo vettoriali.
     #[test]
     fn dpi_delle_immagini_di_un_pdf() {
         let Some(pdfium) = pdfium_o_salta() else { return };
@@ -578,7 +594,7 @@ mod test {
         assert!(!pagine[0].dpi_presunti && !pagine[0].dpi_parziale);
 
         // Al 200 % la pagina esce grande il doppio, con metà dei DPI.
-        let lav = Lavorazione { scala: Scala::Percentuale { x: 200.0, y: 200.0 } };
+        let lav = Lavorazione { scala: Scala::Percentuale { x: 200.0, y: 200.0 }, ..Default::default() };
         let pagine = pagine_pdf(&pdfium, &pdf, &lav, None).unwrap();
         let dpi = pagine[0].dpi_min.expect("immagine raster nel PDF");
         assert!((dpi - 150.0).abs() < 0.5, "{dpi}");
@@ -599,7 +615,7 @@ mod test {
         // (orizzontale di 72 pt, 300 dpi) prende il fattore della y visiva, che
         // al 200 % è 2. Confrontando gli assi al contrario verrebbe 300.
         let ruotato = pdf_con_immagine(72.0, 36.0, 90);
-        let lav = Lavorazione { scala: Scala::Percentuale { x: 100.0, y: 200.0 } };
+        let lav = Lavorazione { scala: Scala::Percentuale { x: 100.0, y: 200.0 }, ..Default::default() };
         let pagine = pagine_pdf(&pdfium, &ruotato, &lav, None).unwrap();
         let dpi = pagine[0].dpi_min.expect("immagine raster nel PDF");
         assert!((dpi - 150.0).abs() < 0.5, "{dpi}");
@@ -612,6 +628,8 @@ mod test {
         std::fs::remove_file(&vuoto).unwrap();
     }
 
+    /// Verifica che i DPI cambino soltanto per le pagine effettivamente scalate,
+    /// senza applicare il fattore alle rotazioni non supportate.
     #[test]
     fn dpi_pdf_usano_solo_la_scala_applicata() {
         let Some(pdfium) = pdfium_o_salta() else {
@@ -620,6 +638,7 @@ mod test {
         let pdf = pdf_con_immagine(72.0, 72.0, 45);
         let lav = Lavorazione {
             scala: Scala::Percentuale { x: 200.0, y: 200.0 },
+            ..Default::default()
         };
         // Rotazione non supportata: nessun PDF composto, resta a 300 dpi.
         let pagine = pagine_pdf(&pdfium, &pdf, &lav, None).unwrap();
@@ -657,6 +676,8 @@ mod test {
         std::fs::remove_file(pdf).unwrap();
     }
 
+    /// Verifica i DPI lungo gli assi trasformati del raster, anche con rotazione
+    /// della pagina e scala diversa sui due assi.
     #[test]
     fn dpi_pdf_seguono_gli_assi_dell_immagine() {
         let Some(pdfium) = pdfium_o_salta() else { return };
@@ -669,7 +690,7 @@ mod test {
             ("72 72 -115.2 115.2 200 20", 0, 100.0, 100.0, 187.5 / 2.0_f64.sqrt()),
         ] {
             let pdf = pdf_con_raster(400, 300, matrice, ruota);
-            let lav = Lavorazione { scala: Scala::Percentuale { x, y } };
+            let lav = Lavorazione { scala: Scala::Percentuale { x, y }, ..Default::default() };
             let pagine = pagine_pdf(&pdfium, &pdf, &lav, None).unwrap();
             let dpi = pagine[0].dpi_min.unwrap();
             assert!((dpi - attesi).abs() < 0.5, "{dpi} invece di {attesi}");
@@ -678,6 +699,8 @@ mod test {
         }
     }
 
+    /// Verifica che i raster completamente fuori dal box visibile non influiscano
+    /// sui DPI, mentre quelli parzialmente visibili continuino a contare.
     #[test]
     fn dpi_pdf_ignorano_solo_immagini_interamente_fuori_pagina() {
         let Some(pdfium) = pdfium_o_salta() else { return };
@@ -694,7 +717,7 @@ mod test {
                 );
                 doc.save(&pdf).unwrap();
                 for scala in [100.0, 200.0] {
-                    let lav = Lavorazione { scala: Scala::Percentuale { x: scala, y: scala } };
+                    let lav = Lavorazione { scala: Scala::Percentuale { x: scala, y: scala }, ..Default::default() };
                     let pagine = pagine_pdf(&pdfium, &pdf, &lav, None).unwrap();
                     match (pagine[0].dpi_min, attesi) {
                         (None, None) => {},
@@ -712,6 +735,8 @@ mod test {
         std::fs::remove_file(pdf).unwrap();
     }
 
+    /// Verifica che la scala aggiorni i DPI dell’anteprima e distingua
+    /// la risoluzione dichiarata da quella presunta.
     #[test]
     fn dpi_effettivi_di_un_immagine() {
         // 1181 px dichiarati a 300 dpi (11811 px/m): 100 mm. Al 200 % escono
@@ -722,7 +747,7 @@ mod test {
         let pagina = immagine(&p, Formato::Png, &Lavorazione::default(), None).unwrap();
         assert!((pagina.dpi_min.unwrap() - 300.0).abs() < 1.0);
         assert!(!pagina.dpi_presunti && !pagina.dpi_parziale);
-        let lav = Lavorazione { scala: Scala::Percentuale { x: 200.0, y: 200.0 } };
+        let lav = Lavorazione { scala: Scala::Percentuale { x: 200.0, y: 200.0 }, ..Default::default() };
         let pagina = immagine(&p, Formato::Png, &lav, None).unwrap();
         assert!((pagina.dpi_min.unwrap() - 150.0).abs() < 1.0);
         std::fs::remove_file(&p).unwrap();
@@ -745,6 +770,8 @@ mod test {
         assert_eq!(pagine.len(), PAGINE_MAX);
     }
 
+    /// Verifica che PDF mancanti o corrotti producano un errore anche quando
+    /// è richiesta la scala, senza ripiegare sul file originale.
     #[test]
     fn pdf_corrotto_e_inesistente_danno_errore() {
         let Some(pdfium) = pdfium_o_salta() else { return };
@@ -759,6 +786,7 @@ mod test {
         // Da ridimensionare ma illeggibile: errore, non l'originale.
         let scalato = Lavorazione {
             scala: Scala::Percentuale { x: 50.0, y: 50.0 },
+            ..Default::default()
         };
         let corrotto = file_temp(".pdf");
         std::fs::write(&corrotto, b"%PDF-1.5\nnon un pdf vero").unwrap();
@@ -854,11 +882,13 @@ mod test {
         assert_eq!(a, LATO_MAX as usize / 2);
     }
 
+    /// Verifica che scala libera e dimensioni fisiche producano la stessa
+    /// deformazione nell’anteprima, rispettando il limite dei pixel.
     #[test]
     fn immagine_con_proporzioni_libere_esce_deformata() {
         // 600 × 300 px al 200 % × 50 %: in stampa 1200 × 150, cioè 8:1, non 2:1.
         let p = png_valido(600, 300);
-        let lav = Lavorazione { scala: Scala::Percentuale { x: 200.0, y: 50.0 } };
+        let lav = Lavorazione { scala: Scala::Percentuale { x: 200.0, y: 50.0 }, ..Default::default() };
         let img = immagine(&p, Formato::Png, &lav, None).expect("PNG valido");
         std::fs::remove_file(&p).unwrap();
         let [l, a] = img.immagine.size;
@@ -882,13 +912,15 @@ mod test {
         assert!((l_mm - 50.8).abs() < 0.1 && (a_mm - 50.8).abs() < 0.1, "{l_mm} × {a_mm}");
     }
 
+    /// Verifica che il centraggio mantenga le proporzioni fisiche con DPI diversi
+    /// sui due assi o con una scala che deforma il contenuto.
     #[test]
     fn immagine_impaginata_con_dpi_diversi_o_scala_libera() {
         // 600 × 300 px al centro di una pagina da 190 mm. Prima a 300 × 150 dpi
         // (50,8 × 50,8 mm), poi a 300 dpi al 100 % × 50 % (50,8 × 12,7 mm): in
         // tutti e due i casi i pixel composti hanno DPI diversi su x e y.
         let imp = Impaginazione { allineamento: Allineamento::Centro, rotolo_mm: 200.0, margine_mm: 5.0 };
-        let libera = Lavorazione { scala: Scala::Percentuale { x: 100.0, y: 50.0 } };
+        let libera = Lavorazione { scala: Scala::Percentuale { x: 100.0, y: 50.0 }, ..Default::default() };
         for (phys, lav, alta) in [((11811, 5906), Lavorazione::default(), 50.8), ((11811, 11811), libera, 12.7)] {
             let p = png_valido(600, 300);
             let dati = crate::png::test::con_phys_xy(&std::fs::read(&p).unwrap(), phys.0, phys.1);
