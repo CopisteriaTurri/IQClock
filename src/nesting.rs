@@ -82,23 +82,24 @@ pub fn annidabile(formato: Formato) -> bool {
 }
 
 /// Orientamento scelto per un pezzo: (larghezza, altezza, ruotato) oppure
-/// `None` se non entra nel rotolo in nessun verso.
-fn orienta(pezzo: &Pezzo, larghezza: f64, ruota: bool) -> Option<(f64, f64, bool)> {
+/// `None` se non entra nel foglio in nessun verso.
+fn orienta(pezzo: &Pezzo, larghezza: f64, ruota: bool, altezza_max: f64) -> Option<(f64, f64, bool)> {
     if ruota {
         // Sdraiato: il lato più corto in altezza, così il foglio consuma meno.
         let (corto, lungo) = if pezzo.l <= pezzo.a { (pezzo.l, pezzo.a) } else { (pezzo.a, pezzo.l) };
-        if lungo <= larghezza + TOLLERANZA_MM {
+        if lungo <= larghezza + TOLLERANZA_MM && corto <= altezza_max + TOLLERANZA_MM {
             // Girato solo se la pagina era verticale (lato corto in larghezza).
             return Some((lungo, corto, pezzo.l < pezzo.a));
         }
     }
-    (pezzo.l <= larghezza + TOLLERANZA_MM).then_some((pezzo.l, pezzo.a, false))
+    (pezzo.l <= larghezza + TOLLERANZA_MM && pezzo.a <= altezza_max + TOLLERANZA_MM)
+        .then_some((pezzo.l, pezzo.a, false))
 }
 
-/// true se il pezzo entra nella larghezza del rotolo (in qualche verso, se
-/// `ruota` è vero).
-pub fn entra(pezzo: &Pezzo, larghezza: f64, ruota: bool) -> bool {
-    orienta(pezzo, larghezza, ruota).is_some()
+/// true se il pezzo entra nella larghezza e altezza del foglio (in qualche
+/// verso, se `ruota` è vero).
+pub fn entra(pezzo: &Pezzo, larghezza: f64, ruota: bool, altezza_max: f64) -> bool {
+    orienta(pezzo, larghezza, ruota, altezza_max).is_some()
 }
 
 struct Orientato {
@@ -115,7 +116,7 @@ struct Riga {
 }
 
 /// Shelf packing FFDH: restituisce i fogli, nell'ordine in cui si susseguono
-/// sul rotolo. I pezzi che non entrano nella larghezza vengono lasciati fuori
+/// sul rotolo. I pezzi che superano larghezza o altezza vengono lasciati fuori
 /// (vedi [`entra`]).
 pub fn disponi(
     pezzi: &[Pezzo],
@@ -129,7 +130,7 @@ pub fn disponi(
     let mut orientati: Vec<Orientato> = pezzi
         .iter()
         .filter_map(|p| {
-            orienta(p, larghezza, ruota).map(|(larghezza, altezza, ruotato)| Orientato {
+            orienta(p, larghezza, ruota, altezza_max).map(|(larghezza, altezza, ruotato)| Orientato {
                 id: p.id,
                 larghezza,
                 altezza,
@@ -162,8 +163,7 @@ pub fn disponi(
         }
         // La nuova fila parte sotto il fondo di tutte quelle già aperte.
         let mut nuova = if righe.is_empty() { 0.0 } else { fondo + distanza };
-        // Un nuovo foglio solo se c'è già qualcosa sopra: un pezzo più alto di
-        // `altezza_max` da solo non ha alternative.
+        // I pezzi troppo alti sono già esclusi da `orienta`.
         if !righe.is_empty() && nuova + pezzo.altezza > altezza_max + TOLLERANZA_MM {
             fogli.push(Foglio { altezza: fondo, posti: std::mem::take(&mut posti) });
             righe.clear();
@@ -549,8 +549,8 @@ mod test {
         assert!(!posti.contains(&1), "1000 mm non entra in nessun verso");
         // 120 × 500 sdraiato sul lato lungo (500 ≤ 904) ci sta.
         assert!(posti.contains(&2));
-        assert!(!entra(&pezzo((9, 0, 0), 1000.0, 904.0), 904.0, true));
-        assert!(entra(&pezzo((9, 0, 0), 904.0, 1000.0), 904.0, true));
+        assert!(!entra(&pezzo((9, 0, 0), 1000.0, 904.0), 904.0, true, ALTEZZA_MAX_MM));
+        assert!(entra(&pezzo((9, 0, 0), 904.0, 1000.0), 904.0, true, ALTEZZA_MAX_MM));
     }
 
     /// Nessuna sovrapposizione e tutti dentro la larghezza, su misure
@@ -608,6 +608,20 @@ mod test {
         assert_eq!(fogli.len(), 2);
         assert!((fogli[0].altezza - 400.0).abs() < 1e-9);
         assert!((fogli[1].altezza - 400.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pezzi_troppo_alti_esclusi_salvo_rotazione_consentita() {
+        let p = pezzo((1, 0, 0), 100.0, 800.0);
+        assert!(!entra(&p, 900.0, false, 700.0));
+        assert!(!entra(&p, 600.0, true, 700.0));
+        assert!(disponi(&[p], 900.0, 5.0, false, 700.0).is_empty());
+        assert!(disponi(&[p], 600.0, 5.0, true, 700.0).is_empty());
+        let fogli = disponi(&[p], 900.0, 5.0, true, 700.0);
+        assert_eq!(fogli[0].altezza, 100.0);
+        assert!(fogli[0].posti[0].ruotato);
+        let limite = pezzo((2, 0, 0), 100.0, 700.0 + TOLLERANZA_MM / 2.0);
+        assert!(entra(&limite, 900.0, false, 700.0));
     }
 
     #[test]

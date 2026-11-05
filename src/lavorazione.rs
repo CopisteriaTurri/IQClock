@@ -476,12 +476,7 @@ fn scala_pagina(doc: &Document, id: ObjectId, scala: &Scala) -> Option<ScalaPagi
     if ruota % 90 != 0 {
         return None;
     }
-    let (larghezza, altezza) = ((x1 - x0) / MM_PT, (y1 - y0) / MM_PT);
-    let (larghezza, altezza) = if ruota % 180 == 90 {
-        (altezza, larghezza)
-    } else {
-        (larghezza, altezza)
-    };
+    let (larghezza, altezza) = file::dimensioni_pagina_mm(doc, id)?;
     let (sx_vis, sy_vis) = fattori(scala, larghezza, altezza);
     if (sx_vis - 1.0).abs() < TOLLERANZA_SCALA && (sy_vis - 1.0).abs() < TOLLERANZA_SCALA {
         return None;
@@ -728,7 +723,7 @@ pub fn componi_nesting(
     loop {
         let fuori: Vec<u64> = pezzi
             .iter()
-            .filter(|p| inclusi.contains(&p.id.0) && !nesting::entra(p, larghezza, nesting.ruota))
+            .filter(|p| inclusi.contains(&p.id.0) && !nesting::entra(p, larghezza, nesting.ruota, nesting::ALTEZZA_MAX_MM))
             .map(|p| p.id.0)
             .collect();
         if fuori.is_empty() {
@@ -800,7 +795,10 @@ fn sorgente_nesting(d: &DaAnnidare) -> Result<Option<DocumentoNesting>> {
             let misure: Option<Vec<(f64, f64)>> = doc
                 .get_pages()
                 .into_values()
-                .map(|id| file::dimensioni_pagina_mm(&doc, id))
+                .map(|id| {
+                    let (_, ruota) = file::box_e_rotazione(&doc, id)?;
+                    (ruota % 90 == 0).then(|| file::dimensioni_pagina_mm(&doc, id)).flatten()
+                })
                 .collect();
             let Some(misure) = misure else { return Ok(None) };
             let sorgente = Sorgente {
@@ -823,7 +821,11 @@ fn sorgente_nesting(d: &DaAnnidare) -> Result<Option<DocumentoNesting>> {
             let dpi_scalati = (dpi.0 / sx, dpi.1 / sy);
             let contenuto = match (&d.lavorazione.cornice, d.formato) {
                 // Senza altri passi il JPEG entra così com'è: nessuna ricompressione.
-                (None, Formato::Jpeg) => Contenuto::Jpeg(std::fs::read(&d.percorso)?),
+                (None, Formato::Jpeg) => {
+                    let dati = std::fs::read(&d.percorso)?;
+                    nesting::dimensioni_jpeg(&dati)?;
+                    Contenuto::Jpeg(dati)
+                }
                 (cornice, _) => {
                     let rgb = png::su_bianco(png::decodifica(&d.percorso)?);
                     let rgb = match cornice {
@@ -1160,6 +1162,59 @@ mod test {
         assert_eq!(esito.documenti, 1);
         assert_eq!(esito.fogli.len(), 1);
         assert_eq!(esito.pezzi, 1);
+    }
+
+    /// Le sorgenti non supportate escludono l'intero documento, senza
+    /// impedire la composizione degli altri documenti della coda.
+    #[test]
+    fn nesting_isola_rotazioni_jpeg_e_pagine_troppo_alte() {
+        let buono = FileTemporaneo::nuovo("pdf");
+        let ruotato = FileTemporaneo::nuovo("pdf");
+        let alto = FileTemporaneo::nuovo("pdf");
+        let jpeg = FileTemporaneo::nuovo("jpg");
+        std::fs::write(buono.percorso(), impagina::test::pdf(pt(210.0), pt(297.0), (0.0, 0.0), 90)).unwrap();
+        std::fs::write(ruotato.percorso(), impagina::test::pdf(pt(210.0), pt(297.0), (0.0, 0.0), 45)).unwrap();
+        std::fs::write(alto.percorso(), impagina::test::pdf(pt(100.0), pt(6000.0), (0.0, 0.0), 0)).unwrap();
+        // imagesize accetta la larghezza zero; il parser del nesting la rifiuta.
+        let mut dati_jpeg = vec![0xff, 0xd8, 0xff, 0xc0, 0, 8, 8, 0, 30, 0, 0, 3];
+        dati_jpeg.resize(32, 0);
+        std::fs::write(jpeg.percorso(), dati_jpeg).unwrap();
+        assert_eq!(imagesize::size(jpeg.percorso()).unwrap().width, 0);
+        let documenti: Vec<_> = [&buono, &ruotato, &alto, &jpeg].iter().enumerate().map(|(i, f)| DaAnnidare {
+            id: i as u64,
+            percorso: f.percorso().to_path_buf(),
+            formato: if i == 3 { Formato::Jpeg } else { Formato::Pdf },
+            lavorazione: Lavorazione::default(),
+            copie: 2,
+        }).collect();
+        let esito = componi_nesting(&documenti, 914.0, 5.0, &Nesting::default()).unwrap();
+        assert_eq!(esito.esclusi, vec![1, 2, 3]);
+        assert_eq!(esito.documenti, 1);
+        assert_eq!(esito.pezzi, 2);
+        assert_eq!(esito.fogli.len(), 1);
+    }
+
+    #[test]
+    fn scala_rispetta_userunit_con_formato_misura_e_percentuale() {
+        for unita in [0.5_f32, 2.0, 10.0] {
+            for ruota in [0, 90, 180, 270] {
+                for scala in [
+                    Scala::Formato(FormatoIso::A4),
+                    Scala::Misura { larghezza_mm: 300.0, altezza_mm: 400.0, proporzioni: false },
+                    Scala::Percentuale { x: 150.0, y: 200.0 },
+                ] {
+                    let (mut doc, id) = pagina(&impagina::test::pdf(pt(210.0), pt(297.0), (0.0, 0.0), ruota));
+                    let riferimento = doc.add_object(Object::Real(unita));
+                    doc.get_dictionary_mut(id).unwrap().set("UserUnit", riferimento);
+                    let (l, a) = file::dimensioni_pagina_mm(&doc, id).unwrap();
+                    let (sx, sy) = fattori(&scala, l, a);
+                    assert!(applica_scala_pagina(&mut doc, id, &scala).unwrap());
+                    let (uscita_l, uscita_a) = file::dimensioni_pagina_mm(&doc, id).unwrap();
+                    assert!((uscita_l - l * sx).abs() < 0.001, "{unita} {ruota} {scala:?}");
+                    assert!((uscita_a - a * sy).abs() < 0.001, "{unita} {ruota} {scala:?}");
+                }
+            }
+        }
     }
 
     /// Il Form XObject in cui la scala avvolge il contenuto della pagina.

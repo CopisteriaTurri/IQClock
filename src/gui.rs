@@ -132,6 +132,7 @@ struct Documento {
     info: InfoFile,
     /// Idoneità al nesting letta all'apertura, senza riaprire i TIFF a ogni frame.
     annidabile: bool,
+    impronta: Option<(std::time::SystemTime, u64)>,
     copie: u32,
     stato: StatoJob,
     /// Scala scelta per questo documento (come le copie).
@@ -160,6 +161,34 @@ struct PaginaMostrata {
 }
 
 impl Documento {
+    /// Rilegge misure e idoneità quando il file cambia. Il nuovo id scarta
+    /// anche le anteprime ancora in arrivo per il contenuto precedente.
+    fn aggiorna_file(&mut self, nuovo_id: u64) -> bool {
+        let impronta = impronta_file(&self.percorso);
+        if self.impronta == impronta {
+            return false;
+        }
+        self.impronta = impronta;
+        self.id = nuovo_id;
+        self.pagine.clear();
+        self.dpi = None;
+        self.dpi_parziale = false;
+        match file::analizza(&self.percorso) {
+            Ok(info) => {
+                self.annidabile = lavorazione::annidabile_file(&self.percorso, info.formato).unwrap_or(false);
+                self.info = info;
+            }
+            Err(e) => {
+                self.annidabile = false;
+                self.info.mm = None;
+                self.info.pagine_mm.clear();
+                self.info.pagine = 0;
+                self.stato = StatoJob::Errore(e.to_string());
+            }
+        }
+        true
+    }
+
     /// Misure della pagina `n` in mm: quelle date dall'anteprima, altrimenti
     /// quelle della prima pagina lette all'apertura del file, scalate.
     fn mm_pagina(&self, n: usize) -> Option<(f64, f64)> {
@@ -214,6 +243,12 @@ impl Documento {
     }
 }
 
+/// Firma leggera del file: evita di riaprire e decodificare i TIFF invariati.
+fn impronta_file(percorso: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(percorso).ok()?;
+    Some((meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH), meta.len()))
+}
+
 enum Evento {
     Avanzamento(u64, f32),
     Finito(u64, Result<(), String>),
@@ -244,6 +279,7 @@ pub struct App {
     nesting: bool,
     nesting_ruota: bool,
     cache_nesting: Option<CacheNesting>,
+    ultimo_controllo_file: std::time::Instant,
     extra_pjl: String,
     larghezza_rotolo: f64,
     /// Larghezza letta dalla stampante via SNMP (nome ingresso, mm).
@@ -284,6 +320,7 @@ impl App {
             nesting: config.nesting,
             nesting_ruota: config.nesting_ruota,
             cache_nesting: None,
+            ultimo_controllo_file: std::time::Instant::now(),
             allineamento: Allineamento::Sinistra,
             rotolo_confermato: None,
             chiedi_conferma: false,
@@ -328,12 +365,14 @@ impl App {
                 let imp = self.impaginazione_anteprime;
                 self.anteprime.richiedi(id, percorso.clone(), info.formato, lavorazione, imp);
                 let annidabile = lavorazione::annidabile_file(&percorso, info.formato).unwrap_or(false);
+                let impronta = impronta_file(&percorso);
                 self.documenti.push(Documento {
                     id,
                     percorso,
                     nome,
                     info,
                     annidabile,
+                    impronta,
                     copie: 1,
                     stato: StatoJob::Pronto,
                     lavorazione,
@@ -389,6 +428,18 @@ impl App {
     /// la stampante ridurrebbe o taglierebbe la pagina.
     fn rotolo_verificato(&self) -> bool {
         self.larghezza_rilevata.is_some() || self.rotolo_confermato == Some(self.larghezza_rotolo)
+    }
+
+    /// Rilegge i file cambiati e rinnova la richiesta delle loro anteprime.
+    fn aggiorna_file_documenti(&mut self) {
+        for d in &mut self.documenti {
+            if matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_)) && d.aggiorna_file(self.prossimo_id) {
+                self.prossimo_id += 1;
+                self.cache_nesting = None;
+                self.anteprime.richiedi(d.id, d.percorso.clone(), d.info.formato, d.lavorazione, d.anteprima.0);
+            }
+        }
+        self.ultimo_controllo_file = std::time::Instant::now();
     }
 
     /// Richiede di nuovo le anteprime quando cambiano impaginazione o scala:
@@ -461,6 +512,7 @@ impl App {
     /// Manda i documenti pronti uno dopo l'altro, su un unico thread: la porta
     /// 9100 accetta un job alla volta.
     fn stampa(&mut self, ctx: &egui::Context) {
+        self.aggiorna_file_documenti();
         if self.nesting {
             self.stampa_nesting(ctx);
             return;
@@ -1380,7 +1432,7 @@ impl App {
                 let Some((l, a)) = d.mm_pagina(n) else { continue };
                 for copia in 0..d.copie.max(1) {
                     pezzi.push(nesting::Pezzo { id: (d.id, n, copia), l, a });
-                    senza += a;
+                    senza += if rotazione::ruota(l, a, rotolo_mm) { l } else { a };
                 }
             }
         }
@@ -1403,12 +1455,12 @@ impl App {
         // davvero e non una disposizione che la stampa non farà.
         let fuori: HashSet<u64> = pezzi
             .iter()
-            .filter(|p| !nesting::entra(p, utile, self.nesting_ruota))
+            .filter(|p| !nesting::entra(p, utile, self.nesting_ruota, nesting::ALTEZZA_MAX_MM))
             .map(|p| p.id.0)
             .collect();
         // `senza` comprende anche questi documenti: il loro consumo singolo
         // va contato pure con il nesting, per confrontare la stessa coda.
-        let altezza_esclusi: f64 = pezzi.iter().filter(|p| fuori.contains(&p.id.0)).map(|p| p.a).sum();
+        let altezza_esclusi: f64 = pezzi.iter().filter(|p| fuori.contains(&p.id.0)).map(|p| if rotazione::ruota(p.l, p.a, rotolo_mm) { p.l } else { p.a }).sum();
         pezzi.retain(|p| !fuori.contains(&p.id.0));
         if pezzi.is_empty() {
             ui.painter().text(
@@ -1676,6 +1728,11 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let intervallo = std::time::Duration::from_secs(1);
+        if self.ultimo_controllo_file.elapsed() >= intervallo {
+            self.aggiorna_file_documenti();
+        }
+        ctx.request_repaint_after(intervallo);
         // Prima le chiavi aggiornate, poi i risultati: così quelli superati si scartano.
         self.file_trascinati(ctx);
         self.aggiorna_anteprime();
@@ -1716,5 +1773,59 @@ impl eframe::App for App {
         self.config.nesting = self.nesting;
         self.config.nesting_ruota = self.nesting_ruota;
         self.config.salva();
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// Un TIFF sovrascritto rinnova id, misure e idoneità, ma conserva le
+    /// impostazioni dell'utente. Un file sparito non conserva misure obsolete.
+    #[test]
+    fn documento_rilegge_il_tiff_modificato() {
+        let file = file::FileTemporaneo::nuovo("tiff");
+        let scrivi = |pagine, larghezza, altezza| {
+            let mut encoder = tiff::encoder::TiffEncoder::new(std::fs::File::create(file.percorso()).unwrap()).unwrap();
+            for _ in 0..pagine {
+                encoder.write_image::<tiff::encoder::colortype::RGB8>(larghezza, altezza, &vec![100; larghezza as usize * altezza as usize * 3]).unwrap();
+            }
+        };
+        scrivi(1, 100, 200);
+        let lav = Lavorazione { scala: Scala::Percentuale { x: 150.0, y: 150.0 }, ..Default::default() };
+        let mut d = Documento {
+            id: 1,
+            percorso: file.percorso().to_path_buf(),
+            nome: "modificato.tiff".into(),
+            info: file::analizza(file.percorso()).unwrap(),
+            annidabile: true,
+            impronta: impronta_file(file.percorso()),
+            copie: 3,
+            stato: StatoJob::Pronto,
+            lavorazione: lav,
+            blocca_proporzioni: true,
+            anteprima: (None, lav),
+            pagine: Vec::new(),
+            dpi: None,
+            dpi_parziale: false,
+        };
+        let prima = d.info.mm;
+        assert!(!d.aggiorna_file(2));
+        scrivi(2, 80, 90);
+        assert!(d.aggiorna_file(2));
+        assert!(!d.annidabile);
+        assert_ne!(d.info.mm, prima);
+        assert_eq!(d.id, 2);
+        assert_eq!(d.copie, 3);
+        assert_eq!(d.lavorazione, lav);
+        assert!(!d.aggiorna_file(3));
+        std::fs::remove_file(file.percorso()).unwrap();
+        assert!(d.aggiorna_file(3));
+        assert!(!d.annidabile);
+        assert!(d.mm_pagina(0).is_none());
+        scrivi(1, 120, 160);
+        assert!(d.aggiorna_file(4));
+        assert!(d.annidabile);
+        assert!(d.mm_pagina(0).is_some());
     }
 }
