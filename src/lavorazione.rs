@@ -406,14 +406,22 @@ fn applica_scala(doc: &mut Document, lav: &Lavorazione) -> Result<bool> {
 /// Cornice su ogni pagina: allarga il box di `distanza + spessore` per lato e
 /// disegna la linea nera sul bordo esterno. Va prima dell'allineamento, così
 /// `posiziona` riceve le misure con la cornice (la cornice fa parte del pezzo).
+/// Distanza e spessore sono convertiti nelle unità della singola pagina:
+/// `/UserUnit` moltiplica la misura fisica dell'unità utente (default 1).
 fn applica_cornice(doc: &mut Document, cornice: &Cornice) -> Result<bool> {
-    let d = cornice.ingombro_mm() * MM_PT;
-    let s = cornice.spessore_mm.max(0.0) * MM_PT;
     let mut cambiato = false;
     for id in doc.get_pages().into_values().collect::<Vec<_>>() {
         let Some(([x0, y0, x1, y1], _)) = file::box_e_rotazione(doc, id) else {
             continue;
         };
+        let unita = doc.get_dictionary(id)?.get(b"UserUnit").ok()
+            .and_then(|valore| doc.dereference(valore).ok())
+            .and_then(|(_, valore)| valore.as_float().ok())
+            .map(f64::from)
+            .filter(|&v| v.is_finite() && v > 0.0)
+            .unwrap_or(1.0);
+        let d = cornice.ingombro_mm() * MM_PT / unita;
+        let s = cornice.spessore_mm.max(0.0) * MM_PT / unita;
         // Il rettangolo sta a metà dello spessore dentro il bordo della pagina:
         // il lato esterno della linea cade sul bordo del foglio (e quello
         // interno a `distanza` dal contenuto).
@@ -1484,6 +1492,43 @@ mod test {
         assert!(testo.contains("re f"), "contenuto originale: {testo}");
         assert!(testo.contains("0 G"), "linea nera: {testo}");
         assert!(testo.trim_end().ends_with("re S Q"), "linea in coda: {testo}");
+    }
+
+    /// Verifica misure fisiche costanti su pagine con UserUnit assente, 1, 10 e 0,5.
+    #[test]
+    fn cornice_rispetta_le_unita_fisiche_di_ogni_pagina() {
+        let dati = impagina::test::pdf(200.0, 300.0, (10.0, 20.0), 0);
+        let (mut doc, primo) = pagina(&dati);
+        let modello = doc.get_dictionary(primo).unwrap().clone();
+        let padre = modello.get(b"Parent").unwrap().as_reference().unwrap();
+        let mut pagine = vec![(primo, 1.0)]; // /UserUnit assente: vale 1.
+        for unita in [1.0_f32, 10.0, 0.5] {
+            let mut pagina = modello.clone();
+            let riferimento = doc.add_object(Object::Real(unita));
+            pagina.set("UserUnit", riferimento);
+            pagine.push((doc.add_object(pagina), f64::from(unita)));
+        }
+        let kids: Vec<Object> = pagine.iter().map(|&(id, _)| id.into()).collect();
+        let padre = doc.get_dictionary_mut(padre).unwrap();
+        padre.set("Kids", kids);
+        padre.set("Count", pagine.len() as i64);
+
+        applica_cornice(&mut doc, &Cornice::default()).unwrap();
+        for (id, unita) in pagine {
+            let ([x0, y0, x1, y1], _) = file::box_e_rotazione(&doc, id).unwrap();
+            // L'ingombro fisico deve restare 3,25 mm su tutti e quattro i lati.
+            for delta in [10.0 - x0, 20.0 - y0, x1 - 210.0, y1 - 320.0] {
+                assert!((delta * unita / MM_PT - 3.25).abs() < 0.001);
+            }
+            let contenuto = lopdf::content::Content::decode(&doc.get_page_content(id)).unwrap();
+            let spessore = contenuto.operations.iter().find(|op| op.operator == "w").unwrap();
+            let spessore = f64::from(spessore.operands[0].as_float().unwrap());
+            assert!((spessore * unita / MM_PT - 0.25).abs() < 0.001);
+            let linea = contenuto.operations.iter().rev().find(|op| op.operator == "re").unwrap();
+            let x_linea = f64::from(linea.operands[0].as_float().unwrap());
+            let distanza = (10.0 - x_linea - spessore / 2.0) * unita / MM_PT;
+            assert!((distanza - 3.0).abs() < 0.001);
+        }
     }
 
     #[test]
