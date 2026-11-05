@@ -218,22 +218,7 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
 
     for f in args.iter().map(PathBuf::from) {
         let info = file::analizza(&f).with_context(|| f.display().to_string())?;
-        if !lavorazione.nulla() {
-            if !lavorazione::lavorabile(info.formato) {
-                eprintln!(
-                    "attenzione: {} è PostScript/HP-GL/2, scala e cornice non si applicano",
-                    f.display()
-                );
-            } else if let Some((l, a)) = info.mm
-                && lavorazione::fuori_limiti(&lavorazione.scala, l, a)
-            {
-                bail!(
-                    "{}: la scala {} supera i limiti (da 1% a 1000% della misura originale)",
-                    f.display(),
-                    lavorazione.scala.etichetta()
-                );
-            }
-        }
+        valida_scala(&f, &info, &lavorazione)?;
         let opz = OpzioniJob {
             nome: f.file_name().unwrap_or_default().to_string_lossy().into_owned(),
             copie,
@@ -253,6 +238,31 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
                 stampante::invia(&config.host, config.porta, &f, info.formato, &opz, |_| {})?;
                 println!("{} → {}:{} ({})", f.display(), config.host, config.porta, info.dettagli);
             }
+        }
+    }
+    Ok(())
+}
+
+/// Applica gli stessi limiti di scala ai documenti singoli e annidati.
+fn valida_scala(
+    percorso: &std::path::Path,
+    info: &file::InfoFile,
+    lavorazione: &Lavorazione,
+) -> Result<()> {
+    if !lavorazione.nulla() {
+        if !lavorazione::lavorabile(info.formato) {
+            eprintln!(
+                "attenzione: {} è PostScript/HP-GL/2, scala e cornice non si applicano",
+                percorso.display()
+            );
+        } else if let Some((l, a)) = info.mm
+            && lavorazione::fuori_limiti(&lavorazione.scala, l, a)
+        {
+            bail!(
+                "{}: la scala {} supera i limiti (da 1% a 1000% della misura originale)",
+                percorso.display(),
+                lavorazione.scala.etichetta()
+            );
         }
     }
     Ok(())
@@ -280,6 +290,7 @@ fn stampa_annidata(
         .map(|(i, f)| {
             let percorso = PathBuf::from(f);
             let info = file::analizza(&percorso).with_context(|| percorso.display().to_string())?;
+            valida_scala(&percorso, &info, &lavorazione)?;
             Ok(DaAnnidare {
                 id: i as u64,
                 percorso,
@@ -302,14 +313,21 @@ fn stampa_annidata(
     };
     match &prn {
         Some(out) => {
+            for id in &annidamento.esclusi {
+                let d = &documenti[*id as usize];
+                eprintln!(
+                    "attenzione: {} è escluso dal nesting e non verrà scritto con --prn",
+                    d.percorso.display()
+                );
+            }
             let primo = annidamento
                 .fogli
                 .first()
-                .context("nessun foglio da annidare: scala o cornice non si applicano")?;
+                .context("nessun foglio da scrivere: nessun documento è entrato nel nesting")?;
             let mut dest = std::fs::File::create(out)?;
             stampante::scrivi_job(&mut dest, primo.file.percorso(), Formato::Pdf, &base, |_| {})?;
             println!(
-                "primo foglio ({} pezzi) → {}",
+                "primo foglio ({} documenti) → {}",
                 primo.documenti.len(),
                 out.display()
             );

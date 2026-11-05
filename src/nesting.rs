@@ -167,6 +167,7 @@ pub fn disponi(
         if !righe.is_empty() && nuova + pezzo.altezza > altezza_max + TOLLERANZA_MM {
             fogli.push(Foglio { altezza: fondo, posti: std::mem::take(&mut posti) });
             righe.clear();
+            fondo = 0.0;
             nuova = 0.0;
         }
         righe.push(Riga { y: nuova, altezza: pezzo.altezza, usata: pezzo.larghezza });
@@ -606,6 +607,41 @@ mod test {
         assert_eq!(fogli.len(), 2);
         assert!((fogli[0].altezza - 400.0).abs() < 1e-9);
         assert!((fogli[1].altezza - 400.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn il_nuovo_foglio_riparte_dal_proprio_fondo() {
+        for numero in [13, 26] {
+            let pezzi: Vec<_> = (0..numero)
+                .map(|n| pezzo((0, n, 0), 900.0, 400.0))
+                .collect();
+            let fogli = disponi(&pezzi, 904.0, 5.0, false, ALTEZZA_MAX_MM);
+            assert_eq!(fogli.len(), numero.div_ceil(12));
+            for (i, foglio) in fogli.iter().enumerate() {
+                let attesi = (numero - i * 12).min(12);
+                assert_eq!(foglio.posti.len(), attesi);
+                assert_eq!(foglio.altezza, attesi as f64 * 405.0 - 5.0);
+                assert_eq!(foglio.posti[0].y, 0.0);
+            }
+        }
+    }
+
+    /// Dopo un foglio alto, le file più basse ripartono da zero senza ereditarne il fondo.
+    #[test]
+    fn nuovo_foglio_con_altezze_diverse() {
+        let pezzi = [
+            pezzo((1, 0, 0), 900.0, 600.0),
+            pezzo((2, 0, 0), 900.0, 300.0),
+            pezzo((3, 0, 0), 900.0, 200.0),
+        ];
+        let fogli = disponi(&pezzi, 904.0, 5.0, false, 700.0);
+        assert_eq!(fogli.len(), 2);
+        assert_eq!(fogli[0].altezza, 600.0);
+        assert_eq!(fogli[1].altezza, 505.0);
+        assert_eq!(fogli[1].posti, [
+            Posto { id: (2, 0, 0), x: 0.0, y: 0.0, ruotato: false },
+            Posto { id: (3, 0, 0), x: 0.0, y: 305.0, ruotato: false },
+        ]);
     }
 
     // ---- composizione ----

@@ -763,6 +763,15 @@ pub fn componi_nesting(
     Ok(Annidamento { fogli: pronti, pezzi: attivi.len(), documenti: inclusi.len(), esclusi })
 }
 
+/// Criterio condiviso da anteprima e composizione: la ricomposizione raster
+/// gestisce una pagina sola, quindi i TIFF multipagina partono singolarmente.
+pub fn annidabile_file(percorso: &Path, formato: Formato) -> Result<bool> {
+    if !nesting::annidabile(formato) {
+        return Ok(false);
+    }
+    Ok(formato != Formato::Tiff || !tiff_multipagina(percorso)?)
+}
+
 /// Contenuto e misure finali (mm) di ogni pagina di un documento da annidare.
 type DocumentoNesting = (Sorgente, Vec<(f64, f64)>);
 
@@ -770,6 +779,9 @@ type DocumentoNesting = (Sorgente, Vec<(f64, f64)>);
 /// non lo sa prendere (PostScript/HP-GL/2, PDF cifrato o senza misure, TIFF
 /// multipagina).
 fn sorgente_nesting(d: &DaAnnidare) -> Result<Option<DocumentoNesting>> {
+    if !annidabile_file(&d.percorso, d.formato)? {
+        return Ok(None);
+    }
     match d.formato {
         Formato::Pdf => {
             let originali = std::fs::read(&d.percorso)?;
@@ -799,11 +811,6 @@ fn sorgente_nesting(d: &DaAnnidare) -> Result<Option<DocumentoNesting>> {
             Ok(Some((sorgente, misure)))
         }
         Formato::Jpeg | Formato::Tiff | Formato::Png => {
-            // La ricomposizione raster gestisce una pagina sola: un TIFF
-            // multipagina nel nesting perderebbe le altre, meglio mandarlo solo.
-            if d.formato == Formato::Tiff && tiff_multipagina(&d.percorso)? {
-                return Ok(None);
-            }
             let dpi = file::dpi_immagine(&d.percorso, d.formato);
             let dimensioni = imagesize::size(&d.percorso).context("dimensioni dell'immagine")?;
             let (l, a) = (
@@ -1485,6 +1492,26 @@ mod test {
             img.write_data(&vec![20 + pagina as u8; 100 * 50 * 3]).unwrap();
         }
         p
+    }
+
+    #[test]
+    fn nesting_esclude_solo_i_tiff_multipagina() {
+        for pagine in [1, 2] {
+            let dir = cartella(&format!("nesting-tiff-{pagine}"));
+            let percorso = tiff_100dpi(&dir, pagine);
+            assert_eq!(annidabile_file(&percorso, Formato::Tiff).unwrap(), pagine == 1);
+            let documento = DaAnnidare {
+                id: 1,
+                percorso,
+                formato: Formato::Tiff,
+                lavorazione: Lavorazione::default(),
+                copie: 1,
+            };
+            let esito = componi_nesting(&[documento], 904.0, 0.0, &Nesting::default()).unwrap();
+            assert_eq!(esito.documenti, usize::from(pagine == 1));
+            assert_eq!(esito.esclusi, if pagine == 1 { vec![] } else { vec![1] });
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]

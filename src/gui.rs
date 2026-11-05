@@ -1,6 +1,7 @@
 //! Interfaccia in stile HP Click: impostazioni a sinistra, miniature al centro,
 //! anteprima sul rotolo a destra, file trascinabili ovunque nella finestra.
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
@@ -218,6 +219,14 @@ enum Evento {
     Pagine(u64, Chiave, Vec<Pagina>),
 }
 
+/// Disposizione riutilizzata finché pezzi, misure e opzioni restano uguali.
+struct CacheNesting {
+    pezzi: Vec<nesting::Pezzo>,
+    utile: f64,
+    opzioni: Nesting,
+    fogli: Vec<nesting::Foglio>,
+}
+
 pub struct App {
     config: Config,
     documenti: Vec<Documento>,
@@ -232,6 +241,7 @@ pub struct App {
     /// Nesting attivo: più pezzi sullo stesso foglio (sezione NESTING).
     nesting: bool,
     nesting_ruota: bool,
+    cache_nesting: Option<CacheNesting>,
     extra_pjl: String,
     larghezza_rotolo: f64,
     /// Larghezza letta dalla stampante via SNMP (nome ingresso, mm).
@@ -271,6 +281,7 @@ impl App {
             larghezza_rotolo: config.larghezza_rotolo_mm,
             nesting: config.nesting,
             nesting_ruota: config.nesting_ruota,
+            cache_nesting: None,
             allineamento: Allineamento::Sinistra,
             rotolo_confermato: None,
             chiedi_conferma: false,
@@ -551,11 +562,11 @@ impl App {
             let esclusi = match lavorazione::componi_nesting(&annidabili, rotolo, margine, &nesting) {
                 Err(e) => {
                     let errore = format!("{e:#}");
-                    for (id, ..) in &tutti {
-                        let _ = tx.send(Evento::Finito(*id, Err(errore.clone())));
+                    for d in &annidabili {
+                        let _ = tx.send(Evento::Finito(d.id, Err(errore.clone())));
                     }
                     ctx.request_repaint();
-                    return;
+                    Vec::new()
                 }
                 Ok(annidamento) => {
                     // Un documento può finire su più fogli: vale l'esito peggiore,
@@ -1353,8 +1364,10 @@ impl App {
         let utile = (rotolo_mm - 2.0 * self.config.margine_mm).max(1.0);
         let mut pezzi = Vec::new();
         let mut senza = 0.0;
-        for d in &self.documenti {
-            if !nesting::annidabile(d.info.formato) {
+        let mut singoli = 0;
+        for d in self.documenti.iter().filter(|d| matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_))) {
+            if !lavorazione::annidabile_file(&d.percorso, d.info.formato).unwrap_or(false) {
+                singoli += 1;
                 continue;
             }
             for n in 0..d.info.pagine {
@@ -1369,7 +1382,11 @@ impl App {
             ui.painter().text(
                 area.center(),
                 Align2::CENTER_CENTER,
-                "Aggiungi PDF o immagini per vedere il nesting",
+                if singoli > 0 {
+                    format!("{singoli} documenti non annidabili: partono da soli")
+                } else {
+                    "Aggiungi PDF o immagini per vedere il nesting".to_string()
+                },
                 stile(RICHIAMO).resolve(ui.style()),
                 Color32::from_gray(110),
             );
@@ -1378,31 +1395,39 @@ impl App {
         // Come `componi_nesting`: basta un pezzo fuori dal rotolo per mandare da
         // solo tutto il documento, così l'anteprima mostra i fogli che partiranno
         // davvero e non una disposizione che la stampa non farà.
-        let mut fuori: Vec<u64> = pezzi
+        let fuori: HashSet<u64> = pezzi
             .iter()
             .filter(|p| !nesting::entra(p, utile, self.nesting_ruota))
             .map(|p| p.id.0)
             .collect();
-        fuori.sort_unstable();
-        fuori.dedup();
         pezzi.retain(|p| !fuori.contains(&p.id.0));
         if pezzi.is_empty() {
             ui.painter().text(
                 area.center(),
                 Align2::CENTER_CENTER,
-                format!("Nessun pezzo entra nel rotolo da {rotolo_mm:.0} mm"),
+                format!(
+                    "Nessun pezzo entra nel rotolo da {rotolo_mm:.0} mm\n{} documenti partono da soli",
+                    fuori.len() + singoli
+                ),
                 stile(RICHIAMO).resolve(ui.style()),
                 Color32::from_gray(110),
             );
             return;
         }
-        let fogli = nesting::disponi(
-            &pezzi,
-            utile,
-            self.config.nesting_distanza_mm,
-            self.nesting_ruota,
-            nesting::ALTEZZA_MAX_MM,
-        );
+        let opzioni = Nesting {
+            distanza_mm: self.config.nesting_distanza_mm,
+            ruota: self.nesting_ruota,
+        };
+        if !self.cache_nesting.as_ref().is_some_and(|cache| {
+            cache.pezzi == pezzi && cache.utile == utile && cache.opzioni == opzioni
+        }) {
+            let fogli = nesting::disponi(
+                &pezzi, utile, opzioni.distanza_mm, opzioni.ruota, nesting::ALTEZZA_MAX_MM,
+            );
+            self.cache_nesting = Some(CacheNesting { pezzi, utile, opzioni, fogli });
+        }
+        let fogli = &self.cache_nesting.as_ref().unwrap().fogli;
+        let documenti: HashMap<_, _> = self.documenti.iter().map(|d| (d.id, d)).collect();
         let con: f64 = fogli.iter().map(|f| f.altezza).sum();
         let disposti: usize = fogli.iter().map(|f| f.posti.len()).sum();
         let spazio = 6.0f32;
@@ -1414,6 +1439,9 @@ impl App {
             con / 1000.0,
             senza / 1000.0
         );
+        if singoli > 0 {
+            nota.push_str(&format!("\n{singoli} documenti non annidabili: partono da soli"));
+        }
         if !fuori.is_empty() {
             nota.push_str(&format!(
                 "\n{} documenti non entrano nel rotolo: partono da soli",
@@ -1457,7 +1485,7 @@ impl App {
                 ));
             }
             for posto in &foglio.posti {
-                let Some(d) = self.documenti.iter().find(|d| d.id == posto.id.0) else { continue };
+                let Some(d) = documenti.get(&posto.id.0) else { continue };
                 let Some((l, a)) = d.mm_pagina(posto.id.1) else { continue };
                 let (pl, pa) = if posto.ruotato { (a, l) } else { (l, a) };
                 let r = Rect::from_min_size(
