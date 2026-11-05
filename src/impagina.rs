@@ -17,8 +17,8 @@
 //!   tracciato di ritaglio sul riquadro originale nasconde quello che prima
 //!   cadeva fuori pagina.
 //! - JPEG, TIFF e PNG: si riscrivono in TIFF con una banda bianca fino alla
-//!   larghezza della pagina, mantenendo i DPI del file. Dei TIFF multipagina
-//!   parte solo la prima pagina.
+//!   larghezza della pagina, mantenendo i DPI del file. I TIFF multipagina
+//!   vengono rifiutati prima della ricomposizione in `lavorazione`.
 //! - PostScript e HP-GL/2 partono come sono.
 //!
 //! Con "Sinistra", o se il contenuto non entra nella larghezza utile del rotolo,

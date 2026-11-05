@@ -707,6 +707,19 @@ fn prepara_immagine(
         return Ok(Some((tmp, formato)));
     }
 
+    // La ricomposizione raster gestisce una sola pagina: rifiuta i TIFF
+    // multipagina prima di decodificare o produrre un file incompleto.
+    // Il percorso dei soli DPI qui sopra conserva invece tutte le pagine.
+    if formato == Formato::Tiff {
+        let lettore = tiff::decoder::Decoder::new(std::io::BufReader::new(
+            std::fs::File::open(percorso).context("apertura del TIFF")?,
+        ))
+        .context("lettura delle pagine del TIFF")?;
+        if lettore.more_images() {
+            bail!("TIFF multipagina: cornice e ricomposizione raster non supportate; nessuna pagina elaborata");
+        }
+    }
+
     let immagine = png::su_bianco(png::decodifica(percorso)?);
     if impagina {
         let imp = imp.expect("impagina implica un'impaginazione");
@@ -1250,6 +1263,98 @@ mod test {
         // 100 dpi = 3937 pixel per metro.
         std::fs::write(&p, png::test::con_phys(&std::fs::read(&p).unwrap(), 3937)).unwrap();
         p
+    }
+
+    /// TIFF RGB con pagine distinguibili, tutte a 100 dpi.
+    fn tiff_100dpi(dir: &Path, pagine: usize) -> PathBuf {
+        use tiff::encoder::{Rational, TiffEncoder, colortype};
+
+        let p = dir.join("foto.tiff");
+        let mut encoder = TiffEncoder::new(std::fs::File::create(&p).unwrap()).unwrap();
+        for pagina in 0..pagine {
+            let mut img = encoder.new_image::<colortype::RGB8>(100, 50).unwrap();
+            img.resolution(tiff::tags::ResolutionUnit::Inch, Rational { n: 100, d: 1 });
+            img.write_data(&vec![20 + pagina as u8; 100 * 50 * 3]).unwrap();
+        }
+        p
+    }
+
+    #[test]
+    fn tiff_multipagina_rifiutato_prima_della_ricomposizione() {
+        let dir = cartella("multipagina-cornice");
+        let p = tiff_100dpi(&dir, 2);
+        let originale = std::fs::read(&p).unwrap();
+        let imp = Impaginazione {
+            allineamento: impagina::Allineamento::Centro,
+            rotolo_mm: 100.0,
+            margine_mm: 5.0,
+        };
+        for cornice in [None, Some(Cornice::default())] {
+            for scala in [Scala::Originale, Scala::Percentuale { x: 200.0, y: 200.0 }] {
+                for allineamento in [None, Some(&imp)] {
+                    if cornice.is_none() && allineamento.is_none() {
+                        continue;
+                    }
+                    let lav = Lavorazione { scala, cornice };
+                    let errore = prepara(&p, Formato::Tiff, &lav, allineamento)
+                        .err().expect("non deve produrre un TIFF con una sola pagina");
+                    assert!(errore.to_string().contains("TIFF multipagina"), "{errore:#}");
+                }
+            }
+        }
+        assert_eq!(std::fs::read(&p).unwrap(), originale);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tiff_multipagina_originale_e_sola_scala_conservano_le_pagine() {
+        let dir = cartella("multipagina-scala");
+        let p = tiff_100dpi(&dir, 2);
+        assert!(prepara(&p, Formato::Tiff, &Lavorazione::default(), None).unwrap().is_none());
+        let lav = Lavorazione {
+            scala: Scala::Percentuale { x: 200.0, y: 200.0 },
+            ..Default::default()
+        };
+        let (tmp, formato) = prepara(&p, Formato::Tiff, &lav, None).unwrap().unwrap();
+        assert_eq!(formato, Formato::Tiff);
+        let mut lettore = Decoder::new(std::fs::File::open(tmp.percorso()).unwrap()).unwrap();
+        for pagina in 0..2 {
+            assert_eq!(lettore.dimensions().unwrap(), (100, 50));
+            for tag in [Tag::XResolution, Tag::YResolution] {
+                match lettore.get_tag(tag).unwrap() {
+                    Value::Rational(n, d) => assert_eq!(n as f64 / d as f64, 50.0),
+                    valore => panic!("risoluzione non razionale: {valore:?}"),
+                }
+            }
+            match lettore.read_image().unwrap() {
+                tiff::decoder::DecodingResult::U8(pixel) => {
+                    assert_eq!(pixel, vec![20 + pagina; 100 * 50 * 3]);
+                }
+                _ => panic!("pixel inattesi"),
+            }
+            assert_eq!(lettore.more_images(), pagina == 0);
+            if lettore.more_images() {
+                lettore.next_image().unwrap();
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tiff_singola_pagina_con_cornice_conserva_contenuto_e_dpi() {
+        let dir = cartella("tiff-cornice");
+        let p = tiff_100dpi(&dir, 1);
+        let lav = Lavorazione { cornice: Some(Cornice::default()), ..Default::default() };
+        let (tmp, formato) = prepara(&p, Formato::Tiff, &lav, None).unwrap().unwrap();
+        assert_eq!(formato, Formato::Tiff);
+        let letta = image::open(tmp.percorso()).unwrap().to_rgb8();
+        assert_eq!(letta.dimensions(), (126, 76));
+        assert_eq!(letta.get_pixel(0, 0).0, [0, 0, 0]);
+        assert_eq!(letta.get_pixel(12, 30).0, [255, 255, 255]);
+        assert_eq!(letta.get_pixel(23, 23).0, [20, 20, 20]);
+        assert_eq!(dpi_tiff(tmp.percorso()), (100.0, 100.0));
+        assert!(!Decoder::new(std::fs::File::open(tmp.percorso()).unwrap()).unwrap().more_images());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn dpi_tiff(percorso: &Path) -> (f64, f64) {
