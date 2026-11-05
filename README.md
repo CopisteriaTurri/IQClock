@@ -28,14 +28,16 @@ dei rispettivi proprietari e qui compaiono solo per indicare la compatibilità. 
   iqclock stampa tavola.pdf --scala 500x700      # 500 × 700 mm, proporzioni intatte
   iqclock stampa tavola.pdf --scala 500x700!     # 500 × 700 mm, deformando
   iqclock stampa logo.png --cornice              # con la cornice di taglio attorno
+  iqclock stampa a.pdf b.pdf --nesting           # più pezzi sullo stesso foglio
   iqclock stato                                  # stato, inchiostri, carta
   iqclock snmp 1.3.6.1.2.1.43                    # diagnostica SNMP
   ```
 
 Le impostazioni (IP, porta, larghezza rotolo, margine, soglia dei DPI, distanza e
-spessore della cornice) stanno in `%APPDATA%\iqclock\config.txt`. Di default:
+spessore della cornice, nesting) stanno in `%APPDATA%\iqclock\config.txt`. Di default:
 `192.168.10.72:9100`, rotolo 36", margine 5 mm, avviso sotto 200 dpi, cornice 3 mm
-di distanza e 0,25 mm di spessore, finestra 1200 × 1000 px. La finestra si apre
+di distanza e 0,25 mm di spessore, nesting spento con i pezzi ruotati e 5 mm di
+distanza, finestra 1200 × 1000 px. La finestra si apre
 abbastanza alta da mostrare tutte le sezioni del pannello; con
 `finestra_larghezza_px` e `finestra_altezza_px` si cambia (800–4000 × 500–4000,
 fuori da lì vale il default).
@@ -73,6 +75,42 @@ fogli corti, dritti e con la cornice intera.
 La **larghezza del rotolo** è quella rilevata dalla stampante via SNMP; se non arriva si
 usa quella scelta a mano e, prima di stampare, IQClock chiede conferma. Da riga di comando
 in quel caso serve `--larghezza-rotolo MM`.
+
+## Nesting
+
+Con **Nesting** (sezione NESTING, spento di default) IQClock mette più file sullo stesso
+foglio invece di stampare una pagina per volta. Vale per PDF, JPEG, TIFF e PNG;
+PostScript e HP-GL/2 partono da soli. Si scelgono lo spazio tra i pezzi (default 5 mm,
+`nesting_distanza_mm` nella configurazione) e **Ruota i pezzi** (acceso: il lato più
+corto va in altezza, così il rotolo consuma meno). Il foglio è largo quanto la parte
+stampabile del rotolo, come con l'allineamento centro; con il nesting l'allineamento
+non si applica.
+
+Ogni foglio è un PDF composto da IQClock e parte come **un job** (`Nesting (N file)`,
+`COPIES=1`: le copie sono pezzi). I documenti che non entrano nel rotolo in nessun
+verso, o che il nesting non sa leggere (PDF cifrato, TIFF multipagina), partono uno per
+uno come oggi con le loro copie. L'anteprima mostra il layout di tutta la coda e quanti
+metri di carta servono rispetto alla stampa senza nesting.
+
+Le copie sono **per pezzo**: si scelgono nella sezione NESTING (una riga per file, accanto
+a Ruota e Distanza) o in COPIE del file selezionato; l'anteprima le conta nei metri di
+carta e segna ogni pezzo con la sua copia (`2/3`). Cliccando un pezzo nell'anteprima si
+seleziona il suo file.
+
+- **PDF**: ogni pagina diventa un Form XObject (vettoriale, risorse comprese);
+  `/Rotate` viene applicato e le annotazioni si perdono.
+- **JPEG**: Image XObject con `/Filter /DCTDecode`, i byte del file così come sono:
+  nessuna ricompressione.
+- **TIFF, PNG**: decodificati ed entrati come RGB 8 bit compresso Flate.
+- La scala e la cornice scelte per il documento si applicano prima: ogni pezzo arriva
+  già scalato e incorniciato.
+- Un foglio non supera 5000 mm di altezza: oltre si apre un altro foglio (molte
+  implementazioni PDF rifiutano pagine più alte di 14400 pt; non è verificato se la
+  T2600 ne accetta di più).
+
+Da riga di comando: `iqclock stampa a.pdf b.pdf --nesting`, con `--distanza MM` e
+`--senza-rotazione`; la larghezza del rotolo si legge dalla stampante o si dà con
+`--larghezza-rotolo`. Con `--prn` viene scritto solo il primo foglio.
 
 ## Ridimensionamento
 
@@ -214,8 +252,9 @@ binari di testa che vengono scartati in lettura.
 
 - L'anteprima mostra le prime 4 pagine (PDF con pdfium, JPEG, TIFF e PNG); PostScript
   e HP-GL/2 restano senza anteprima.
-- Niente nesting: decide la stampante. Il ridimensionamento è quello descritto sopra
-  (la scala non ricampiona le immagini).
+- Il nesting compone un PDF per foglio, ma le annotazioni delle pagine PDF non passano
+  nel Form XObject: si perdono. Il ridimensionamento è quello descritto sopra (la scala
+  non ricampiona le immagini).
 - Con l'allineamento a sinistra la rotazione di 90° la decide la stampante (impostazione
   del pannello): la T2600 ruota il foglio quando così entra nel rotolo o consuma meno
   carta, e l'anteprima mostra già le pagine come usciranno. Il PJL non la controlla: provato il 29/10/2026,

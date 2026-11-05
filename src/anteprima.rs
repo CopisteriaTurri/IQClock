@@ -149,6 +149,13 @@ fn carica_pdfium() -> Result<Pdfium, String> {
     carica_pdfium_in(&cartelle, true)
 }
 
+/// pdfium per i test che devono guardare i pixel: `None` se la libreria non
+/// c'è, e chi la usa si salta (come fa l'anteprima senza pdfium).
+#[cfg(test)]
+pub(crate) fn pdfium_per_test() -> Option<Pdfium> {
+    carica_pdfium().ok()
+}
+
 fn cartelle_pdfium() -> Vec<PathBuf> {
     let mut cartelle: Vec<PathBuf> = Vec::new();
     if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {

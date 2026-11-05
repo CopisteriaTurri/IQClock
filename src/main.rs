@@ -10,6 +10,7 @@ mod file;
 mod gui;
 mod impagina;
 mod lavorazione;
+mod nesting;
 mod pjl;
 mod png;
 mod risoluzione;
@@ -24,18 +25,23 @@ use anyhow::{Context, Result, bail};
 
 use config::Config;
 use impagina::{Allineamento, Impaginazione};
-use lavorazione::{Cornice, Lavorazione, Scala};
-use pjl::{OpzioniJob, Sorgente};
+use lavorazione::{Cornice, DaAnnidare, Lavorazione, Scala};
+use nesting::Nesting;
+use pjl::{Formato, OpzioniJob, Sorgente};
 
 const USO: &str = "\
 Senza argomenti (o con dei file) apre l'interfaccia. Da riga di comando:
   iqclock stampa FILE... [--host IP] [--copie N] [--rotolo 1|2|auto] [--grigi] [--prn OUT]
                  [--allinea sinistra|centro|destra] [--larghezza-rotolo MM] [--margine MM]
                  [--scala A3|50%|500x700|500x700!] [--cornice]
-      Con --allinea centro/destra la larghezza del rotolo si legge dalla stampante (SNMP);
-      --larghezza-rotolo la indica a mano.
+                 [--nesting] [--distanza MM] [--senza-rotazione]
+      Con --allinea centro/destra, o con --nesting, la larghezza del rotolo si legge dalla
+      stampante (SNMP); --larghezza-rotolo la indica a mano.
       --scala 500x700 tiene le proporzioni, 500x700! deforma.
       --cornice aggiunge la linea di taglio (distanza e spessore dalla configurazione).
+      --nesting mette più file sullo stesso foglio (PDF e immagini): un job per foglio,
+      distanza tra i pezzi in mm e ruota i pezzi per stare nel rotolo (--senza-rotazione
+      li lascia come sono). Con --prn scrive solo il primo foglio.
   iqclock stato [--host IP]
   iqclock snmp OID [--host IP]      (diagnostica: elenca le voci sotto OID)";
 
@@ -153,27 +159,62 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
         spessore_mm: config.cornice_spessore_mm,
     });
     let lavorazione = Lavorazione { scala, cornice };
+    let nesting = prendi_flag(&mut args, "--nesting");
+    let distanza_mm = prendi(&mut args, "--distanza")?
+        .map(|m| m.parse::<f64>())
+        .transpose()
+        .context("--distanza")?
+        .unwrap_or(config.nesting_distanza_mm);
+    if !(distanza_mm.is_finite() && distanza_mm >= 0.0) {
+        bail!("--distanza vuole un numero di mm maggiore o uguale a 0");
+    }
+    let ruota = !prendi_flag(&mut args, "--senza-rotazione");
     if args.is_empty() {
         bail!("nessun file da stampare\n{USO}");
     }
-    if prn.is_some() && args.len() > 1 {
-        bail!("--prn accetta un solo file");
+    if prn.is_some() && args.len() > 1 && !nesting {
+        bail!("--prn accetta un solo file (con --nesting scrive il primo foglio)");
     }
-    let impaginazione = if allineamento == Allineamento::Sinistra {
-        None
-    } else {
-        // Impaginare su una larghezza sbagliata fa ridurre o tagliare la pagina:
-        // o la dice la stampante, o la si indica esplicitamente.
-        let rotolo_mm = match larghezza_rotolo {
-            Some(mm) => mm,
-            None => stato::leggi(&config.host)
+    // Impaginare (o annidare) su una larghezza sbagliata fa ridurre o tagliare
+    // la pagina: o la dice la stampante, o la si indica esplicitamente.
+    let rotolo_mm = match larghezza_rotolo {
+        Some(mm) => Some(mm),
+        None if nesting || allineamento != Allineamento::Sinistra => Some(
+            stato::leggi(&config.host)
                 .context("lettura del rotolo dalla stampante")?
                 .larghezza_rotolo_mm()
                 .map(|(_, mm)| mm)
                 .context("la stampante non dichiara la larghezza del rotolo: indicala con --larghezza-rotolo MM")?,
-        };
-        Some(Impaginazione { allineamento, rotolo_mm, margine_mm })
+        ),
+        None => None,
     };
+    // Con il nesting l'allineamento non si applica: il foglio è composto dai pezzi.
+    let impaginazione = match (nesting, allineamento) {
+        (true, Allineamento::Sinistra) => None,
+        (true, _) => {
+            eprintln!("attenzione: con --nesting l'allineamento non si applica");
+            None
+        }
+        (false, Allineamento::Sinistra) => None,
+        (false, allineamento) => {
+            Some(Impaginazione { allineamento, rotolo_mm: rotolo_mm.unwrap(), margine_mm })
+        }
+    };
+
+    if nesting {
+        return stampa_annidata(
+            &config,
+            args,
+            prn,
+            rotolo_mm.unwrap(),
+            margine_mm,
+            copie,
+            sorgente,
+            scala_di_grigi,
+            lavorazione,
+            Nesting { distanza_mm, ruota },
+        );
+    }
 
     for f in args.iter().map(PathBuf::from) {
         let info = file::analizza(&f).with_context(|| f.display().to_string())?;
@@ -211,6 +252,114 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
             None => {
                 stampante::invia(&config.host, config.porta, &f, info.formato, &opz, |_| {})?;
                 println!("{} → {}:{} ({})", f.display(), config.host, config.porta, info.dettagli);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Percorso con `--nesting`: compone i fogli e manda un job per foglio, poi i
+/// documenti esclusi uno alla volta come oggi. `--prn` scrive solo il primo
+/// foglio, senza toccare la stampante.
+#[allow(clippy::too_many_arguments)]
+fn stampa_annidata(
+    config: &Config,
+    file: Vec<String>,
+    prn: Option<PathBuf>,
+    rotolo_mm: f64,
+    margine_mm: f64,
+    copie: u32,
+    sorgente: Sorgente,
+    scala_di_grigi: bool,
+    lavorazione: Lavorazione,
+    nesting: Nesting,
+) -> Result<()> {
+    let documenti: Vec<DaAnnidare> = file
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let percorso = PathBuf::from(f);
+            let info = file::analizza(&percorso).with_context(|| percorso.display().to_string())?;
+            Ok(DaAnnidare {
+                id: i as u64,
+                percorso,
+                formato: info.formato,
+                lavorazione,
+                copie,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let annidamento = lavorazione::componi_nesting(&documenti, rotolo_mm, margine_mm, &nesting)
+        .context("composizione dei fogli")?;
+    let base = OpzioniJob {
+        nome: format!("Nesting ({} file)", annidamento.documenti),
+        copie: 1,
+        sorgente,
+        scala_di_grigi,
+        impaginazione: None,
+        lavorazione: Lavorazione::default(),
+        ..Default::default()
+    };
+    match &prn {
+        Some(out) => {
+            let primo = annidamento
+                .fogli
+                .first()
+                .context("nessun foglio da annidare: scala o cornice non si applicano")?;
+            let mut dest = std::fs::File::create(out)?;
+            stampante::scrivi_job(&mut dest, primo.file.percorso(), Formato::Pdf, &base, |_| {})?;
+            println!(
+                "primo foglio ({} pezzi) → {}",
+                primo.documenti.len(),
+                out.display()
+            );
+        }
+        None => {
+            for foglio in &annidamento.fogli {
+                stampante::invia(
+                    &config.host,
+                    config.porta,
+                    foglio.file.percorso(),
+                    Formato::Pdf,
+                    &base,
+                    |_| {},
+                )?;
+            }
+            println!(
+                "{} fogli, {} pezzi → {}:{}",
+                annidamento.fogli.len(),
+                annidamento.pezzi,
+                config.host,
+                config.porta
+            );
+            // I documenti che il nesting non ha preso partono uno alla volta.
+            for id in &annidamento.esclusi {
+                let d = &documenti[*id as usize];
+                let info = file::analizza(&d.percorso)?;
+                let opz = OpzioniJob {
+                    nome: d.percorso.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                    copie,
+                    sorgente,
+                    scala_di_grigi,
+                    impaginazione: None,
+                    lavorazione,
+                    ..Default::default()
+                };
+                stampante::invia(
+                    &config.host,
+                    config.porta,
+                    &d.percorso,
+                    d.formato,
+                    &opz,
+                    |_| {},
+                )?;
+                println!(
+                    "{} → {}:{} ({})",
+                    d.percorso.display(),
+                    config.host,
+                    config.porta,
+                    info.dettagli
+                );
             }
         }
     }

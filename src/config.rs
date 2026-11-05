@@ -16,6 +16,10 @@ pub struct Config {
     /// Cornice di taglio: distanza della linea dal contenuto e suo spessore.
     pub cornice_distanza_mm: f64,
     pub cornice_spessore_mm: f64,
+    /// Nesting: attivo, se i pezzi si possono ruotare e lo spazio tra loro.
+    pub nesting: bool,
+    pub nesting_ruota: bool,
+    pub nesting_distanza_mm: f64,
     /// Dimensione della finestra all'apertura, in pixel logici: alta abbastanza
     /// da mostrare tutte le sezioni del pannello senza scorrere.
     pub finestra_larghezza_px: u32,
@@ -34,6 +38,9 @@ impl Default for Config {
             soglia_dpi: 200.0,
             cornice_distanza_mm: 3.0,
             cornice_spessore_mm: 0.25,
+            nesting: false,
+            nesting_ruota: true,
+            nesting_distanza_mm: 5.0,
             finestra_larghezza_px: 1200,
             finestra_altezza_px: 1000,
         }
@@ -47,6 +54,11 @@ fn percorso() -> Option<PathBuf> {
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
     })?;
     Some(base.join("iqclock").join("config.txt"))
+}
+
+/// Valore booleano di una chiave: "1", "true" e "sì" accendono, il resto spegne.
+fn booleano(v: &str) -> bool {
+    matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "si" | "sì")
 }
 
 /// Pixel di una misura della finestra: fuori intervallo vale il default, che
@@ -103,6 +115,16 @@ impl Config {
                         c.cornice_spessore_mm = mm;
                     }
                 }
+                "nesting" => c.nesting = booleano(v),
+                "nesting_ruota" => c.nesting_ruota = booleano(v),
+                "nesting_distanza_mm" => {
+                    if let Ok(mm) = v.trim().parse::<f64>()
+                        && mm.is_finite()
+                        && (0.0..=100.0).contains(&mm)
+                    {
+                        c.nesting_distanza_mm = mm;
+                    }
+                }
                 "finestra_larghezza_px" => {
                     if let Some(px) = px_accettabili(v, 800, 4000) {
                         c.finestra_larghezza_px = px;
@@ -128,10 +150,10 @@ impl Config {
         let _ = std::fs::write(
             p,
             format!(
-                "host={}\nporta={}\nrotolo_mm={}\nmargine_mm={}\nsoglia_dpi={}\ncornice_distanza_mm={}\ncornice_spessore_mm={}\nfinestra_larghezza_px={}\nfinestra_altezza_px={}\n",
+                "host={}\nporta={}\nrotolo_mm={}\nmargine_mm={}\nsoglia_dpi={}\ncornice_distanza_mm={}\ncornice_spessore_mm={}\nnesting={}\nnesting_ruota={}\nnesting_distanza_mm={}\nfinestra_larghezza_px={}\nfinestra_altezza_px={}\n",
                 self.host, self.porta, self.larghezza_rotolo_mm, self.margine_mm, self.soglia_dpi,
-                self.cornice_distanza_mm, self.cornice_spessore_mm, self.finestra_larghezza_px,
-                self.finestra_altezza_px
+                self.cornice_distanza_mm, self.cornice_spessore_mm, self.nesting, self.nesting_ruota,
+                self.nesting_distanza_mm, self.finestra_larghezza_px, self.finestra_altezza_px
             ),
         );
     }
@@ -180,6 +202,9 @@ mod test {
             soglia_dpi: 150.0,
             cornice_distanza_mm: 10.0,
             cornice_spessore_mm: 0.5,
+            nesting: true,
+            nesting_ruota: false,
+            nesting_distanza_mm: 8.0,
             finestra_larghezza_px: 1400,
             finestra_altezza_px: 900,
         };
