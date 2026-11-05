@@ -229,6 +229,8 @@ struct CornicePx {
 }
 
 impl CornicePx {
+    /// Converte distanza e spessore ai DPI di ciascun asse, arrotondando
+    /// al pixel più vicino e garantendo almeno un pixel di linea.
     fn da_mm(cornice: &Cornice, dpi: (f64, f64)) -> Self {
         let px = |mm: f64, dpi: f64| (mm.max(0.0) / 25.4 * dpi).round() as u32;
         Self {
@@ -309,6 +311,7 @@ impl RasterComposto {
         Self { contenuto, dpi, larghezza_px, x_px: 0, ruotata: false, cornice: Some(cornice), altezza_px }
     }
 
+    /// Altezza della pagina raster, compresa l’eventuale cornice.
     pub fn altezza_px(&self) -> u32 {
         self.altezza_px
     }
@@ -544,6 +547,8 @@ pub(crate) mod test {
         assert!(componi_pdf(&dati, &imp(Allineamento::Sinistra)).unwrap().is_none());
     }
 
+    /// Verifica l’allineamento a destra e la banda bianca aggiunta sul rotolo
+    /// quando la cornice è disattivata.
     #[test]
     fn raster_allargato_con_banda_bianca() {
         // 100 × 50 px a 100 dpi (25,4 × 12,7 mm) su rotolo da 100 mm, margine 5:
@@ -562,6 +567,8 @@ pub(crate) mod test {
         assert_eq!(img.get_pixel(c.x_px - 50, 10).0, [255, 255, 255]);
     }
 
+    /// Verifica che ruotare il contenuto scambi anche i DPI dei due assi
+    /// e mantenga le dimensioni fisiche della pagina.
     #[test]
     fn raster_verticale_ruotato_e_dpi_scambiati() {
         // 50 × 200 px a 100 × 120 dpi (12,7 × 42,3 mm): verticale, si ruota per
@@ -575,6 +582,8 @@ pub(crate) mod test {
         assert_eq!(c.larghezza_px, (94.0 / 25.4 * 120.0_f64).round() as u32);
     }
 
+    /// Verifica che il raster cresca per ospitare la linea esterna e lasci
+    /// la distanza bianca tra linea e contenuto.
     #[test]
     fn raster_con_cornice_la_disegna_attorno_al_pezzo() {
         // 100 × 50 px a 100 dpi, cornice 3 + 0,25 mm: 13 px per lato.
@@ -589,6 +598,8 @@ pub(crate) mod test {
         assert_eq!(img.get_pixel(13 + 10, 13 + 10).0, [0, 0, 0]);
     }
 
+    /// Verifica che l’allineamento a destra includa la cornice nell’ingombro
+    /// del pezzo senza disegnarla nella banda bianca del rotolo.
     #[test]
     fn raster_con_cornice_e_allineamento_la_tiene_col_pezzo() {
         let nero = RgbImage::from_pixel(100, 50, image::Rgb([0, 0, 0]));

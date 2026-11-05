@@ -23,6 +23,7 @@ pub struct Config {
 }
 
 impl Default for Config {
+    /// Impostazioni iniziali della stampante, della cornice e della finestra.
     fn default() -> Self {
         // IP della T2600 nei log di HP Click.
         Self {
@@ -65,6 +66,8 @@ impl Config {
         self.salva_su(&p);
     }
 
+    /// Legge le coppie chiave=valore; file assente o campi non validi mantengono
+    /// i valori predefiniti. Ignora le chiavi sconosciute.
     fn carica_da(p: &Path) -> Self {
         let mut c = Config::default();
         let Ok(testo) = std::fs::read_to_string(p) else { return c };
@@ -116,6 +119,8 @@ impl Config {
         c
     }
 
+    /// Salva tutte le impostazioni creando la cartella se necessario.
+    /// Gli errori di scrittura non interrompono l’applicazione.
     fn salva_su(&self, p: &Path) {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -162,6 +167,8 @@ mod test {
         assert_eq!(c.larghezza_rotolo_mm, d.larghezza_rotolo_mm);
     }
 
+    /// Verifica che salvataggio e lettura conservino anche cornice e dimensioni
+    /// della finestra personalizzate.
     #[test]
     fn round_trip() {
         let p = temporanea("roundtrip");
@@ -195,6 +202,8 @@ mod test {
         std::fs::remove_file(&p).unwrap();
     }
 
+    /// Verifica i valori iniziali della cornice e il ripristino dei default per
+    /// misure della cornice o della finestra non valide.
     #[test]
     fn cornice_di_default_e_valori_assurdi() {
         let d = Config::default();

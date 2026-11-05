@@ -562,6 +562,8 @@ mod test {
         assert!((l_mm - 594.0).abs() < 1.0 && (a_mm - 841.0).abs() < 1.0);
     }
 
+    /// Verifica dimensioni e proporzioni dell’anteprima di un A1 adattato ad A4
+    /// senza allineamento sul rotolo.
     #[test]
     fn anteprima_di_un_pdf_scalato() {
         let Some(pdfium) = pdfium_o_salta() else { return };
@@ -579,6 +581,8 @@ mod test {
         assert!(!pagine[0].impaginata && !pagine[0].ruotata);
     }
 
+    /// Verifica i DPI dei raster nel PDF dopo scala e rotazione, escludendo
+    /// i timbri troppo piccoli e le pagine solo vettoriali.
     #[test]
     fn dpi_delle_immagini_di_un_pdf() {
         let Some(pdfium) = pdfium_o_salta() else { return };
@@ -624,6 +628,8 @@ mod test {
         std::fs::remove_file(&vuoto).unwrap();
     }
 
+    /// Verifica che i DPI cambino soltanto per le pagine effettivamente scalate,
+    /// senza applicare il fattore alle rotazioni non supportate.
     #[test]
     fn dpi_pdf_usano_solo_la_scala_applicata() {
         let Some(pdfium) = pdfium_o_salta() else {
@@ -670,6 +676,8 @@ mod test {
         std::fs::remove_file(pdf).unwrap();
     }
 
+    /// Verifica i DPI lungo gli assi trasformati del raster, anche con rotazione
+    /// della pagina e scala diversa sui due assi.
     #[test]
     fn dpi_pdf_seguono_gli_assi_dell_immagine() {
         let Some(pdfium) = pdfium_o_salta() else { return };
@@ -691,6 +699,8 @@ mod test {
         }
     }
 
+    /// Verifica che i raster completamente fuori dal box visibile non influiscano
+    /// sui DPI, mentre quelli parzialmente visibili continuino a contare.
     #[test]
     fn dpi_pdf_ignorano_solo_immagini_interamente_fuori_pagina() {
         let Some(pdfium) = pdfium_o_salta() else { return };
@@ -725,6 +735,8 @@ mod test {
         std::fs::remove_file(pdf).unwrap();
     }
 
+    /// Verifica che la scala aggiorni i DPI dell’anteprima e distingua
+    /// la risoluzione dichiarata da quella presunta.
     #[test]
     fn dpi_effettivi_di_un_immagine() {
         // 1181 px dichiarati a 300 dpi (11811 px/m): 100 mm. Al 200 % escono
@@ -758,6 +770,8 @@ mod test {
         assert_eq!(pagine.len(), PAGINE_MAX);
     }
 
+    /// Verifica che PDF mancanti o corrotti producano un errore anche quando
+    /// è richiesta la scala, senza ripiegare sul file originale.
     #[test]
     fn pdf_corrotto_e_inesistente_danno_errore() {
         let Some(pdfium) = pdfium_o_salta() else { return };
@@ -868,6 +882,8 @@ mod test {
         assert_eq!(a, LATO_MAX as usize / 2);
     }
 
+    /// Verifica che scala libera e dimensioni fisiche producano la stessa
+    /// deformazione nell’anteprima, rispettando il limite dei pixel.
     #[test]
     fn immagine_con_proporzioni_libere_esce_deformata() {
         // 600 × 300 px al 200 % × 50 %: in stampa 1200 × 150, cioè 8:1, non 2:1.
@@ -896,6 +912,8 @@ mod test {
         assert!((l_mm - 50.8).abs() < 0.1 && (a_mm - 50.8).abs() < 0.1, "{l_mm} × {a_mm}");
     }
 
+    /// Verifica che il centraggio mantenga le proporzioni fisiche con DPI diversi
+    /// sui due assi o con una scala che deforma il contenuto.
     #[test]
     fn immagine_impaginata_con_dpi_diversi_o_scala_libera() {
         // 600 × 300 px al centro di una pagina da 190 mm. Prima a 300 × 150 dpi

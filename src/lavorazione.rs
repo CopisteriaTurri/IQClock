@@ -183,6 +183,7 @@ pub struct Cornice {
 }
 
 impl Default for Cornice {
+    /// Cornice iniziale: distanza di 3 mm e spessore di 0,25 mm.
     fn default() -> Self {
         Self { distanza_mm: 3.0, spessore_mm: 0.25 }
     }
@@ -206,6 +207,8 @@ pub struct Lavorazione {
 }
 
 impl Lavorazione {
+    /// Indica se scala e cornice permettono di inviare il documento originale
+    /// senza applicare una lavorazione.
     pub fn nulla(&self) -> bool {
         self.scala.originale() && self.cornice.is_none()
     }
@@ -392,6 +395,8 @@ pub fn componi_pdf(
     }))
 }
 
+/// Applica la scala richiesta alle pagine modificabili del PDF; restituisce
+/// true se almeno una pagina cambia.
 fn applica_scala(doc: &mut Document, lav: &Lavorazione) -> Result<bool> {
     if lav.scala.originale() {
         return Ok(false);
@@ -964,6 +969,8 @@ mod test {
             .collect()
     }
 
+    /// Verifica che il passaggio da A4 ad A5 scali insieme box, grafica
+    /// e coordinate delle annotazioni.
     #[test]
     fn pdf_a4_verso_a5_scala_box_contenuto_e_annotazioni() {
         let dati = pdf_a4_con_annotazione();
@@ -1017,6 +1024,8 @@ mod test {
         assert!((numero_o(&quad[1]).unwrap() - 70.0 * s).abs() < 0.01, "{quad:?}");
     }
 
+    /// Verifica che le annotazioni Ink seguano la traslazione dell’origine
+    /// e la scala del contenuto, compresi i tracciati annidati.
     #[test]
     fn annotazioni_con_origine_spostata_seguono_il_contenuto() {
         // Pagina con MediaBox che parte da (50, 30); l'annotazione sta sul
@@ -1068,6 +1077,8 @@ mod test {
         assert_eq!(numeri(&ink[1]), [100.0, 20.0]);
     }
 
+    /// Verifica che la scala riporti a zero l’origine del box e trasli
+    /// il contenuto della stessa quantità.
     #[test]
     fn pdf_con_origine_spostata_riporta_il_contenuto_a_zero() {
         let (l, a) = (210.0 * MM_PT, 297.0 * MM_PT);
@@ -1092,6 +1103,8 @@ mod test {
         assert!((m[4] + 25.0).abs() < 1e-4 && (m[5] + 15.0).abs() < 1e-4, "{m:?}");
     }
 
+    /// Verifica che su una pagina ruotata di 90 gradi i fattori visivi di scala
+    /// siano scambiati nello spazio utente del PDF.
     #[test]
     fn pdf_con_rotate_90_scambia_i_fattori() {
         // Pagina 210 × 297 con /Rotate 90: appare 297 × 210. Al 50% × 25% i
@@ -1122,6 +1135,8 @@ mod test {
         assert!((m[0] - 0.25).abs() < 1e-5 && (m[3] - 0.5).abs() < 1e-5, "{m:?}");
     }
 
+    /// Verifica che il Form XObject usato per la scala conservi le risorse
+    /// della pagina originale.
     #[test]
     fn le_risorse_della_pagina_seguono_il_contenuto_nel_form() {
         // Gradienti e motivi vivono nelle risorse: devono stare nel form, che li scala.
@@ -1144,6 +1159,7 @@ mod test {
         assert!(form.dict.get(b"Resources").unwrap().as_dict().unwrap().has(b"Pattern"));
     }
 
+    /// Verifica che la scala usi il CropBox visibile anziché l’intero MediaBox.
     #[test]
     fn il_cropbox_decide_la_pagina_visibile() {
         // MediaBox con abbondanza, CropBox A4: la scala parte dall'A4 e il
@@ -1168,6 +1184,8 @@ mod test {
         assert!((x1 - l * 0.5).abs() < 0.01 && (y1 - a * 0.5).abs() < 0.01, "{x1} {y1}");
     }
 
+    /// Verifica che una scala del 100% lasci passare anche un PDF illeggibile
+    /// quando non sono richieste altre lavorazioni.
     #[test]
     fn cento_percento_e_come_l_originale() {
         let lav = Lavorazione { scala: Scala::Percentuale { x: 100.0, y: 100.0 }, ..Default::default() };
@@ -1186,6 +1204,8 @@ mod test {
         assert!((min_l - 2.1).abs() < 1e-9 && (max_l - 2100.0).abs() < 1e-9 && (max_a - 2970.0).abs() < 1e-9);
     }
 
+    /// Verifica che una pagina senza MediaBox sia saltata senza errori
+    /// e senza produrre un PDF composto.
     #[test]
     fn pdf_pagina_senza_box_resta_come_e() {
         // Un PDF senza MediaBox non deve rompere la scala.
@@ -1249,6 +1269,8 @@ mod test {
         )
     }
 
+    /// Verifica che l’ingrandimento di un PNG cambi i DPI del TIFF prodotto
+    /// senza ricampionare i pixel.
     #[test]
     fn immagine_al_200_percento_dimezza_i_dpi_e_tiene_i_pixel() {
         let dir = cartella("dpi");
@@ -1279,6 +1301,8 @@ mod test {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Verifica che il centraggio sul rotolo usi l’ingombro fisico successivo
+    /// alla scala e mantenga i nuovi DPI.
     #[test]
     fn scala_e_allineamento_centrato_usano_le_misure_scalate() {
         // 100 × 50 px a 100 dpi, al 200%: 50,8 × 25,4 mm a 50 dpi. Rotolo da
@@ -1326,6 +1350,8 @@ mod test {
         assert!(scala_pagina(&doc, id, &Scala::Formato(FormatoIso::A4)).is_none());
     }
 
+    /// Verifica che la sola scala di un JPEG aggiorni i DPI nei metadati
+    /// senza ricomporre il file come TIFF.
     #[test]
     fn jpeg_al_200_percento_resta_jpeg_con_meta_dpi() {
         let dir = cartella("jpeg-scala");
@@ -1349,6 +1375,8 @@ mod test {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Verifica che la sola scala di un TIFF CMYK conservi canali e pixel
+    /// aggiornando soltanto la risoluzione.
     #[test]
     fn tiff_cmyk_con_sola_scala_resta_cmyk() {
         use tiff::decoder::{DecodingResult, Decoder as Lettore};
@@ -1440,6 +1468,8 @@ mod test {
         out
     }
 
+    /// Verifica il rifiuto della scala quando la cifratura impedisce di leggere
+    /// le pagine e stabilire quali richiedono modifiche.
     #[test]
     fn pdf_cifrato_senza_password_resta_da_originale() {
         // lopdf, senza la password, si ferma prima di leggere il resto del
@@ -1463,6 +1493,8 @@ mod test {
         (x0 / MM_PT, y0 / MM_PT, x1 / MM_PT, y1 / MM_PT)
     }
 
+    /// Verifica che la cornice richieda l’elaborazione anche senza scala
+    /// e non lasci passare un PDF illeggibile.
     #[test]
     fn la_sola_cornice_non_e_nulla() {
         let lav = Lavorazione { cornice: Some(Cornice::default()), ..Default::default() };
@@ -1471,6 +1503,8 @@ mod test {
         assert!(componi_pdf(b"non e un pdf", &lav, None).is_err());
     }
 
+    /// Verifica l’ingombro fisico della cornice predefinita su A4 e la presenza
+    /// della linea nera dopo il contenuto originale.
     #[test]
     fn cornice_sul_pdf_allarga_il_box_e_disegna_la_linea() {
         // A4 (210 × 297 mm) con cornice 3 + 0,25: il foglio cresce di 3,25 per
@@ -1531,6 +1565,8 @@ mod test {
         }
     }
 
+    /// Verifica il bilanciamento dei salvataggi e ripristini dello stato grafico
+    /// quando più stream originali lasciano attivi matrice, clip e tratteggio.
     #[test]
     fn cornice_isola_lo_stato_grafico_del_contenuto() {
         let dati = impagina::test::pdf(200.0, 300.0, (10.0, 20.0), 90);
@@ -1575,6 +1611,8 @@ mod test {
         assert_eq!(profondita, 0);
     }
 
+    /// Verifica che la grafica fuori dal box visibile resti ritagliata e che
+    /// la cornice sia disegnata dopo aver rimosso quel clip.
     #[test]
     fn cornice_conserva_il_clip_visibile_prima_di_allargare_i_box() {
         for crop in [None, Some(vec![20.into(), 30.into(), 190.into(), 280.into()])] {
@@ -1611,6 +1649,8 @@ mod test {
         }
     }
 
+    /// Verifica che il centraggio sul rotolo consideri l’intero pezzo con cornice
+    /// e conservi sia la linea sia il contenuto originale.
     #[test]
     fn cornice_e_allineamento_contano_la_cornice_nel_pezzo() {
         // A5 orizzontale (210 × 148) centrato su rotolo da 914: il pezzo è
@@ -1642,6 +1682,8 @@ mod test {
         assert!(testo.contains("re f"), "{testo}");
     }
 
+    /// Verifica dimensioni, linea esterna e distanza bianca del TIFF con cornice,
+    /// conservando i pixel del contenuto e i DPI originali.
     #[test]
     fn cornice_sull_immagine_allarga_i_pixel_e_disegna_il_bordo() {
         let dir = cartella("cornice");

@@ -53,6 +53,8 @@ fn main() -> Result<()> {
     }
 }
 
+/// Avvia la finestra con le dimensioni configurate e i file iniziali;
+/// propaga gli errori di avvio dell’interfaccia.
 fn avvia_gui(file: Vec<PathBuf>) -> Result<()> {
     let config = Config::carica();
     #[cfg(target_os = "linux")]
@@ -113,6 +115,9 @@ fn prendi_flag(args: &mut Vec<String>, nome: &str) -> bool {
     args.len() != c
 }
 
+/// Legge opzioni e file della CLI, applica scala, cornice e allineamento,
+/// poi invia i job alla stampante o li salva con --prn.
+/// Restituisce un errore per argomenti non validi o preparazione/invio falliti.
 fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
     let mut args = args.to_vec();
     let mut config = Config::carica();

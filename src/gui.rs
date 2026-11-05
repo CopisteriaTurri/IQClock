@@ -237,6 +237,8 @@ pub struct App {
 }
 
 impl App {
+    /// Inizializza interfaccia e servizio anteprime, aggiunge i file iniziali
+    /// e avvia la lettura asincrona dello stato della stampante.
     pub fn new(cc: &eframe::CreationContext<'_>, config: Config, iniziali: Vec<PathBuf>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
         configura_stile(&cc.egui_ctx);
@@ -277,6 +279,8 @@ impl App {
         app
     }
 
+    /// Analizza un file, lo seleziona nella coda e ne richiede l’anteprima con
+    /// la cornice corrente. Se non è leggibile, aggiunge un avviso.
     fn aggiungi(&mut self, percorso: PathBuf) {
         let nome = percorso.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         match file::analizza(&percorso) {
@@ -509,6 +513,8 @@ impl App {
         }
     }
 
+    /// Mostra i controlli di stampa in un pannello scorrevole e propaga
+    /// la cornice scelta alle lavorazioni dei documenti già in coda.
     fn pannello_impostazioni(&mut self, ui: &mut egui::Ui) {
         // Le sezioni sono più alte della finestra minima: scorrono, mentre il
         // pulsante Stampa resta fermo in fondo.
