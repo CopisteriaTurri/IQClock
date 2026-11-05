@@ -145,11 +145,12 @@ pub fn componi_pdf(dati: &[u8], imp: &Impaginazione) -> Result<Option<PdfCompost
 
 /// Applica l'allineamento a un PDF già caricato: è il passo dopo la scala nella
 /// pipeline comune, così il file si carica e si salva una volta sola.
+/// Usa `/UserUnit` per misurare il pezzo in mm e riconverte larghezza della
+/// pagina e offset nelle sue unità utente prima di aggiornare i box.
 pub(crate) fn applica_pdf(
     doc: &mut lopdf::Document,
     imp: &Impaginazione,
 ) -> Result<(bool, Vec<Option<Posizione>>)> {
-    let pagina_pt = imp.larghezza_pagina_mm() * MM_PT;
     let mut posizioni = Vec::new();
     let mut cambiate = false;
     for id in doc.get_pages().into_values() {
@@ -157,7 +158,9 @@ pub(crate) fn applica_pdf(
             posizioni.push(None);
             continue;
         };
-        let (l, a) = ((x1 - x0) / MM_PT, (y1 - y0) / MM_PT);
+        let unita = file::unita_utente(doc, id);
+        let mm_unita = unita / MM_PT;
+        let (l, a) = ((x1 - x0) * mm_unita, (y1 - y0) * mm_unita);
         let (l, a) = if ruota % 180 == 90 { (a, l) } else { (l, a) };
         let Some(pos) = imp.posiziona(l, a) else {
             posizioni.push(None);
@@ -166,16 +169,17 @@ pub(crate) fn applica_pdf(
         posizioni.push(Some(pos));
         cambiate = true;
         let ruota = (ruota + if pos.ruota { 90 } else { 0 }) % 360;
-        let dx = pos.x_mm * MM_PT;
+        let dx = pos.x_mm / mm_unita;
+        let pagina_unita = imp.larghezza_pagina_mm() / mm_unita;
         // Con /Rotate la pagina viene girata in senso orario: il bordo che finisce
         // a sinistra è quello basso (90°), destro (180°) o alto (270°). Il box si
         // allarga lungo il lato che diventa orizzontale, così che a sinistra del
-        // contenuto restino `dx` punti e in tutto la pagina sia larga `pagina_pt`.
+        // contenuto restino `dx` unità e in tutto la pagina sia larga `pagina_unita`.
         let nuovo = match ruota {
-            0 => [x0 - dx, y0, x0 - dx + pagina_pt, y1],
-            90 => [x0, y0 - dx, x1, y0 - dx + pagina_pt],
-            180 => [x1 + dx - pagina_pt, y0, x1 + dx, y1],
-            _ => [x0, y1 + dx - pagina_pt, x1, y1 + dx],
+            0 => [x0 - dx, y0, x0 - dx + pagina_unita, y1],
+            90 => [x0, y0 - dx, x1, y0 - dx + pagina_unita],
+            180 => [x1 + dx - pagina_unita, y0, x1 + dx, y1],
+            _ => [x0, y1 + dx - pagina_unita, x1, y1 + dx],
         };
         let ritaglio = format!("q {x0:.4} {y0:.4} {:.4} {:.4} re W n\n", x1 - x0, y1 - y0);
         aggiungi_intorno_al_contenuto(doc, id, ritaglio.into_bytes(), b"\nQ\n".to_vec())?;
@@ -545,6 +549,87 @@ pub(crate) mod test {
         let dati = pdf(1189.0 * MM_PT, 1189.0 * MM_PT, (0.0, 0.0), 0);
         assert!(componi_pdf(&dati, &imp(Allineamento::Centro)).unwrap().is_none());
         assert!(componi_pdf(&dati, &imp(Allineamento::Sinistra)).unwrap().is_none());
+    }
+
+    /// Verifica larghezza fisica e offset della pagina con cornice su un PDF
+    /// multipagina con unità diverse, rotazioni e allineamento centro/destra.
+    #[test]
+    fn pdf_con_cornice_e_userunit_si_allinea_in_millimetri() {
+        use crate::lavorazione::{self, Lavorazione};
+
+        for allineamento in [Allineamento::Centro, Allineamento::Destra] {
+            for ruota in [0, 90, 180, 270] {
+                let dati = pdf(210.0 * MM_PT, 148.0 * MM_PT, (50.0, 30.0), ruota);
+                let mut doc = lopdf::Document::load_mem(&dati).unwrap();
+                let primo = *doc.get_pages().values().next().unwrap();
+                let modello = doc.get_dictionary(primo).unwrap().clone();
+                let padre = modello.get(b"Parent").unwrap().as_reference().unwrap();
+                let mut ids = Vec::new();
+                for unita in [1.0_f32, 10.0, 0.5] {
+                    let mut pagina = modello.clone();
+                    pagina.set("UserUnit", unita);
+                    pagina.set("MediaBox", vec![
+                        Object::Real(50.0), Object::Real(30.0),
+                        Object::Real(50.0 + (210.0 * MM_PT) as f32 / unita),
+                        Object::Real(30.0 + (148.0 * MM_PT) as f32 / unita),
+                    ]);
+                    ids.push(doc.add_object(pagina));
+                }
+                let kids: Vec<Object> = ids.iter().map(|&id| id.into()).collect();
+                let padre = doc.get_dictionary_mut(padre).unwrap();
+                padre.set("Kids", kids);
+                padre.set("Count", 3);
+                let mut dati = Vec::new();
+                doc.save_to(&mut dati).unwrap();
+                let composto = lavorazione::componi_pdf(
+                    &dati,
+                    &Lavorazione { cornice: Some(Cornice::default()), ..Default::default() },
+                    Some(&imp(allineamento)),
+                ).unwrap().unwrap();
+                let doc = lopdf::Document::load_mem(&composto.dati).unwrap();
+                let atteso = (904.0 - 216.5) / if allineamento == Allineamento::Centro { 2.0 } else { 1.0 };
+                for ((id, pos), unita) in doc.get_pages().into_values()
+                    .zip(composto.posizioni).zip([1.0, 10.0, 0.5])
+                {
+                    let pos = pos.expect("il pezzo fisico entra nel rotolo");
+                    assert!((pos.x_mm - atteso).abs() < 0.01);
+                    let (mb, rotazione) = file::box_e_rotazione(&doc, id).unwrap();
+                    assert_eq!(rotazione, if ruota == 0 || ruota == 270 { 0 } else { 180 });
+                    let d = 3.25 * MM_PT / unita;
+                    let originale = [50.0 - d, 30.0 - d,
+                        50.0 + 210.0 * MM_PT / unita + d,
+                        30.0 + 148.0 * MM_PT / unita + d];
+                    let (x, larghezza) = offset_mm(mb, originale, rotazione);
+                    assert!((x * unita - atteso).abs() < 0.01);
+                    assert!((larghezza * unita - 904.0).abs() < 0.01);
+                    assert!(((mb[3] - mb[1]) * unita / MM_PT - 154.5).abs() < 0.01);
+                }
+            }
+        }
+    }
+
+    /// Verifica che la decisione di impaginare consideri l'ingombro fisico
+    /// della pagina con cornice, sia con UserUnit maggiore sia minore di 1.
+    #[test]
+    fn pdf_con_userunit_decide_se_entra_nel_rotolo() {
+        use crate::lavorazione::{self, Lavorazione};
+
+        for allineamento in [Allineamento::Centro, Allineamento::Destra] {
+            for (unita, lato, entra) in [(10.0_f32, 200.0, false), (0.5, 1000.0, true)] {
+                let dati = pdf(lato * MM_PT, lato * MM_PT, (0.0, 0.0), 0);
+                let mut doc = lopdf::Document::load_mem(&dati).unwrap();
+                let id = *doc.get_pages().values().next().unwrap();
+                doc.get_dictionary_mut(id).unwrap().set("UserUnit", unita);
+                let mut dati = Vec::new();
+                doc.save_to(&mut dati).unwrap();
+                let composto = lavorazione::componi_pdf(
+                    &dati,
+                    &Lavorazione { cornice: Some(Cornice::default()), ..Default::default() },
+                    Some(&imp(allineamento)),
+                ).unwrap().unwrap();
+                assert_eq!(composto.posizioni[0].is_some(), entra);
+            }
+        }
     }
 
     /// Verifica l’allineamento a destra e la banda bianca aggiunta sul rotolo

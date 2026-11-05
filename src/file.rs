@@ -500,6 +500,19 @@ pub(crate) fn ereditato<'a>(
     None
 }
 
+/// Punti tipografici per unità utente della singola pagina (`/UserUnit`).
+/// La chiave non è ereditabile; riferimenti indiretti sono risolti e valori
+/// assenti, non numerici, non finiti o non positivi valgono 1.
+pub(crate) fn unita_utente(doc: &lopdf::Document, pagina: lopdf::ObjectId) -> f64 {
+    doc.get_dictionary(pagina).ok()
+        .and_then(|pagina| pagina.get(b"UserUnit").ok())
+        .and_then(|valore| doc.dereference(valore).ok())
+        .and_then(|(_, valore)| valore.as_float().ok())
+        .map(f64::from)
+        .filter(|&v| v.is_finite() && v > 0.0)
+        .unwrap_or(1.0)
+}
+
 /// Riquadro `[x0, y0, x1, y1]` normalizzato (x0 < x1, y0 < y1) da un array PDF.
 fn riquadro(o: &lopdf::Object) -> Option<[f64; 4]> {
     let v: Vec<f64> = o.as_array().ok()?.iter().filter_map(|o| o.as_float().ok().map(f64::from)).collect();
@@ -598,6 +611,38 @@ mod test {
     use std::path::PathBuf;
 
     use lopdf::{Dictionary, Document, Object, Stream};
+
+    /// Verifica il default di UserUnit, i valori non utilizzabili e i riferimenti
+    /// indiretti. Un valore sul nodo padre non deve essere ereditato.
+    #[test]
+    fn unita_utente_default_invalidi_e_riferimenti() {
+        let mut doc = Document::with_version("1.7");
+        let mut padre = Dictionary::new();
+        padre.set("UserUnit", 10);
+        let padre = doc.add_object(padre);
+        let mut pagina = Dictionary::new();
+        pagina.set("Parent", padre);
+        let id = doc.add_object(pagina);
+        assert_eq!(unita_utente(&doc, id), 1.0);
+        for (valore, atteso) in [
+            (Object::Null, 1.0),
+            (Object::Integer(0), 1.0),
+            (Object::Integer(-2), 1.0),
+            (Object::Real(f32::NAN), 1.0),
+            (Object::Real(f32::INFINITY), 1.0),
+            (Object::Name(b"non-un-numero".to_vec()), 1.0),
+            (Object::Reference((9999, 0)), 1.0),
+            (Object::Integer(1), 1.0),
+            (Object::Integer(10), 10.0),
+            (Object::Real(0.5), 0.5),
+        ] {
+            doc.get_dictionary_mut(id).unwrap().set("UserUnit", valore);
+            assert_eq!(unita_utente(&doc, id), atteso);
+        }
+        let riferimento = doc.add_object(Object::Real(2.5));
+        doc.get_dictionary_mut(id).unwrap().set("UserUnit", riferimento);
+        assert_eq!(unita_utente(&doc, id), 2.5);
+    }
 
     // ---- file di prova ----
 

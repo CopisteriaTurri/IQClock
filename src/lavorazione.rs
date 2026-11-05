@@ -419,12 +419,7 @@ fn applica_cornice(doc: &mut Document, cornice: &Cornice) -> Result<bool> {
         let Some(([x0, y0, x1, y1], _)) = file::box_e_rotazione(doc, id) else {
             continue;
         };
-        let unita = doc.get_dictionary(id)?.get(b"UserUnit").ok()
-            .and_then(|valore| doc.dereference(valore).ok())
-            .and_then(|(_, valore)| valore.as_float().ok())
-            .map(f64::from)
-            .filter(|&v| v.is_finite() && v > 0.0)
-            .unwrap_or(1.0);
+        let unita = file::unita_utente(doc, id);
         let d = cornice.ingombro_mm() * MM_PT / unita;
         let s = cornice.spessore_mm.max(0.0) * MM_PT / unita;
         // Il rettangolo sta a metà dello spessore dentro il bordo della pagina:
