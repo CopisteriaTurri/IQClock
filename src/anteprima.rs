@@ -382,7 +382,7 @@ fn immagine(
         originale.width() as f64 * 25.4 / dpi_x,
         originale.height() as f64 * 25.4 / dpi_y,
     );
-    let (sx, sy) = lavorazione::fattori(&lav.scala, larghezza, altezza);
+    let (sx, sy) = lav.fattori(larghezza, altezza);
     // La cornice fa parte del pezzo: la misura cresce come quella che parte.
     let cornice = lav.cornice.as_ref();
     let ingombro = cornice.map_or(0.0, |c| 2.0 * c.ingombro_mm());

@@ -15,8 +15,10 @@ const MEDIA_INGRESSI: &str = "1.3.6.1.2.1.43.8.2.1.12.1"; // prtInputMediaName
 /// MIB privata HP (passerella PML): tabella della carta caricata, una riga per
 /// ingresso (`…3.3.<riga>.<colonna>.0`). Verificata sulla T2600 il 28/10/2026
 /// contro l'EWS (`DevMgmt/MediaHandlingDyn.xml`: Roll1 914.400000 mm, restano
-/// 69552.065476 mm): la riga 1 è il rotolo, la riga 2 è vuota come il
-/// MANUAL_FEED della MIB standard.
+/// 69552.065476 mm): la riga 1 è il rotolo, la riga 2 il manuale. Con un foglio
+/// caricato la riga 2 riporta le sue misure (A4: 5952 × 8418 decipoint =
+/// 210 × 297 mm, letto il 06/11/2026); vuota vale 0, come il `MANUAL_FEED`
+/// della MIB standard.
 /// Colonne: 4 = nome supporto (stringa PML con prefisso binario), 10 = larghezza
 /// e 11 = lunghezza residua in decipoint (1/720 di pollice).
 const HP_CARTA: &str = "1.3.6.1.4.1.11.2.3.9.4.2.1.4.1.3.3";
@@ -119,21 +121,45 @@ impl StatoStampante {
         self.dispositivo == Some(2) && matches!(self.stampante, Some(3 | 4))
     }
 
+    /// Ingresso del foglio singolo (manuale), se la stampante lo dichiara:
+    /// sulla T2600 si chiama `MANUAL_FEED`.
+    pub fn manuale(&self) -> Option<&Ingresso> {
+        self.ingressi.iter().find(|i| nome_ingresso(&i.nome) == "MANUALFEED")
+    }
+
+    /// Misure del foglio caricato nell'ingresso manuale, se la stampante le
+    /// dichiara. Sulla T2600 la riga HP del `MANUAL_FEED` riporta larghezza e
+    /// lunghezza in decipoint: con un A4 caricato 5952 × 8418 = 210 × 297 mm
+    /// (letto il 06/11/2026); con l'ingresso vuoto le colonne valgono 0 e qui
+    /// non c'è nulla.
+    pub fn foglio_mm(&self) -> Option<(f64, f64)> {
+        let i = self.manuale()?;
+        if !i.pronto() {
+            return None;
+        }
+        // Per un foglio tagliato la "carta residua" è la sua lunghezza.
+        Some((i.larghezza_mm?, i.rimanenti_mm?))
+    }
+
     /// Larghezza del rotolo in mm con il nome dell'ingresso, dalla MIB privata HP.
-    /// Preferisce un ingresso pronto il cui nome contiene "roll" (T2600: "ROLL"),
-    /// altrimenti il primo ingresso pronto con larghezza nota, altrimenti il primo
-    /// con larghezza nota. `None` = la stampante non espone il dato: la GUI usa
-    /// il valore manuale come fallback.
+    /// Contano solo gli ingressi che si chiamano "roll": con un foglio caricato
+    /// nell'ingresso manuale la sua riga riporta le misure del foglio (un A4:
+    /// 210 × 297 mm, letto il 06/11/2026) e non quelle del rotolo. Se la
+    /// stampante non ha un ingresso con quel nome valgono tutti quelli con una
+    /// larghezza, come per le MIB generiche. Prima i pronti, poi nell'ordine
+    /// della stampante. `None` = larghezza non nota: la GUI usa il valore
+    /// manuale come fallback.
     pub fn larghezza_rotolo_mm(&self) -> Option<(&str, f64)> {
-        let con_larghezza =
-            self.ingressi.iter().filter(|i| i.larghezza_mm.is_some_and(|m| m > 0.0));
-        con_larghezza
-            .clone()
-            .filter(|i| i.pronto() && i.nome.to_ascii_uppercase().contains("ROLL"))
-            .chain(con_larghezza.clone().filter(|i| i.pronto()))
-            .chain(con_larghezza)
+        let ha_un_rotolo = self
+            .ingressi
+            .iter()
+            .any(|i| i.nome.to_ascii_uppercase().contains("ROLL"));
+        self.ingressi
+            .iter()
+            .filter(|i| !ha_un_rotolo || i.nome.to_ascii_uppercase().contains("ROLL"))
+            .filter(|i| i.larghezza_mm.is_some_and(|m| m > 0.0))
+            .min_by_key(|i| !i.pronto())
             .map(|i| (i.nome.as_str(), i.larghezza_mm.unwrap_or(0.0)))
-            .next()
     }
 }
 
@@ -150,6 +176,15 @@ fn decipoint_in_mm(valore: i64) -> Option<f64> {
 /// Larghezze plausibili per un rotolo DesignJet: fino a 3,5 m (oltre la 60").
 fn larghezza_plausibile(valore: i64) -> Option<f64> {
     decipoint_in_mm(valore).filter(|m| *m <= 3500.0)
+}
+
+/// Nome dell'ingresso senza separatori e maiuscolo: la T2600 lo espone come
+/// `MANUAL_FEED`, la tabella finta dei test come `MANUAL FEED`.
+fn nome_ingresso(nome: &str) -> String {
+    nome.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
 }
 
 /// Stringhe della passerella PML di HP: due byte binari di testa (tipo e
@@ -416,12 +451,73 @@ mod test {
         assert_eq!(testo_pml(&Valore::Intero(3)), None);
     }
 
+    /// Con un foglio nel manuale la tabella HP riporta le sue misure: sono
+    /// quelle lette dalla T2600 con un A4 caricato il 06/11/2026.
+    #[test]
+    fn foglio_caricato_dal_manuale() {
+        let mut t = tabella_base(3, 2);
+        t.insert(sotto(HP_CARTA, "2.10.0"), ber_intero(5952));
+        t.insert(sotto(HP_CARTA, "2.11.0"), ber_intero(8418));
+        t.insert(sotto(STATI_INGRESSI, "2"), ber_intero(6));
+        let s = leggi_da("127.0.0.1", avvia_agente(t)).unwrap();
+        assert_eq!(s.manuale().map(|i| i.nome.as_str()), Some("MANUAL FEED"));
+        let (l, a) = s.foglio_mm().expect("foglio caricato");
+        assert!((l - 210.0).abs() < 0.05, "{l}");
+        assert!((a - 297.0).abs() < 0.05, "{a}");
+    }
+
+    #[test]
+    fn il_nome_dell_ingresso_ignora_i_separatori() {
+        assert_eq!(nome_ingresso("MANUAL_FEED"), "MANUALFEED");
+        assert_eq!(nome_ingresso("Manual Feed"), "MANUALFEED");
+        assert_eq!(nome_ingresso("ROLL"), "ROLL");
+    }
+
+    #[test]
+    fn senza_foglio_niente_misure() {
+        // Ingresso vuoto (stato 21, colonne a 0): niente foglio da misurare.
+        let s = leggi_da("127.0.0.1", avvia_agente(tabella_base(3, 2))).unwrap();
+        assert_eq!(s.foglio_mm(), None);
+        assert_eq!(StatoStampante::default().foglio_mm(), None);
+    }
+
     #[test]
     fn rotolo_rilevato_preferisce_il_roll_pronto() {
         let mut s = StatoStampante::default();
         s.ingressi.push(ingresso("MANUAL_FEED", 2, Some(297.0)));
         s.ingressi.push(ingresso("ROLL", 6, Some(914.4)));
         assert_eq!(s.larghezza_rotolo_mm(), Some(("ROLL", 914.4)));
+    }
+
+    /// Il foglio del manuale non deve passare per la larghezza del rotolo: con
+    /// il rotolo vuoto la larghezza non si conosce, e chiedere di allineare su
+    /// 210 mm farebbe ridurre o tagliare la pagina.
+    #[test]
+    fn il_foglio_del_manuale_non_e_il_rotolo() {
+        let mut s = StatoStampante::default();
+        s.ingressi.push(ingresso("ROLL", 21, None));
+        s.ingressi.push(ingresso("MANUAL_FEED", 6, Some(210.0)));
+        assert_eq!(s.larghezza_rotolo_mm(), None);
+        // Con il rotolo caricato vince il rotolo, non il foglio.
+        let mut s = StatoStampante::default();
+        s.ingressi.push(ingresso("MANUAL_FEED", 6, Some(210.0)));
+        s.ingressi.push(ingresso("ROLL", 6, Some(914.4)));
+        assert_eq!(s.larghezza_rotolo_mm(), Some(("ROLL", 914.4)));
+        // Il primo rotolo è vuoto, il secondo è pronto.
+        let mut s = StatoStampante::default();
+        s.ingressi.push(ingresso("ROLL", 21, None));
+        s.ingressi.push(ingresso("ROLL2", 6, Some(610.0)));
+        assert_eq!(s.larghezza_rotolo_mm(), Some(("ROLL2", 610.0)));
+    }
+
+    /// Stampante senza ingressi chiamati "roll": vale il primo con larghezza,
+    /// come prima.
+    #[test]
+    fn senza_ingressi_roll_vale_ogni_larghezza() {
+        let mut s = StatoStampante::default();
+        s.ingressi.push(ingresso("Cassetto 1", 6, Some(297.0)));
+        s.ingressi.push(ingresso("Cassetto 2", 21, None));
+        assert_eq!(s.larghezza_rotolo_mm(), Some(("Cassetto 1", 297.0)));
     }
 
     #[test]

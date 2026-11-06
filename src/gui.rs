@@ -15,6 +15,7 @@ use eframe::egui::{
 use crate::anteprima::{Anteprime, Chiave, PAGINE_DPI_MAX, PAGINE_MAX, Pagina};
 use crate::config::Config;
 use crate::file::{self, InfoFile};
+use crate::foglio::{self, Foglio, SceltaFoglio};
 use crate::impagina::{self, Allineamento, Impaginazione};
 use crate::lavorazione::{self, Cornice, FormatoIso, Lavorazione, Scala};
 use crate::nesting::{self, Nesting};
@@ -81,6 +82,10 @@ fn sezione(ui: &mut egui::Ui, testo: &str) {
 }
 
 const LARGHEZZE_ROTOLO: [(&str, f64); 3] = [("24\" (610 mm)", 610.0), ("36\" (914 mm)", 914.0), ("44\" (1118 mm)", 1118.0)];
+/// Attesa del foglio singolo: dopo l'invio lo stato si rilegge ogni 5 s per
+/// 2 minuti, per vedere quando la stampante chiede il foglio.
+const ATTESA_FOGLIO: std::time::Duration = std::time::Duration::from_secs(120);
+const PASSO_ATTESA_FOGLIO: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Tipo di scala scelto nella GUI; i valori della modalità non attiva si
 /// perdono quando si cambia, come in un pannello di stampa.
@@ -161,6 +166,11 @@ struct PaginaMostrata {
 }
 
 impl Documento {
+    fn adattabile_al_foglio(&self) -> bool {
+        lavorazione::lavorabile(self.info.formato)
+            && !(self.info.formato == Formato::Tiff && self.info.pagine > 1)
+    }
+
     /// Rilegge misure e idoneità quando il file cambia. Il nuovo id scarta
     /// anche le anteprime ancora in arrivo per il contenuto precedente.
     fn aggiorna_file(&mut self, nuovo_id: u64) -> bool {
@@ -207,7 +217,7 @@ impl Documento {
         let base = self.info.pagine_mm.get(n).copied().flatten().or(self.info.mm);
         match base {
             Some((l, a)) => {
-                let (sx, sy) = lavorazione::fattori(&self.lavorazione.scala, l, a);
+                let (sx, sy) = self.lavorazione.fattori(l, a);
                 let cornice = self.cornice_mm();
                 Some((l * sx + cornice, a * sy + cornice))
             }
@@ -225,7 +235,7 @@ impl Documento {
     /// sotto la sezione SCALA.
     fn uscita_mm(&self) -> Option<(f64, f64)> {
         let (l, a) = self.info.mm?;
-        let (sx, sy) = lavorazione::fattori(&self.lavorazione.scala, l, a);
+        let (sx, sy) = self.lavorazione.fattori(l, a);
         let cornice = self.cornice_mm();
         Some((l * sx + cornice, a * sy + cornice))
     }
@@ -256,6 +266,24 @@ enum Evento {
     Pagine(u64, Chiave, Vec<Pagina>),
 }
 
+/// Finestra di attesa del foglio dopo un job su foglio singolo.
+#[derive(Clone, Copy)]
+struct AttesaFoglio {
+    inizio: std::time::Instant,
+    ultima: std::time::Instant,
+    /// Foglio minimo che la stampante chiede per le pagine inviate, in lati
+    /// (corto, lungo). «Foglio caricato» non basta: sulla T2600 un A4 su un
+    /// foglio A4 resta in attesa di un foglio da 220 × 319 mm.
+    minimo: Option<(f64, f64)>,
+}
+
+impl AttesaFoglio {
+    fn nuova(minimo: Option<(f64, f64)>) -> Self {
+        let ora = std::time::Instant::now();
+        Self { inizio: ora, ultima: ora, minimo }
+    }
+}
+
 /// Disposizione riutilizzata finché pezzi, misure e opzioni restano uguali.
 struct CacheNesting {
     pezzi: Vec<nesting::Pezzo>,
@@ -271,6 +299,10 @@ pub struct App {
     anteprime: Anteprime,
     selezionato: Option<usize>,
     sorgente: Sorgente,
+    /// Formato del foglio singolo (sezione CARTA): serve all'anteprima e
+    /// all'avviso "la pagina non entra" e all'adattamento opzionale.
+    foglio: Foglio,
+    adatta_foglio: bool,
     scala_di_grigi: bool,
     taglierina: Option<bool>,
     /// Cornice di taglio attiva per tutti i documenti (sezione FINITURA).
@@ -295,6 +327,9 @@ pub struct App {
     impaginazione_anteprime: Option<Impaginazione>,
     stato_stampante: Option<Result<StatoStampante, String>>,
     verifica_in_corso: bool,
+    /// Job su foglio singolo appena inviato: per due minuti lo stato si
+    /// rilegge ogni 5 s (vedi `aggiorna_attesa_foglio`).
+    attesa_foglio: Option<AttesaFoglio>,
     avvisi: Vec<String>,
     /// Con `IQCLOCK_FOTO=file.png` salva un'immagine della finestra e chiude
     /// (per documentazione e controlli visivi).
@@ -331,6 +366,8 @@ impl App {
             anteprime,
             selezionato: None,
             sorgente: Sorgente::Stampante,
+            foglio: Foglio::default(),
+            adatta_foglio: false,
             scala_di_grigi: false,
             taglierina: None,
             cornice: false,
@@ -338,6 +375,7 @@ impl App {
             larghezza_rilevata: None,
             stato_stampante: None,
             verifica_in_corso: false,
+            attesa_foglio: None,
             avvisi: errore_pdfium.into_iter().collect(),
             foto: std::env::var_os("IQCLOCK_FOTO").map(|p| (PathBuf::from(p), 0)),
             tx,
@@ -388,6 +426,76 @@ impl App {
         }
     }
 
+    /// Dopo un job su foglio singolo rilegge lo stato ogni 5 s per 2 minuti,
+    /// svegliando l'interfaccia col timer: così si vede quando la stampante
+    /// prende il foglio. Sulla T2600 (06/11/2026) un job vero si è visto
+    /// passare da «pronta» a «sta stampando» e tornare «pronta».
+    fn aggiorna_attesa_foglio(&mut self, ctx: &egui::Context) {
+        let Some(attesa) = self.attesa_foglio else {
+            return;
+        };
+        if !self.su_foglio() || attesa.inizio.elapsed() >= ATTESA_FOGLIO {
+            self.attesa_foglio = None;
+            return;
+        }
+        if attesa.ultima.elapsed() >= PASSO_ATTESA_FOGLIO {
+            self.attesa_foglio =
+                Some(AttesaFoglio { ultima: std::time::Instant::now(), ..attesa });
+            self.verifica_stampante(ctx);
+        }
+        ctx.request_repaint_after(PASSO_ATTESA_FOGLIO);
+    }
+
+    /// Riga dell'attesa del foglio: `None` se non c'è un job su foglio
+    /// singolo appena inviato.
+    fn attesa_foglio_testo(&self) -> Option<(String, Color32)> {
+        let attesa = self.attesa_foglio?;
+        if !self.su_foglio() {
+            return None;
+        }
+        let letto = self.stato_stampante.as_ref()?.as_ref().ok()?;
+        let ingresso = letto.manuale();
+        let pronto = ingresso.is_some_and(|i| i.pronto());
+        // Il foglio può essere caricato e comunque troppo piccolo: la T2600,
+        // con un A4 per una pagina A4, lo tiene «in uso» e chiede un foglio da
+        // 220 × 319 mm. Meglio dire quale foglio serve che «Foglio caricato».
+        let stretto = attesa.minimo.filter(|_| pronto).and_then(|(min_corto, min_lungo)| {
+            let (l, a) = letto.foglio_mm()?;
+            let (corto, lungo) = (l.min(a), l.max(a));
+            (corto + TOLLERANZA_MM < min_corto || lungo + TOLLERANZA_MM < min_lungo)
+                .then_some((l, a, min_corto, min_lungo))
+        });
+        let (testo, colore) = if let Some((l, a, min_corto, min_lungo)) = stretto {
+            (
+                format!(
+                    "Foglio troppo piccolo: è {l:.0} × {a:.0} mm, la stampante ne vuole almeno \
+                     {min_corto:.0} × {min_lungo:.0} mm"
+                ),
+                ARANCIO,
+            )
+        } else if pronto {
+            ("Foglio caricato".to_string(), Color32::DARK_GREEN)
+        } else {
+            let stato = ingresso
+                .map(|i| i.descrizione_lunga())
+                .unwrap_or_else(|| "ingresso manuale non dichiarato".into());
+            (format!("In attesa del foglio — {stato}"), ARANCIO)
+        };
+        let resta = ATTESA_FOGLIO.saturating_sub(attesa.inizio.elapsed()).as_secs();
+        Some((format!("{testo} (controllo per altri {resta} s)"), colore))
+    }
+
+    /// Foglio minimo che la stampante chiede per le pagine del documento, in
+    /// lati (corto, lungo): il più grande fra le pagine. Senza misure note non
+    /// si avvisa di niente.
+    fn foglio_minimo_documento(&self, id: u64) -> Option<(f64, f64)> {
+        let d = self.documenti.iter().find(|d| d.id == id)?;
+        (0..d.info.pagine)
+            .filter_map(|n| d.mm_pagina(n))
+            .map(Foglio::minimo_lati)
+            .reduce(|a, b| (a.0.max(b.0), a.1.max(b.1)))
+    }
+
     fn verifica_stampante(&mut self, ctx: &egui::Context) {
         if self.verifica_in_corso {
             return;
@@ -411,9 +519,31 @@ impl App {
         }
     }
 
+    /// true se la carta è il foglio singolo invece del rotolo.
+    fn su_foglio(&self) -> bool {
+        self.sorgente == Sorgente::Foglio
+    }
+
+    /// Il nesting vale solo sul rotolo: sul foglio singolo esce una pagina per
+    /// foglio, composta dal file così com'è.
+    fn nesting_attivo(&self) -> bool {
+        self.nesting && !self.su_foglio()
+    }
+
+    fn area_foglio_attiva(&self) -> Option<(f64, f64)> {
+        (self.su_foglio() && self.adatta_foglio).then(|| self.foglio.area_utile())
+    }
+
+    /// Misure che la stampante dichiara per il foglio caricato nell'ingresso
+    /// manuale, se lo stato è stato letto.
+    fn foglio_da_stampante(&self) -> Option<(f64, f64)> {
+        self.stato_stampante.as_ref()?.as_ref().ok()?.foglio_mm()
+    }
+
     fn impaginazione(&self) -> Option<Impaginazione> {
         // Con il nesting i fogli li compone IQClock: l'allineamento non c'entra.
-        if self.nesting {
+        // Sul foglio singolo non c'è un rotolo su cui allineare.
+        if self.su_foglio() || self.nesting_attivo() {
             return None;
         }
         (self.allineamento != Allineamento::Sinistra).then_some(Impaginazione {
@@ -447,9 +577,11 @@ impl App {
     /// cui lavorazione è cambiata.
     fn aggiorna_anteprime(&mut self) {
         let imp = self.impaginazione();
+        let area_foglio = self.area_foglio_attiva();
         self.impaginazione_anteprime = imp;
         let anteprime = &self.anteprime;
         for d in &mut self.documenti {
+            d.lavorazione.area_foglio_mm = area_foglio.filter(|_| d.adattabile_al_foglio());
             if !impagina::impaginabile(d.info.formato) {
                 continue;
             }
@@ -476,7 +608,10 @@ impl App {
             taglierina: self.taglierina,
             extra: self.extra_pjl.clone(),
             impaginazione: self.impaginazione(),
-            lavorazione: doc.lavorazione,
+            lavorazione: Lavorazione {
+                area_foglio_mm: self.area_foglio_attiva(),
+                ..doc.lavorazione
+            },
         }
     }
 
@@ -484,7 +619,7 @@ impl App {
     /// conferma.
     fn chiedi_e_stampa(&mut self, ctx: &egui::Context) {
         // Anche il nesting ha bisogno della larghezza giusta del rotolo.
-        let da_impaginare = if self.nesting {
+        let da_impaginare = if self.nesting_attivo() {
             self.documenti.iter().any(|d| {
                 matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_))
                     && nesting::annidabile(d.info.formato)
@@ -513,7 +648,7 @@ impl App {
     /// 9100 accetta un job alla volta.
     fn stampa(&mut self, ctx: &egui::Context) {
         self.aggiorna_file_documenti();
-        if self.nesting {
+        if self.nesting_attivo() {
             self.stampa_nesting(ctx);
             return;
         }
@@ -684,14 +819,26 @@ impl App {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
                 Evento::Avanzamento(id, f) => self.imposta_stato(id, StatoJob::InInvio(f)),
-                Evento::Finito(id, Ok(())) => self.imposta_stato(id, StatoJob::Inviato),
+                Evento::Finito(id, Ok(())) => {
+                    self.imposta_stato(id, StatoJob::Inviato);
+                    // Con il foglio singolo la stampante lo chiede dopo aver
+                    // ricevuto il job: da qui si guarda l'ingresso manuale.
+                    if self.su_foglio() {
+                        self.attesa_foglio =
+                            Some(AttesaFoglio::nuova(self.foglio_minimo_documento(id)));
+                    }
+                }
                 Evento::Finito(id, Err(e)) => self.imposta_stato(id, StatoJob::Errore(e)),
                 Evento::Stato(r) => {
-                    if let Ok(s) = &r {
-                        self.larghezza_rilevata =
-                            s.larghezza_rotolo_mm().map(|(n, m)| (n.to_string(), m));
-                    } else {
-                        self.larghezza_rilevata = None;
+                    match &r {
+                        Ok(s) => {
+                            self.larghezza_rilevata =
+                                s.larghezza_rotolo_mm().map(|(n, m)| (n.to_string(), m));
+                            // Con il foglio singolo contano le misure che la
+                            // stampante dichiara per l'ingresso manuale.
+                            self.foglio.aggiorna_da_stampante(s.foglio_mm());
+                        }
+                        Err(_) => self.larghezza_rilevata = None,
                     }
                     self.stato_stampante = Some(r);
                     self.verifica_in_corso = false;
@@ -775,6 +922,9 @@ impl App {
                     };
                     ui.colored_label(colore, format!("{nome}: {}", i.descrizione_lunga()));
                 }
+                if let Some((testo, colore)) = self.attesa_foglio_testo() {
+                    ui.colored_label(colore, testo);
+                }
                 for c in &s.cartucce {
                     barra_inchiostro(ui, c);
                 }
@@ -795,37 +945,126 @@ impl App {
                     ui.selectable_value(&mut self.sorgente, s, s.etichetta());
                 }
             });
-        egui::ComboBox::from_id_salt("rotolo")
-            .selected_text(
-                LARGHEZZE_ROTOLO
-                    .iter()
-                    .find(|(_, mm)| *mm == self.larghezza_rotolo)
-                    .map(|(n, _)| *n)
-                    .unwrap_or("?"),
-            )
-            .width(200.0)
-            .show_ui(ui, |ui| {
-                for (n, mm) in LARGHEZZE_ROTOLO {
-                    ui.selectable_value(&mut self.larghezza_rotolo, mm, n);
-                }
-            })
-            .response
-            .on_hover_text(
-                "Fallback manuale: vale solo se la stampante non dice che rotolo ha caricato",
-            );
-        match &self.larghezza_rilevata {
-            Some((nome, mm)) => {
-                ui.colored_label(
-                    Color32::DARK_GREEN,
-                    format!("Rotolo rilevato ({nome}): {mm:.0} mm — anteprima su questo"),
+        if self.su_foglio() {
+            // Sul foglio la carta è già tagliata: del rotolo non serve niente,
+            // serve il formato per disegnare l'anteprima e per l'avviso se la
+            // pagina non ci entra, o per ridurla se l'utente lo chiede.
+            egui::ComboBox::from_id_salt("foglio-formato")
+                .selected_text(self.foglio.etichetta())
+                .width(200.0)
+                .show_ui(ui, |ui| {
+                    let letto = self.foglio_da_stampante();
+                    if ui
+                        .selectable_label(
+                            self.foglio.scelta == SceltaFoglio::Stampante,
+                            "Dalla stampante",
+                        )
+                        .clicked()
+                    {
+                        self.foglio.scelta = SceltaFoglio::Stampante;
+                        self.foglio.aggiorna_da_stampante(letto);
+                    }
+                    ui.separator();
+                    for f in foglio::FORMATI {
+                        if ui
+                            .selectable_label(
+                                self.foglio.scelta == SceltaFoglio::Iso(f),
+                                f.etichetta(),
+                            )
+                            .clicked()
+                        {
+                            self.foglio = Foglio::iso(f, !self.foglio.verticale());
+                        }
+                    }
+                    ui.separator();
+                    if ui
+                        .selectable_label(self.foglio.scelta == SceltaFoglio::Mano, "Personalizzato")
+                        .clicked()
+                    {
+                        self.foglio.scelta = SceltaFoglio::Mano;
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Formato del foglio caricato: l'anteprima lo disegna e avvisa se la pagina non entra",
                 );
+            match self.foglio.scelta {
+                SceltaFoglio::Iso(_) => {
+                    ui.horizontal(|ui| {
+                        let verticale = self.foglio.verticale();
+                        if ui.selectable_label(verticale, "Verticale").clicked() && !verticale {
+                            self.foglio.ruota();
+                        }
+                        if ui.selectable_label(!verticale, "Orizzontale").clicked() && verticale {
+                            self.foglio.ruota();
+                        }
+                    });
+                }
+                SceltaFoglio::Mano => {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut self.foglio.larghezza_mm)
+                                .range(100.0..=1500.0)
+                                .speed(1.0)
+                                .suffix(" mm"),
+                        );
+                        ui.label("×");
+                        ui.add(
+                            egui::DragValue::new(&mut self.foglio.altezza_mm)
+                                .range(100.0..=1500.0)
+                                .speed(1.0)
+                                .suffix(" mm"),
+                        );
+                    });
+                }
+                SceltaFoglio::Stampante => {
+                    let nota = match self.foglio_da_stampante() {
+                        Some(_) => "Misure lette dalla stampante: aggiorna con Aggiorna stato",
+                        None => "La stampante non dichiara le misure del foglio: l'anteprima usa l'ultimo formato noto",
+                    };
+                    ui.colored_label(Color32::GRAY, nota);
+                }
             }
-            None => {
-                let nota = match &self.stato_stampante {
-                    Some(Ok(_)) => "Rotolo non rilevato (la MIB non espone le dimensioni): uso il fallback manuale",
-                    Some(Err(_)) | None => "Rotolo non rilevato: uso il fallback manuale",
-                };
-                ui.colored_label(Color32::GRAY, nota);
+            ui.checkbox(&mut self.adatta_foglio, "Adatta all'area stampabile")
+                .on_hover_text("Riduce solo le pagine troppo grandi, mantenendo le proporzioni. Riserva 5 mm per lato e 22 mm sul lato d'entrata; la scala del disegno cambia");
+            if self.adatta_foglio {
+                let (corto, lungo) = self.foglio.area_utile();
+                ui.label(RichText::new(format!("Area utile: {corto:.0} × {lungo:.0} mm")).small());
+                ui.label(RichText::new("PostScript, HP-GL/2 e TIFF multipagina non supportano l'adattamento").small());
+            }
+        } else {
+            egui::ComboBox::from_id_salt("rotolo")
+                .selected_text(
+                    LARGHEZZE_ROTOLO
+                        .iter()
+                        .find(|(_, mm)| *mm == self.larghezza_rotolo)
+                        .map(|(n, _)| *n)
+                        .unwrap_or("?"),
+                )
+                .width(200.0)
+                .show_ui(ui, |ui| {
+                    for (n, mm) in LARGHEZZE_ROTOLO {
+                        ui.selectable_value(&mut self.larghezza_rotolo, mm, n);
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Fallback manuale: vale solo se la stampante non dice che rotolo ha caricato",
+                );
+            match &self.larghezza_rilevata {
+                Some((nome, mm)) => {
+                    ui.colored_label(
+                        Color32::DARK_GREEN,
+                        format!("Rotolo rilevato ({nome}): {mm:.0} mm — anteprima su questo"),
+                    );
+                }
+                None => {
+                    let nota = match &self.stato_stampante {
+                        Some(Ok(_)) => "Rotolo non rilevato (il suo ingresso non dichiara la larghezza): uso il fallback manuale",
+                        Some(Err(_)) | None => "Rotolo non rilevato: uso il fallback manuale",
+                    };
+                    ui.colored_label(Color32::GRAY, nota);
+                }
             }
         }
 
@@ -835,7 +1074,7 @@ impl App {
             .selezionato
             .and_then(|i| self.documenti.get(i))
             .is_some_and(|d| !impagina::impaginabile(d.info.formato));
-        ui.add_enabled_ui(!escluso && !self.nesting, |ui| {
+        ui.add_enabled_ui(!escluso && !self.nesting_attivo() && !self.su_foglio(), |ui| {
             ui.horizontal(|ui| {
                 for a in Allineamento::TUTTI {
                     ui.selectable_value(&mut self.allineamento, a, a.etichetta());
@@ -847,10 +1086,13 @@ impl App {
         if escluso {
             ui.label(RichText::new("PostScript e HP-GL/2 partono così come sono: l'allineamento non si applica").small());
         }
-        if self.nesting {
+        if self.nesting_attivo() {
             ui.label(RichText::new("Nesting attivo: l'allineamento non si applica").small());
         }
-        if self.allineamento != Allineamento::Sinistra || self.nesting {
+        if self.su_foglio() {
+            ui.label(RichText::new("Con il foglio singolo l'allineamento non si applica").small());
+        }
+        if !self.su_foglio() && (self.allineamento != Allineamento::Sinistra || self.nesting) {
             ui.horizontal(|ui| {
                 ui.label("Margine");
                 ui.add(egui::DragValue::new(&mut self.config.margine_mm).range(impagina::MARGINE_MIN_MM..=50.0).speed(0.5).suffix(" mm"))
@@ -861,9 +1103,14 @@ impl App {
 
         ui.add_space(6.0);
         sezione(ui, "NESTING");
-        ui.checkbox(&mut self.nesting, "Nesting")
-            .on_hover_text("Mette più file sullo stesso foglio, un job per foglio; PostScript e HP-GL/2 partono da soli");
-        if self.nesting {
+        ui.add_enabled_ui(!self.su_foglio(), |ui| {
+            ui.checkbox(&mut self.nesting, "Nesting")
+                .on_hover_text("Mette più file sullo stesso foglio, un job per foglio; PostScript e HP-GL/2 partono da soli");
+        });
+        if self.su_foglio() {
+            ui.label(RichText::new("Con il foglio singolo il nesting non si applica").small());
+        }
+        if self.nesting_attivo() {
             ui.checkbox(&mut self.nesting_ruota, "Ruota i pezzi")
                 .on_hover_text("Sdraiato il lato lungo va lungo il rotolo: consuma meno carta");
             ui.horizontal(|ui| {
@@ -977,8 +1224,10 @@ impl App {
         // lavorazione di ogni documento (anteprima, impaginazione e nesting la
         // trattano per pezzo): qui si allineano quelli già in lista.
         let cornice = self.cornice.then_some(self.cornice_attuale());
+        let area_foglio = self.area_foglio_attiva();
         for d in &mut self.documenti {
             d.lavorazione.cornice = cornice;
+            d.lavorazione.area_foglio_mm = area_foglio.filter(|_| d.adattabile_al_foglio());
         }
 
         if let Some(i) = self.selezionato {
@@ -1220,7 +1469,7 @@ impl App {
                         if !d.lavorazione.scala.originale() {
                             didascalia.push_str(&format!(" · {}", d.lavorazione.scala.didascalia()));
                         }
-                        if (0..d.info.pagine.min(PAGINE_MAX)).any(|n| d.esce_ruotata(n, self.rotolo_effettivo())) {
+                        if (0..d.info.pagine.min(PAGINE_MAX)).any(|n| !self.su_foglio() && d.esce_ruotata(n, self.rotolo_effettivo())) {
                             didascalia.push_str(" · 90°");
                         }
                         ui.label(RichText::new(didascalia).small());
@@ -1302,7 +1551,7 @@ impl App {
     fn anteprima(&mut self, ui: &mut egui::Ui) {
         let area = ui.available_rect_before_wrap();
         ui.painter().rect_filled(area, 0.0, Color32::from_gray(225));
-        if self.nesting {
+        if self.nesting_attivo() {
             self.anteprima_nesting(ui, area);
             return;
         }
@@ -1316,6 +1565,11 @@ impl App {
             );
             return;
         };
+
+        if self.su_foglio() {
+            self.anteprima_foglio(ui, area, d);
+            return;
+        }
 
         // Il rotolo occupa la larghezza disponibile; le pagine, ognuna col suo
         // formato, sono in scala una sotto l'altra.
@@ -1413,6 +1667,129 @@ impl App {
 
         let alto_nota = nota.size().y;
         p.galley(Pos2::new(area.center().x, area.bottom() - 8.0 - alto_nota), nota, Color32::from_gray(60));
+    }
+
+    /// Con il foglio singolo l'anteprima disegna i fogli al posto del rotolo:
+    /// una pagina per foglio, tagliata sul bordo se non ci entra.
+    fn anteprima_foglio(&self, ui: &mut egui::Ui, area: Rect, d: &Documento) {
+        let foglio = self.foglio;
+        let margine = 30.0;
+        let spazio_tra_fogli = 14.0;
+        // Senza pagine renderizzate resta il foglio vuoto: si vede almeno il
+        // formato su cui uscirà.
+        let pagine_visibili = d.info.pagine.clamp(1, PAGINE_MAX);
+        let misure: Vec<Option<(f64, f64)>> =
+            (0..pagine_visibili).map(|n| d.mm_pagina(n)).collect();
+        let mut nota = format!(
+            "{} — {}\n{} dall'ingresso manuale",
+            d.nome,
+            d.info.dettagli,
+            foglio.etichetta()
+        );
+        if d.info.pagine > pagine_visibili {
+            nota.push_str(&format!(" (mostrate {pagine_visibili})"));
+        }
+        if self.adatta_foglio && d.adattabile_al_foglio() {
+            let percentuali: Vec<String> = (0..pagine_visibili)
+                .map(|n| {
+                    let base = d.info.pagine_mm.get(n).copied().flatten().or(d.info.mm);
+                    match base {
+                        Some((l, a)) => format!("p. {}: {:.1}%", n + 1, 100.0 * d.lavorazione.riduzione_foglio(l, a)),
+                        None => format!("p. {}: misura ignota", n + 1),
+                    }
+                })
+                .collect();
+            nota.push_str(&format!("\nAdattamento rispetto alla scala scelta — {}", percentuali.join("; ")));
+        } else if self.adatta_foglio {
+            nota.push_str("\nAdattamento non supportato per questo documento");
+        }
+        // La stampante non stampa una pagina sul foglio della stessa misura:
+        // vuole 5 mm ai lati e 22 mm sul lato d'entrata, e finché non li ha
+        // chiede di caricare un foglio più grande (visto sulla T2600).
+        if let Some((l, a)) = misure.iter().flatten().copied().find(|&m| !foglio.entra(m)) {
+            let (min_l, min_a) = Foglio::foglio_minimo((l, a));
+            nota.push_str(&format!(
+                "\nAttenzione: la pagina {l:.0} × {a:.0} mm vuole un foglio di almeno {min_l:.0} × {min_a:.0} mm \
+                 (22 mm sul lato d'entrata e 5 mm ai lati): la stampante chiederà di caricarlo"
+            ));
+        }
+        if let Some(dpi) = d.dpi
+            && let Some(avviso) = dpi.avviso(self.config.soglia_dpi)
+        {
+            nota.push_str(&format!("\n{avviso}"));
+        }
+        if d.dpi_parziale {
+            nota.push_str(&format!(
+                "\nRisoluzione misurata solo sulle prime {PAGINE_DPI_MAX} pagine"
+            ));
+        }
+        let mut testo = egui::text::LayoutJob::simple(
+            nota,
+            TextStyle::Body.resolve(ui.style()),
+            Color32::from_gray(60),
+            area.width() - 2.0 * margine,
+        );
+        testo.halign = Align::Center;
+        let nota = ui.painter().layout_job(testo);
+
+        // Stessa scala per tutti i fogli: la larghezza disponibile, poi si
+        // riduce tutto se la colonna non entra in altezza.
+        let n = pagine_visibili as f32;
+        let scala = (area.width() - 2.0 * margine) / foglio.larghezza_mm as f32;
+        let altezza = n * foglio.altezza_mm as f32 * scala + (n - 1.0) * spazio_tra_fogli;
+        let alto_disponibile = area.height() - 2.0 * margine - nota.size().y;
+        let rid = (alto_disponibile / altezza).min(1.0);
+        let larghezza = foglio.larghezza_mm as f32 * scala * rid;
+        let altezza_foglio = foglio.altezza_mm as f32 * scala * rid;
+        let mut y = area.top() + margine;
+        for (i, misura) in misure.iter().enumerate() {
+            let r = Rect::from_min_size(
+                Pos2::new(area.center().x - larghezza / 2.0, y),
+                Vec2::new(larghezza, altezza_foglio),
+            );
+            {
+                // La pagina si disegna dentro il foglio, tagliata sul bordo:
+                // quello che sborda non uscirebbe.
+                let mut figlio = ui.new_child(egui::UiBuilder::new().max_rect(r));
+                figlio.set_clip_rect(r);
+                figlio.painter().rect_filled(r, 0.0, Color32::from_gray(250));
+                if let Some((l, a)) = misura {
+                    // Una pagina girata rispetto al foglio si mostra girata:
+                    // sul foglio la rotazione della stampante non è provata.
+                    let ruotata = (l > a) != (foglio.larghezza_mm > foglio.altezza_mm);
+                    let dim = if ruotata {
+                        Vec2::new(*a as f32, *l as f32)
+                    } else {
+                        Vec2::new(*l as f32, *a as f32)
+                    } * (scala * rid);
+                    disegna_pagina(&figlio, Rect::from_center_size(r.center(), dim), d, i, ruotata);
+                }
+            }
+            let p = ui.painter();
+            p.rect_stroke(
+                r,
+                0.0,
+                Stroke::new(1.0, Color32::from_gray(160)),
+                StrokeKind::Outside,
+            );
+            if pagine_visibili > 1 {
+                p.text(
+                    Pos2::new(r.right() + 4.0, r.top()),
+                    Align2::LEFT_TOP,
+                    (i + 1).to_string(),
+                    TextStyle::Small.resolve(ui.style()),
+                    Color32::from_gray(90),
+                );
+            }
+            y += altezza_foglio + spazio_tra_fogli * rid;
+        }
+
+        let alto_nota = nota.size().y;
+        ui.painter().galley(
+            Pos2::new(area.center().x, area.bottom() - 8.0 - alto_nota),
+            nota,
+            Color32::from_gray(60),
+        );
     }
 
     /// Con il nesting l'anteprima mostra i fogli di tutta la coda: basta
@@ -1737,6 +2114,7 @@ impl eframe::App for App {
         self.file_trascinati(ctx);
         self.aggiorna_anteprime();
         self.gestisci_eventi(ctx);
+        self.aggiorna_attesa_foglio(ctx);
         self.foto_finestra(ctx);
     }
 
