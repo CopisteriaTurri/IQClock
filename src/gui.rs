@@ -1,6 +1,7 @@
 //! Interfaccia in stile HP Click: impostazioni a sinistra, miniature al centro,
 //! anteprima sul rotolo a destra, file trascinabili ovunque nella finestra.
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
@@ -16,6 +17,7 @@ use crate::config::Config;
 use crate::file::{self, InfoFile};
 use crate::impagina::{self, Allineamento, Impaginazione};
 use crate::lavorazione::{self, Cornice, FormatoIso, Lavorazione, Scala};
+use crate::nesting::{self, Nesting};
 use crate::pjl::{self, Formato, OpzioniJob, Sorgente};
 use crate::rotazione::{self, TOLLERANZA_MM};
 use crate::stampante;
@@ -128,6 +130,9 @@ struct Documento {
     percorso: PathBuf,
     nome: String,
     info: InfoFile,
+    /// Idoneità al nesting letta all'apertura, senza riaprire i TIFF a ogni frame.
+    annidabile: bool,
+    impronta: Option<(std::time::SystemTime, u64)>,
     copie: u32,
     stato: StatoJob,
     /// Scala scelta per questo documento (come le copie).
@@ -156,16 +161,59 @@ struct PaginaMostrata {
 }
 
 impl Documento {
+    /// Rilegge misure e idoneità quando il file cambia. Il nuovo id scarta
+    /// anche le anteprime ancora in arrivo per il contenuto precedente.
+    fn aggiorna_file(&mut self, nuovo_id: u64) -> bool {
+        let impronta = impronta_file(&self.percorso);
+        if self.impronta == impronta {
+            return false;
+        }
+        self.impronta = impronta;
+        self.id = nuovo_id;
+        self.pagine.clear();
+        self.dpi = None;
+        self.dpi_parziale = false;
+        match file::analizza(&self.percorso) {
+            Ok(info) => {
+                self.annidabile = lavorazione::annidabile_file(&self.percorso, info.formato).unwrap_or(false);
+                self.info = info;
+            }
+            Err(e) => {
+                self.annidabile = false;
+                self.info.mm = None;
+                self.info.pagine_mm.clear();
+                self.info.pagine = 0;
+                self.stato = StatoJob::Errore(e.to_string());
+            }
+        }
+        true
+    }
+
     /// Misure della pagina `n` in mm: quelle date dall'anteprima, altrimenti
     /// quelle della prima pagina lette all'apertura del file, scalate.
     fn mm_pagina(&self, n: usize) -> Option<(f64, f64)> {
-        self.pagine.get(n).and_then(|p| p.mm).or_else(|| {
-            self.info.mm.map(|(l, a)| {
+        // Una pagina impaginata da IQClock è rifatta dall'anteprima e le sue
+        // misure sono quelle. Altrimenti valgono le misure lette dal file: il
+        // render di pdfium le dà in punti e ignora `/UserUnit`, quindi una
+        // pagina con UserUnit diverso da 1 arriverebbe a metà o al doppio.
+        if let Some(p) = self.pagine.get(n)
+            && p.impaginata
+            && let Some(mm) = p.mm
+        {
+            return Some(mm);
+        }
+        // Con il nesting servono le misure di tutte le pagine: `pagine_mm` le
+        // ha, `info.mm` vale solo per la prima.
+        let base = self.info.pagine_mm.get(n).copied().flatten().or(self.info.mm);
+        match base {
+            Some((l, a)) => {
                 let (sx, sy) = lavorazione::fattori(&self.lavorazione.scala, l, a);
                 let cornice = self.cornice_mm();
-                (l * sx + cornice, a * sy + cornice)
-            })
-        })
+                Some((l * sx + cornice, a * sy + cornice))
+            }
+            // File che lopdf non sa misurare ma pdfium sì.
+            None => self.pagine.get(n).and_then(|p| p.mm),
+        }
     }
 
     /// Spazio che la cornice aggiunge alle misure, in tutto (mm).
@@ -195,11 +243,25 @@ impl Documento {
     }
 }
 
+/// Firma leggera del file: evita di riaprire e decodificare i TIFF invariati.
+fn impronta_file(percorso: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(percorso).ok()?;
+    Some((meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH), meta.len()))
+}
+
 enum Evento {
     Avanzamento(u64, f32),
     Finito(u64, Result<(), String>),
     Stato(Result<StatoStampante, String>),
     Pagine(u64, Chiave, Vec<Pagina>),
+}
+
+/// Disposizione riutilizzata finché pezzi, misure e opzioni restano uguali.
+struct CacheNesting {
+    pezzi: Vec<nesting::Pezzo>,
+    utile: f64,
+    opzioni: Nesting,
+    fogli: Vec<nesting::Foglio>,
 }
 
 pub struct App {
@@ -213,6 +275,11 @@ pub struct App {
     taglierina: Option<bool>,
     /// Cornice di taglio attiva per tutti i documenti (sezione FINITURA).
     cornice: bool,
+    /// Nesting attivo: più pezzi sullo stesso foglio (sezione NESTING).
+    nesting: bool,
+    nesting_ruota: bool,
+    cache_nesting: Option<CacheNesting>,
+    ultimo_controllo_file: std::time::Instant,
     extra_pjl: String,
     larghezza_rotolo: f64,
     /// Larghezza letta dalla stampante via SNMP (nome ingresso, mm).
@@ -250,6 +317,10 @@ impl App {
         });
         let mut app = Self {
             larghezza_rotolo: config.larghezza_rotolo_mm,
+            nesting: config.nesting,
+            nesting_ruota: config.nesting_ruota,
+            cache_nesting: None,
+            ultimo_controllo_file: std::time::Instant::now(),
             allineamento: Allineamento::Sinistra,
             rotolo_confermato: None,
             chiedi_conferma: false,
@@ -293,11 +364,15 @@ impl App {
                 };
                 let imp = self.impaginazione_anteprime;
                 self.anteprime.richiedi(id, percorso.clone(), info.formato, lavorazione, imp);
+                let annidabile = lavorazione::annidabile_file(&percorso, info.formato).unwrap_or(false);
+                let impronta = impronta_file(&percorso);
                 self.documenti.push(Documento {
                     id,
                     percorso,
                     nome,
                     info,
+                    annidabile,
+                    impronta,
                     copie: 1,
                     stato: StatoJob::Pronto,
                     lavorazione,
@@ -337,6 +412,10 @@ impl App {
     }
 
     fn impaginazione(&self) -> Option<Impaginazione> {
+        // Con il nesting i fogli li compone IQClock: l'allineamento non c'entra.
+        if self.nesting {
+            return None;
+        }
         (self.allineamento != Allineamento::Sinistra).then_some(Impaginazione {
             allineamento: self.allineamento,
             rotolo_mm: self.rotolo_effettivo(),
@@ -349,6 +428,18 @@ impl App {
     /// la stampante ridurrebbe o taglierebbe la pagina.
     fn rotolo_verificato(&self) -> bool {
         self.larghezza_rilevata.is_some() || self.rotolo_confermato == Some(self.larghezza_rotolo)
+    }
+
+    /// Rilegge i file cambiati e rinnova la richiesta delle loro anteprime.
+    fn aggiorna_file_documenti(&mut self) {
+        for d in &mut self.documenti {
+            if matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_)) && d.aggiorna_file(self.prossimo_id) {
+                self.prossimo_id += 1;
+                self.cache_nesting = None;
+                self.anteprime.richiedi(d.id, d.percorso.clone(), d.info.formato, d.lavorazione, d.anteprima.0);
+            }
+        }
+        self.ultimo_controllo_file = std::time::Instant::now();
     }
 
     /// Richiede di nuovo le anteprime quando cambiano impaginazione o scala:
@@ -392,10 +483,19 @@ impl App {
     /// Prima di impaginare con una larghezza del rotolo non verificata chiede
     /// conferma.
     fn chiedi_e_stampa(&mut self, ctx: &egui::Context) {
-        let da_impaginare = self.impaginazione().is_some()
-            && self.documenti.iter().any(|d| {
-                matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_)) && impagina::impaginabile(d.info.formato)
-            });
+        // Anche il nesting ha bisogno della larghezza giusta del rotolo.
+        let da_impaginare = if self.nesting {
+            self.documenti.iter().any(|d| {
+                matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_))
+                    && nesting::annidabile(d.info.formato)
+            })
+        } else {
+            self.impaginazione().is_some()
+                && self.documenti.iter().any(|d| {
+                    matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_))
+                        && impagina::impaginabile(d.info.formato)
+                })
+        };
         if da_impaginare && !self.rotolo_verificato() {
             self.chiedi_conferma = true;
         } else {
@@ -412,6 +512,11 @@ impl App {
     /// Manda i documenti pronti uno dopo l'altro, su un unico thread: la porta
     /// 9100 accetta un job alla volta.
     fn stampa(&mut self, ctx: &egui::Context) {
+        self.aggiorna_file_documenti();
+        if self.nesting {
+            self.stampa_nesting(ctx);
+            return;
+        }
         let coda: Vec<_> = self
             .documenti
             .iter()
@@ -436,6 +541,122 @@ impl App {
                     }
                 });
                 let _ = tx.send(Evento::Finito(i, r.map_err(|e| format!("{e:#}"))));
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// Con il nesting attivo: compone i fogli (un job per foglio; tutti i
+    /// documenti annidati seguono lo stesso stato), poi manda gli esclusi e i
+    /// PostScript/HP-GL/2 uno alla volta come sempre.
+    fn stampa_nesting(&mut self, ctx: &egui::Context) {
+        let pronti: Vec<usize> = self
+            .documenti
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_)))
+            .map(|(i, _)| i)
+            .collect();
+        let tutti: Vec<(u64, PathBuf, Formato, OpzioniJob)> = pronti
+            .iter()
+            .map(|&i| {
+                let d = &self.documenti[i];
+                (d.id, d.percorso.clone(), d.info.formato, self.opzioni(d))
+            })
+            .collect();
+        let annidabili: Vec<lavorazione::DaAnnidare> = tutti
+            .iter()
+            .filter(|(_, _, formato, _)| nesting::annidabile(*formato))
+            .map(|(id, percorso, formato, opz)| lavorazione::DaAnnidare {
+                id: *id,
+                percorso: percorso.clone(),
+                formato: *formato,
+                lavorazione: opz.lavorazione,
+                copie: opz.copie,
+            })
+            .collect();
+        for d in &mut self.documenti {
+            if matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_)) {
+                d.stato = StatoJob::InInvio(0.0);
+            }
+        }
+        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        let (host, porta) = (self.config.host.clone(), self.config.porta);
+        let (rotolo, margine) = (self.rotolo_effettivo(), self.config.margine_mm);
+        let nesting = Nesting {
+            distanza_mm: self.config.nesting_distanza_mm,
+            ruota: self.nesting_ruota,
+        };
+        let base = OpzioniJob {
+            nome: String::new(),
+            copie: 1,
+            sorgente: self.sorgente,
+            scala_di_grigi: self.scala_di_grigi,
+            taglierina: self.taglierina,
+            extra: self.extra_pjl.clone(),
+            impaginazione: None,
+            lavorazione: Lavorazione::default(),
+        };
+        thread::spawn(move || {
+            let invia = |percorso: &std::path::Path,
+                         formato: Formato,
+                         opz: &OpzioniJob,
+                         ids: &[u64]|
+             -> Result<(), String> {
+                let mut ultimo = 0.0;
+                stampante::invia(&host, porta, percorso, formato, opz, |f| {
+                    if f - ultimo >= 0.01 || f >= 1.0 {
+                        ultimo = f;
+                        for id in ids {
+                            let _ = tx.send(Evento::Avanzamento(*id, f));
+                        }
+                        ctx.request_repaint();
+                    }
+                })
+                .map_err(|e| format!("{e:#}"))
+            };
+            let esclusi = match lavorazione::componi_nesting(&annidabili, rotolo, margine, &nesting) {
+                Err(e) => {
+                    let errore = format!("{e:#}");
+                    for d in &annidabili {
+                        let _ = tx.send(Evento::Finito(d.id, Err(errore.clone())));
+                    }
+                    ctx.request_repaint();
+                    Vec::new()
+                }
+                Ok(annidamento) => {
+                    // Un documento può finire su più fogli: vale l'esito peggiore,
+                    // se no un foglio fallito seguito da uno riuscito farebbe
+                    // credere che sia uscito tutto.
+                    let mut esiti: std::collections::HashMap<u64, Result<(), String>> =
+                        std::collections::HashMap::new();
+                    for foglio in &annidamento.fogli {
+                        let opz = OpzioniJob {
+                            nome: format!("Nesting ({} file)", annidamento.documenti),
+                            ..base.clone()
+                        };
+                        let r = invia(foglio.file.percorso(), Formato::Pdf, &opz, &foglio.documenti);
+                        for id in &foglio.documenti {
+                            let esito = esiti.entry(*id).or_insert_with(|| Ok(()));
+                            if esito.is_ok() {
+                                *esito = r.clone();
+                            }
+                        }
+                    }
+                    for (id, esito) in esiti {
+                        let _ = tx.send(Evento::Finito(id, esito));
+                    }
+                    ctx.request_repaint();
+                    annidamento.esclusi
+                }
+            };
+            // Documenti esclusi dal nesting e formati che non si annidano.
+            for (id, percorso, formato, opz) in &tutti {
+                if !esclusi.contains(id) && nesting::annidabile(*formato) {
+                    continue;
+                }
+                let r = invia(percorso, *formato, opz, &[*id]);
+                let _ = tx.send(Evento::Finito(*id, r));
                 ctx.request_repaint();
             }
         });
@@ -614,7 +835,7 @@ impl App {
             .selezionato
             .and_then(|i| self.documenti.get(i))
             .is_some_and(|d| !impagina::impaginabile(d.info.formato));
-        ui.add_enabled_ui(!escluso, |ui| {
+        ui.add_enabled_ui(!escluso && !self.nesting, |ui| {
             ui.horizontal(|ui| {
                 for a in Allineamento::TUTTI {
                     ui.selectable_value(&mut self.allineamento, a, a.etichetta());
@@ -626,13 +847,76 @@ impl App {
         if escluso {
             ui.label(RichText::new("PostScript e HP-GL/2 partono così come sono: l'allineamento non si applica").small());
         }
-        if self.allineamento != Allineamento::Sinistra {
+        if self.nesting {
+            ui.label(RichText::new("Nesting attivo: l'allineamento non si applica").small());
+        }
+        if self.allineamento != Allineamento::Sinistra || self.nesting {
             ui.horizontal(|ui| {
                 ui.label("Margine");
                 ui.add(egui::DragValue::new(&mut self.config.margine_mm).range(impagina::MARGINE_MIN_MM..=50.0).speed(0.5).suffix(" mm"))
             })
             .response
             .on_hover_text("Bordo non stampabile per lato: la pagina mandata è larga quanto il rotolo meno questo margine sui due lati");
+        }
+
+        ui.add_space(6.0);
+        sezione(ui, "NESTING");
+        ui.checkbox(&mut self.nesting, "Nesting")
+            .on_hover_text("Mette più file sullo stesso foglio, un job per foglio; PostScript e HP-GL/2 partono da soli");
+        if self.nesting {
+            ui.checkbox(&mut self.nesting_ruota, "Ruota i pezzi")
+                .on_hover_text("Sdraiato il lato lungo va lungo il rotolo: consuma meno carta");
+            ui.horizontal(|ui| {
+                ui.label("Distanza");
+                ui.add(
+                    egui::DragValue::new(&mut self.config.nesting_distanza_mm)
+                        .range(0.0..=50.0)
+                        .speed(0.5)
+                        .suffix(" mm"),
+                );
+            })
+            .response
+            .on_hover_text("Spazio tra i pezzi e tra le file");
+
+            // Le copie sono del pezzo: si scelgono qui, con l'anteprima dei
+            // fogli sott'occhio, e sono le stesse della sezione COPIE del file.
+            ui.add_space(4.0);
+            ui.label(RichText::new("Copie per pezzo").small().strong())
+                .on_hover_text("Quante volte ogni file entra nei fogli: l'anteprima si aggiorna");
+            let annidabili: Vec<usize> = self
+                .documenti
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| nesting::annidabile(d.info.formato))
+                .map(|(i, _)| i)
+                .collect();
+            if annidabili.is_empty() {
+                ui.label(RichText::new("Nessun PDF o immagine in coda").small());
+            }
+            let mut da_selezionare = None;
+            for i in annidabili {
+                let nome_breve = (ui.available_width() - 58.0).max(60.0);
+                ui.horizontal(|ui| {
+                    let d = &mut self.documenti[i];
+                    let altezza = ui.text_style_height(&TextStyle::Small);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(nome_breve, altezza),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            let etichetta = ui
+                                .add(egui::Label::new(RichText::new(&d.nome).small()).truncate());
+                            if etichetta.clicked() {
+                                da_selezionare = Some(i);
+                            }
+                            etichetta.on_hover_text(format!("{}: {} copie", d.nome, d.copie));
+                        },
+                    );
+                    ui.add(egui::DragValue::new(&mut d.copie).range(1..=999));
+                });
+            }
+            if let Some(i) = da_selezionare {
+                self.selezionato = Some(i);
+            }
         }
 
         ui.add_space(6.0);
@@ -913,6 +1197,7 @@ impl App {
         });
     }
 
+    /// Mostra i documenti in coda e permette di selezionarli o rimuoverli.
     fn pannello_miniature(&mut self, ui: &mut egui::Ui) {
         let mut da_togliere = None;
         let soglia = self.config.soglia_dpi;
@@ -1013,9 +1298,14 @@ impl App {
         }
     }
 
-    fn anteprima(&self, ui: &mut egui::Ui) {
+    /// Disegna il documento selezionato sul rotolo, oppure il nesting della coda.
+    fn anteprima(&mut self, ui: &mut egui::Ui) {
         let area = ui.available_rect_before_wrap();
         ui.painter().rect_filled(area, 0.0, Color32::from_gray(225));
+        if self.nesting {
+            self.anteprima_nesting(ui, area);
+            return;
+        }
         let Some(d) = self.selezionato.and_then(|i| self.documenti.get(i)) else {
             ui.painter().text(
                 area.center(),
@@ -1124,6 +1414,186 @@ impl App {
         let alto_nota = nota.size().y;
         p.galley(Pos2::new(area.center().x, area.bottom() - 8.0 - alto_nota), nota, Color32::from_gray(60));
     }
+
+    /// Con il nesting l'anteprima mostra i fogli di tutta la coda: basta
+    /// `disponi`, che è veloce, non serve comporre il PDF vero.
+    fn anteprima_nesting(&mut self, ui: &egui::Ui, area: Rect) {
+        let rotolo_mm = self.rotolo_effettivo();
+        let utile = (rotolo_mm - 2.0 * self.config.margine_mm).max(1.0);
+        let mut pezzi = Vec::new();
+        let mut senza = 0.0;
+        let mut singoli = 0;
+        for d in self.documenti.iter().filter(|d| matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_))) {
+            if !d.annidabile {
+                singoli += 1;
+                continue;
+            }
+            for n in 0..d.info.pagine {
+                let Some((l, a)) = d.mm_pagina(n) else { continue };
+                for copia in 0..d.copie.max(1) {
+                    pezzi.push(nesting::Pezzo { id: (d.id, n, copia), l, a });
+                    senza += if rotazione::ruota(l, a, rotolo_mm) { l } else { a };
+                }
+            }
+        }
+        if pezzi.is_empty() {
+            ui.painter().text(
+                area.center(),
+                Align2::CENTER_CENTER,
+                if singoli > 0 {
+                    format!("{singoli} documenti non annidabili: partono da soli")
+                } else {
+                    "Aggiungi PDF o immagini per vedere il nesting".to_string()
+                },
+                stile(RICHIAMO).resolve(ui.style()),
+                Color32::from_gray(110),
+            );
+            return;
+        }
+        // Come `componi_nesting`: basta un pezzo fuori dal rotolo per mandare da
+        // solo tutto il documento, così l'anteprima mostra i fogli che partiranno
+        // davvero e non una disposizione che la stampa non farà.
+        let fuori: HashSet<u64> = pezzi
+            .iter()
+            .filter(|p| !nesting::entra(p, utile, self.nesting_ruota, nesting::ALTEZZA_MAX_MM))
+            .map(|p| p.id.0)
+            .collect();
+        // `senza` comprende anche questi documenti: il loro consumo singolo
+        // va contato pure con il nesting, per confrontare la stessa coda.
+        let altezza_esclusi: f64 = pezzi.iter().filter(|p| fuori.contains(&p.id.0)).map(|p| if rotazione::ruota(p.l, p.a, rotolo_mm) { p.l } else { p.a }).sum();
+        pezzi.retain(|p| !fuori.contains(&p.id.0));
+        if pezzi.is_empty() {
+            ui.painter().text(
+                area.center(),
+                Align2::CENTER_CENTER,
+                format!(
+                    "Nessun pezzo entra nel rotolo da {rotolo_mm:.0} mm\n{} documenti partono da soli",
+                    fuori.len() + singoli
+                ),
+                stile(RICHIAMO).resolve(ui.style()),
+                Color32::from_gray(110),
+            );
+            return;
+        }
+        let opzioni = Nesting {
+            distanza_mm: self.config.nesting_distanza_mm,
+            ruota: self.nesting_ruota,
+        };
+        if !self.cache_nesting.as_ref().is_some_and(|cache| {
+            cache.pezzi == pezzi && cache.utile == utile && cache.opzioni == opzioni
+        }) {
+            let fogli = nesting::disponi(
+                &pezzi, utile, opzioni.distanza_mm, opzioni.ruota, nesting::ALTEZZA_MAX_MM,
+            );
+            self.cache_nesting = Some(CacheNesting { pezzi, utile, opzioni, fogli });
+        }
+        let fogli = &self.cache_nesting.as_ref().unwrap().fogli;
+        let documenti: HashMap<_, _> = self.documenti.iter().map(|d| (d.id, d)).collect();
+        let altezza_fogli: f64 = fogli.iter().map(|f| f.altezza).sum();
+        let con = altezza_fogli + altezza_esclusi;
+        let disposti: usize = fogli.iter().map(|f| f.posti.len()).sum();
+        let spazio = 6.0f32;
+        let totale = altezza_fogli as f32 + spazio * fogli.len().saturating_sub(1) as f32;
+        let margine_px = 30.0;
+        let mut nota = format!(
+            "{} pezzi, {:.2} m di carta (invece di {:.2} m senza nesting)",
+            disposti,
+            con / 1000.0,
+            senza / 1000.0
+        );
+        if singoli > 0 {
+            nota.push_str(&format!("\n{singoli} documenti non annidabili: partono da soli"));
+        }
+        if !fuori.is_empty() {
+            nota.push_str(&format!(
+                "\n{} documenti non entrano nel rotolo: partono da soli",
+                fuori.len()
+            ));
+        }
+        let mut testo = egui::text::LayoutJob::simple(
+            nota,
+            TextStyle::Body.resolve(ui.style()),
+            Color32::from_gray(60),
+            area.width() - 2.0 * margine_px,
+        );
+        testo.halign = Align::Center;
+        let nota = ui.painter().layout_job(testo);
+        let scala = ((area.width() - 2.0 * margine_px) / rotolo_mm as f32)
+            .min((area.height() - 2.0 * margine_px - nota.size().y) / totale.max(1.0))
+            .max(0.0);
+        let p = ui.painter();
+        let rotolo = Rect::from_min_size(
+            Pos2::new(
+                area.center().x - rotolo_mm as f32 * scala / 2.0,
+                area.top() + margine_px,
+            ),
+            Vec2::new(rotolo_mm as f32 * scala, totale * scala),
+        );
+        p.rect_filled(rotolo, 0.0, Color32::from_gray(250));
+        p.rect_stroke(rotolo, 0.0, Stroke::new(1.0, Color32::from_gray(160)), StrokeKind::Outside);
+        let sinistra = rotolo.left() + self.config.margine_mm as f32 * scala;
+        let mut y = rotolo.top();
+        let mut da_selezionare = None;
+        for (i, foglio) in fogli.iter().enumerate() {
+            if i > 0 {
+                p.extend(egui::Shape::dashed_line(
+                    &[
+                        Pos2::new(rotolo.left(), y - spazio * scala / 2.0),
+                        Pos2::new(rotolo.right(), y - spazio * scala / 2.0),
+                    ],
+                    Stroke::new(1.0, Color32::from_gray(120)),
+                    6.0,
+                    4.0,
+                ));
+            }
+            for posto in &foglio.posti {
+                let Some(d) = documenti.get(&posto.id.0) else { continue };
+                let Some((l, a)) = d.mm_pagina(posto.id.1) else { continue };
+                let (pl, pa) = if posto.ruotato { (a, l) } else { (l, a) };
+                let r = Rect::from_min_size(
+                    Pos2::new(sinistra + posto.x as f32 * scala, y + posto.y as f32 * scala),
+                    Vec2::new(pl as f32 * scala, pa as f32 * scala),
+                );
+                disegna_pagina(ui, r, d, posto.id.1, posto.ruotato);
+                // Copie del pezzo: quale copia è e quante ne sono in tutto, così
+                // si vede nell'anteprima cosa moltiplica il numero scelto nella
+                // sezione NESTING (o in COPIE).
+                let copie = d.copie.max(1);
+                if copie > 1 {
+                    p.text(
+                        Pos2::new(r.right() - 3.0, r.top() + 3.0),
+                        Align2::RIGHT_TOP,
+                        format!("{}/{}", posto.id.2 + 1, copie),
+                        TextStyle::Small.resolve(ui.style()),
+                        Color32::from_gray(80),
+                    );
+                }
+                if self.selezionato.and_then(|i| self.documenti.get(i)).is_some_and(|s| s.id == d.id) {
+                    p.rect_stroke(r, 0.0, Stroke::new(1.5, BLU_HP), StrokeKind::Outside);
+                }
+                // Click su un pezzo: si seleziona il file, così le copie si
+                // cambiano dal suo pannello guardando i fogli.
+                let risposta = ui.interact(
+                    r,
+                    ui.make_persistent_id(("nesting", posto.id.0, posto.id.1, posto.id.2)),
+                    Sense::click(),
+                );
+                if risposta.clicked() {
+                    da_selezionare = Some(d.id);
+                }
+                risposta.on_hover_text(format!("{} · copia {} di {}", d.nome, posto.id.2 + 1, copie));
+            }
+            y += foglio.altezza as f32 * scala + spazio * scala;
+        }
+        if let Some(id) = da_selezionare {
+            self.selezionato = self.documenti.iter().position(|d| d.id == id);
+        }
+        p.galley(
+            Pos2::new(area.center().x, area.bottom() - 8.0 - nota.size().y),
+            nota,
+            Color32::from_gray(60),
+        );
+    }
 }
 
 /// Riga "Magenta ▮▮▮▯ 13%" con barra colorata.
@@ -1196,11 +1666,20 @@ impl App {
             ui.set_max_width(380.0);
             ui.heading("Larghezza del rotolo");
             ui.add_space(6.0);
-            ui.label(format!(
-                "La stampante non ha comunicato la larghezza del rotolo: IQClock allinea le pagine su \
-                 {:.0} mm, scelti a mano. Se è sbagliata, la stampante le ridurrà o le taglierà.",
-                self.larghezza_rotolo
-            ));
+            let testo = if self.nesting {
+                format!(
+                    "La stampante non ha comunicato la larghezza del rotolo: IQClock compone i fogli \
+                     su {:.0} mm, scelti a mano. Se è sbagliata i pezzi non entrano o la stampante li taglia.",
+                    self.larghezza_rotolo
+                )
+            } else {
+                format!(
+                    "La stampante non ha comunicato la larghezza del rotolo: IQClock allinea le pagine su \
+                     {:.0} mm, scelti a mano. Se è sbagliata, la stampante le ridurrà o le taglierà.",
+                    self.larghezza_rotolo
+                )
+            };
+            ui.label(testo);
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if ui.button(format!("Stampa su {:.0} mm", self.larghezza_rotolo)).clicked() {
@@ -1249,6 +1728,11 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let intervallo = std::time::Duration::from_secs(1);
+        if self.ultimo_controllo_file.elapsed() >= intervallo {
+            self.aggiorna_file_documenti();
+        }
+        ctx.request_repaint_after(intervallo);
         // Prima le chiavi aggiornate, poi i risultati: così quelli superati si scartano.
         self.file_trascinati(ctx);
         self.aggiorna_anteprime();
@@ -1286,6 +1770,62 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.config.larghezza_rotolo_mm = self.larghezza_rotolo;
+        self.config.nesting = self.nesting;
+        self.config.nesting_ruota = self.nesting_ruota;
         self.config.salva();
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// Un TIFF sovrascritto rinnova id, misure e idoneità, ma conserva le
+    /// impostazioni dell'utente. Un file sparito non conserva misure obsolete.
+    #[test]
+    fn documento_rilegge_il_tiff_modificato() {
+        let file = file::FileTemporaneo::nuovo("tiff");
+        let scrivi = |pagine, larghezza, altezza| {
+            let mut encoder = tiff::encoder::TiffEncoder::new(std::fs::File::create(file.percorso()).unwrap()).unwrap();
+            for _ in 0..pagine {
+                encoder.write_image::<tiff::encoder::colortype::RGB8>(larghezza, altezza, &vec![100; larghezza as usize * altezza as usize * 3]).unwrap();
+            }
+        };
+        scrivi(1, 100, 200);
+        let lav = Lavorazione { scala: Scala::Percentuale { x: 150.0, y: 150.0 }, ..Default::default() };
+        let mut d = Documento {
+            id: 1,
+            percorso: file.percorso().to_path_buf(),
+            nome: "modificato.tiff".into(),
+            info: file::analizza(file.percorso()).unwrap(),
+            annidabile: true,
+            impronta: impronta_file(file.percorso()),
+            copie: 3,
+            stato: StatoJob::Pronto,
+            lavorazione: lav,
+            blocca_proporzioni: true,
+            anteprima: (None, lav),
+            pagine: Vec::new(),
+            dpi: None,
+            dpi_parziale: false,
+        };
+        let prima = d.info.mm;
+        assert!(!d.aggiorna_file(2));
+        scrivi(2, 80, 90);
+        assert!(d.aggiorna_file(2));
+        assert!(!d.annidabile);
+        assert_ne!(d.info.mm, prima);
+        assert_eq!(d.id, 2);
+        assert_eq!(d.copie, 3);
+        assert_eq!(d.lavorazione, lav);
+        assert!(!d.aggiorna_file(3));
+        std::fs::remove_file(file.percorso()).unwrap();
+        assert!(d.aggiorna_file(3));
+        assert!(!d.annidabile);
+        assert!(d.mm_pagina(0).is_none());
+        scrivi(1, 120, 160);
+        assert!(d.aggiorna_file(4));
+        assert!(d.annidabile);
+        assert!(d.mm_pagina(0).is_some());
     }
 }

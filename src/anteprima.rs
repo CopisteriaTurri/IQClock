@@ -149,6 +149,20 @@ fn carica_pdfium() -> Result<Pdfium, String> {
     carica_pdfium_in(&cartelle, true)
 }
 
+/// pdfium per i test che devono guardare i pixel: `None` se la libreria non
+/// c'è in locale; in CI la sua assenza fa fallire il test.
+#[cfg(test)]
+pub(crate) fn pdfium_per_test() -> Option<Pdfium> {
+    match carica_pdfium() {
+        Ok(p) => Some(p),
+        Err(e) if std::env::var_os("CI").is_some() => panic!("pdfium non caricato in CI: {e}"),
+        Err(e) => {
+            eprintln!("pdfium assente ({e}): test saltato");
+            None
+        }
+    }
+}
+
 fn cartelle_pdfium() -> Vec<PathBuf> {
     let mut cartelle: Vec<PathBuf> = Vec::new();
     if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
@@ -536,14 +550,7 @@ mod test {
     /// `scarica-pdfium.sh`). In CI la libreria deve esserci: lì l'assenza è un
     /// errore, altrimenti i test di rendering passerebbero senza girare.
     fn pdfium_o_salta() -> Option<Pdfium> {
-        match carica_pdfium() {
-            Ok(p) => Some(p),
-            Err(e) if std::env::var_os("CI").is_some() => panic!("pdfium non caricato in CI: {e}"),
-            Err(e) => {
-                eprintln!("pdfium assente ({e}): test saltato");
-                None
-            }
-        }
+        pdfium_per_test()
     }
 
     #[test]

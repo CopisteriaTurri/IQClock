@@ -16,13 +16,14 @@
 //! cornice, poi l'allineamento (qui rifattorizzato in `impagina::applica_pdf`):
 //! così l'allineamento misura il pezzo con la sua cornice.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, dictionary};
 
 use crate::file::{self, FileTemporaneo};
 use crate::impagina::{self, Impaginazione};
+use crate::nesting::{self, Contenuto, Nesting, Pezzo, Sorgente};
 use crate::pjl::Formato;
 use crate::png;
 use crate::risoluzione;
@@ -475,12 +476,7 @@ fn scala_pagina(doc: &Document, id: ObjectId, scala: &Scala) -> Option<ScalaPagi
     if ruota % 90 != 0 {
         return None;
     }
-    let (larghezza, altezza) = ((x1 - x0) / MM_PT, (y1 - y0) / MM_PT);
-    let (larghezza, altezza) = if ruota % 180 == 90 {
-        (altezza, larghezza)
-    } else {
-        (larghezza, altezza)
-    };
+    let (larghezza, altezza) = file::dimensioni_pagina_mm(doc, id)?;
     let (sx_vis, sy_vis) = fattori(scala, larghezza, altezza);
     if (sx_vis - 1.0).abs() < TOLLERANZA_SCALA && (sy_vis - 1.0).abs() < TOLLERANZA_SCALA {
         return None;
@@ -665,6 +661,202 @@ fn numero_o(o: &Object) -> Option<f64> {
     }
 }
 
+/// Un documento che partecipa al nesting (id, file, formato, lavorazione e copie).
+#[derive(Clone, Debug)]
+pub struct DaAnnidare {
+    pub id: u64,
+    pub percorso: PathBuf,
+    pub formato: Formato,
+    pub lavorazione: Lavorazione,
+    pub copie: u32,
+}
+
+/// Un foglio annidato pronto da mandare, con i documenti che contiene.
+pub struct FoglioPronto {
+    pub file: FileTemporaneo,
+    pub documenti: Vec<u64>,
+}
+
+/// Esito della composizione dei fogli: i documenti che non sono entrati nel
+/// nesting partono da soli, come oggi.
+pub struct Annidamento {
+    pub fogli: Vec<FoglioPronto>,
+    /// Pezzi disposti sui fogli (copie comprese).
+    pub pezzi: usize,
+    /// Documenti entrati nel nesting.
+    pub documenti: usize,
+    pub esclusi: Vec<u64>,
+}
+
+/// Compone i fogli del nesting: ogni documento passa prima dalla solita
+/// pipeline (scala e cornice), poi le sue pagine e copie diventano pezzi da
+/// disporre. Un documento con anche un solo pezzo fuori dal rotolo parte da
+/// solo: le pagine di un file non si dividono fra nesting e invio singolo.
+pub fn componi_nesting(
+    documenti: &[DaAnnidare],
+    rotolo_mm: f64,
+    margine_mm: f64,
+    nesting: &Nesting,
+) -> Result<Annidamento> {
+    let larghezza = (rotolo_mm - 2.0 * margine_mm).max(1.0);
+    let mut sorgenti: Vec<Sorgente> = Vec::new();
+    let mut pezzi: Vec<Pezzo> = Vec::new();
+    let mut esclusi: Vec<u64> = Vec::new();
+    for d in documenti {
+        match sorgente_nesting(d) {
+            Ok(Some((sorgente, misure))) => {
+                for (pagina, (l, a)) in misure.iter().enumerate() {
+                    for copia in 0..d.copie.max(1) {
+                        pezzi.push(Pezzo { id: (d.id, pagina, copia), l: *l, a: *a });
+                    }
+                }
+                sorgenti.push(sorgente);
+            }
+            // Non leggibile per il nesting (file sparito, PDF cifrato da
+            // lavorare, immagine rotta): parte da solo, così l'invio riporta
+            // l'errore del singolo documento invece di fermare tutta la coda.
+            Ok(None) | Err(_) => esclusi.push(d.id),
+        }
+    }
+
+    let mut inclusi: Vec<u64> = sorgenti.iter().map(|s| s.id).collect();
+    loop {
+        let fuori: Vec<u64> = pezzi
+            .iter()
+            .filter(|p| inclusi.contains(&p.id.0) && !nesting::entra(p, larghezza, nesting.ruota, nesting::ALTEZZA_MAX_MM))
+            .map(|p| p.id.0)
+            .collect();
+        if fuori.is_empty() {
+            break;
+        }
+        inclusi.retain(|id| !fuori.contains(id));
+        esclusi.extend(fuori);
+    }
+    let attivi: Vec<Pezzo> = pezzi.iter().filter(|p| inclusi.contains(&p.id.0)).copied().collect();
+    let fogli = nesting::disponi(
+        &attivi,
+        larghezza,
+        nesting.distanza_mm,
+        nesting.ruota,
+        nesting::ALTEZZA_MAX_MM,
+    );
+    let inclusi_sorgenti: Vec<Sorgente> =
+        sorgenti.into_iter().filter(|s| inclusi.contains(&s.id)).collect();
+    let composti = nesting::componi(&fogli, &inclusi_sorgenti, larghezza)?;
+
+    let mut pronti = Vec::new();
+    for (foglio, dati) in fogli.iter().zip(composti) {
+        let file = FileTemporaneo::nuovo("pdf");
+        std::fs::write(file.percorso(), dati).context("scrittura del foglio annidato")?;
+        let mut ids: Vec<u64> = foglio.posti.iter().map(|p| p.id.0).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        pronti.push(FoglioPronto { file, documenti: ids });
+    }
+    esclusi.sort_unstable();
+    esclusi.dedup();
+    Ok(Annidamento { fogli: pronti, pezzi: attivi.len(), documenti: inclusi.len(), esclusi })
+}
+
+/// Criterio condiviso da anteprima e composizione: la ricomposizione raster
+/// gestisce una pagina sola, quindi i TIFF multipagina partono singolarmente.
+pub fn annidabile_file(percorso: &Path, formato: Formato) -> Result<bool> {
+    if !nesting::annidabile(formato) {
+        return Ok(false);
+    }
+    Ok(formato != Formato::Tiff || !tiff_multipagina(percorso)?)
+}
+
+/// Contenuto e misure finali (mm) di ogni pagina di un documento da annidare.
+type DocumentoNesting = (Sorgente, Vec<(f64, f64)>);
+
+/// Contenuto e misure finali di un documento da annidare; `None` se il nesting
+/// non lo sa prendere (PostScript/HP-GL/2, PDF cifrato o senza misure, TIFF
+/// multipagina).
+fn sorgente_nesting(d: &DaAnnidare) -> Result<Option<DocumentoNesting>> {
+    if !annidabile_file(&d.percorso, d.formato)? {
+        return Ok(None);
+    }
+    match d.formato {
+        Formato::Pdf => {
+            let originali = std::fs::read(&d.percorso)?;
+            let dati = if d.lavorazione.nulla() {
+                originali
+            } else {
+                match componi_pdf(&originali, &d.lavorazione, None)? {
+                    Some(c) => c.dati,
+                    None => originali,
+                }
+            };
+            let Ok(doc) = Document::load_mem(&dati) else { return Ok(None) };
+            if doc.is_encrypted() {
+                return Ok(None);
+            }
+            let misure: Option<Vec<(f64, f64)>> = doc
+                .get_pages()
+                .into_values()
+                .map(|id| {
+                    let (_, ruota) = file::box_e_rotazione(&doc, id)?;
+                    (ruota % 90 == 0).then(|| file::dimensioni_pagina_mm(&doc, id)).flatten()
+                })
+                .collect();
+            let Some(misure) = misure else { return Ok(None) };
+            let sorgente = Sorgente {
+                id: d.id,
+                contenuto: Contenuto::Pdf(dati),
+                misure: misure.clone(),
+            };
+            Ok(Some((sorgente, misure)))
+        }
+        Formato::Jpeg | Formato::Tiff | Formato::Png => {
+            let dpi = file::dpi_immagine(&d.percorso, d.formato);
+            let dimensioni = imagesize::size(&d.percorso).context("dimensioni dell'immagine")?;
+            let (l, a) = (
+                dimensioni.width as f64 * 25.4 / dpi.0,
+                dimensioni.height as f64 * 25.4 / dpi.1,
+            );
+            let (sx, sy) = fattori(&d.lavorazione.scala, l, a);
+            let ingombro = d.lavorazione.cornice.map_or(0.0, |c| 2.0 * c.ingombro_mm());
+            let misura = (l * sx + ingombro, a * sy + ingombro);
+            let dpi_scalati = (dpi.0 / sx, dpi.1 / sy);
+            let contenuto = match (&d.lavorazione.cornice, d.formato) {
+                // Senza altri passi il JPEG entra così com'è: nessuna ricompressione.
+                (None, Formato::Jpeg) => {
+                    let dati = std::fs::read(&d.percorso)?;
+                    nesting::dimensioni_jpeg(&dati)?;
+                    Contenuto::Jpeg(dati)
+                }
+                (cornice, _) => {
+                    let rgb = png::su_bianco(png::decodifica(&d.percorso)?);
+                    let rgb = match cornice {
+                        Some(c) => {
+                            impagina::RasterComposto::con_cornice(rgb, dpi_scalati, c).su_rotolo()
+                        }
+                        None => rgb,
+                    };
+                    Contenuto::Rgb {
+                        larghezza: rgb.width(),
+                        altezza: rgb.height(),
+                        pixel: rgb.into_raw(),
+                    }
+                }
+            };
+            let sorgente = Sorgente { id: d.id, contenuto, misure: vec![misura] };
+            Ok(Some((sorgente, vec![misura])))
+        }
+        Formato::PostScript | Formato::Hpgl2 => Ok(None),
+    }
+}
+
+/// true se il TIFF contiene più pagine.
+fn tiff_multipagina(percorso: &Path) -> Result<bool> {
+    let lettore = tiff::decoder::Decoder::new(std::io::BufReader::new(
+        std::fs::File::open(percorso).context("apertura del TIFF")?,
+    ))
+    .context("lettura delle pagine del TIFF")?;
+    Ok(lettore.more_images())
+}
+
 /// Immagini: la scala non ricampiona, cambia solo i DPI (la T2600 li rispetta).
 /// JPEG e TIFF partono nel loro formato, con i soli campi della risoluzione
 /// riscritti (vedi `risoluzione.rs`); restano decodifica e TIFF RGB per PNG e
@@ -710,14 +902,8 @@ fn prepara_immagine(
     // La ricomposizione raster gestisce una sola pagina: rifiuta i TIFF
     // multipagina prima di decodificare o produrre un file incompleto.
     // Il percorso dei soli DPI qui sopra conserva invece tutte le pagine.
-    if formato == Formato::Tiff {
-        let lettore = tiff::decoder::Decoder::new(std::io::BufReader::new(
-            std::fs::File::open(percorso).context("apertura del TIFF")?,
-        ))
-        .context("lettura delle pagine del TIFF")?;
-        if lettore.more_images() {
-            bail!("TIFF multipagina: cornice e ricomposizione raster non supportate; nessuna pagina elaborata");
-        }
+    if formato == Formato::Tiff && tiff_multipagina(percorso)? {
+        bail!("TIFF multipagina: cornice e ricomposizione raster non supportate; nessuna pagina elaborata");
     }
 
     let immagine = png::su_bianco(png::decodifica(percorso)?);
@@ -945,6 +1131,90 @@ mod test {
         let doc = Document::load_mem(dati).unwrap();
         let id = *doc.get_pages().values().next().unwrap();
         (doc, id)
+    }
+
+    /// Un documento che il nesting non riesce a leggere non ferma la coda:
+    /// finisce fra gli esclusi e parte da solo, dove l'errore lo riporta il
+    /// suo invio.
+    #[test]
+    fn un_documento_illeggibile_non_ferma_il_nesting() {
+        let dati = impagina::test::pdf(210.0 * MM_PT, 297.0 * MM_PT, (0.0, 0.0), 0);
+        let buono = FileTemporaneo::nuovo("pdf");
+        std::fs::write(buono.percorso(), dati).unwrap();
+        let documenti = vec![
+            DaAnnidare {
+                id: 1,
+                percorso: buono.percorso().to_path_buf(),
+                formato: Formato::Pdf,
+                lavorazione: Lavorazione::default(),
+                copie: 1,
+            },
+            DaAnnidare {
+                id: 2,
+                percorso: PathBuf::from("/non/esiste/rotto.pdf"),
+                formato: Formato::Pdf,
+                lavorazione: Lavorazione::default(),
+                copie: 1,
+            },
+        ];
+        let esito = componi_nesting(&documenti, 914.0, 5.0, &Nesting::default()).unwrap();
+        assert_eq!(esito.esclusi, vec![2]);
+        assert_eq!(esito.documenti, 1);
+        assert_eq!(esito.fogli.len(), 1);
+        assert_eq!(esito.pezzi, 1);
+    }
+
+    /// Le sorgenti non supportate escludono l'intero documento, senza
+    /// impedire la composizione degli altri documenti della coda.
+    #[test]
+    fn nesting_isola_rotazioni_jpeg_e_pagine_troppo_alte() {
+        let buono = FileTemporaneo::nuovo("pdf");
+        let ruotato = FileTemporaneo::nuovo("pdf");
+        let alto = FileTemporaneo::nuovo("pdf");
+        let jpeg = FileTemporaneo::nuovo("jpg");
+        std::fs::write(buono.percorso(), impagina::test::pdf(pt(210.0), pt(297.0), (0.0, 0.0), 90)).unwrap();
+        std::fs::write(ruotato.percorso(), impagina::test::pdf(pt(210.0), pt(297.0), (0.0, 0.0), 45)).unwrap();
+        std::fs::write(alto.percorso(), impagina::test::pdf(pt(100.0), pt(6000.0), (0.0, 0.0), 0)).unwrap();
+        // imagesize accetta la larghezza zero; il parser del nesting la rifiuta.
+        let mut dati_jpeg = vec![0xff, 0xd8, 0xff, 0xc0, 0, 8, 8, 0, 30, 0, 0, 3];
+        dati_jpeg.resize(32, 0);
+        std::fs::write(jpeg.percorso(), dati_jpeg).unwrap();
+        assert_eq!(imagesize::size(jpeg.percorso()).unwrap().width, 0);
+        let documenti: Vec<_> = [&buono, &ruotato, &alto, &jpeg].iter().enumerate().map(|(i, f)| DaAnnidare {
+            id: i as u64,
+            percorso: f.percorso().to_path_buf(),
+            formato: if i == 3 { Formato::Jpeg } else { Formato::Pdf },
+            lavorazione: Lavorazione::default(),
+            copie: 2,
+        }).collect();
+        let esito = componi_nesting(&documenti, 914.0, 5.0, &Nesting::default()).unwrap();
+        assert_eq!(esito.esclusi, vec![1, 2, 3]);
+        assert_eq!(esito.documenti, 1);
+        assert_eq!(esito.pezzi, 2);
+        assert_eq!(esito.fogli.len(), 1);
+    }
+
+    #[test]
+    fn scala_rispetta_userunit_con_formato_misura_e_percentuale() {
+        for unita in [0.5_f32, 2.0, 10.0] {
+            for ruota in [0, 90, 180, 270] {
+                for scala in [
+                    Scala::Formato(FormatoIso::A4),
+                    Scala::Misura { larghezza_mm: 300.0, altezza_mm: 400.0, proporzioni: false },
+                    Scala::Percentuale { x: 150.0, y: 200.0 },
+                ] {
+                    let (mut doc, id) = pagina(&impagina::test::pdf(pt(210.0), pt(297.0), (0.0, 0.0), ruota));
+                    let riferimento = doc.add_object(Object::Real(unita));
+                    doc.get_dictionary_mut(id).unwrap().set("UserUnit", riferimento);
+                    let (l, a) = file::dimensioni_pagina_mm(&doc, id).unwrap();
+                    let (sx, sy) = fattori(&scala, l, a);
+                    assert!(applica_scala_pagina(&mut doc, id, &scala).unwrap());
+                    let (uscita_l, uscita_a) = file::dimensioni_pagina_mm(&doc, id).unwrap();
+                    assert!((uscita_l - l * sx).abs() < 0.001, "{unita} {ruota} {scala:?}");
+                    assert!((uscita_a - a * sy).abs() < 0.001, "{unita} {ruota} {scala:?}");
+                }
+            }
+        }
     }
 
     /// Il Form XObject in cui la scala avvolge il contenuto della pagina.
@@ -1277,6 +1547,26 @@ mod test {
             img.write_data(&vec![20 + pagina as u8; 100 * 50 * 3]).unwrap();
         }
         p
+    }
+
+    #[test]
+    fn nesting_esclude_solo_i_tiff_multipagina() {
+        for pagine in [1, 2] {
+            let dir = cartella(&format!("nesting-tiff-{pagine}"));
+            let percorso = tiff_100dpi(&dir, pagine);
+            assert_eq!(annidabile_file(&percorso, Formato::Tiff).unwrap(), pagine == 1);
+            let documento = DaAnnidare {
+                id: 1,
+                percorso,
+                formato: Formato::Tiff,
+                lavorazione: Lavorazione::default(),
+                copie: 1,
+            };
+            let esito = componi_nesting(&[documento], 904.0, 0.0, &Nesting::default()).unwrap();
+            assert_eq!(esito.documenti, usize::from(pagine == 1));
+            assert_eq!(esito.esclusi, if pagine == 1 { vec![] } else { vec![1] });
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]

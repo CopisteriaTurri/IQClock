@@ -26,6 +26,10 @@ pub struct InfoFile {
     /// Pagine del PDF raggruppate per formato, nell'ordine in cui compaiono.
     /// Vuoto per gli altri formati.
     pub formati_pagine: Formati,
+    /// Misure di tutte le pagine in mm (`None` dove il PDF non le dichiara),
+    /// servono al nesting per disporre l'intera coda. Per un'immagine c'è la
+    /// sola pagina che la contiene.
+    pub pagine_mm: Vec<Option<(f64, f64)>>,
 }
 
 /// Pagine per formato: ("A4", 9), ("320 × 450 mm", 1)…
@@ -163,10 +167,11 @@ pub fn analizza(percorso: &Path) -> Result<InfoFile> {
         risoluzione: None,
         dettagli: String::new(),
         formati_pagine: Vec::new(),
+        pagine_mm: Vec::new(),
     };
     match formato {
         Formato::Pdf => match leggi_pdf(percorso) {
-            Ok(Pdf { pagine, mm, formati }) => {
+            Ok(Pdf { pagine, mm, formati, misure }) => {
                 info.pagine = pagine;
                 info.mm = mm;
                 info.dettagli =
@@ -177,6 +182,7 @@ pub fn analizza(percorso: &Path) -> Result<InfoFile> {
                     info.dettagli.push_str(&format!(" · {l:.0} × {a:.0} mm{}", formato_iso(l, a)));
                 }
                 info.formati_pagine = formati;
+                info.pagine_mm = misure;
             }
             Err(e) => info.dettagli = format!("PDF illeggibile: {e}"),
         },
@@ -197,6 +203,7 @@ pub fn analizza(percorso: &Path) -> Result<InfoFile> {
                     formato_iso(l, a)
                 );
                 info.risoluzione = Some(risoluzione);
+                info.pagine_mm = vec![Some((l, a))];
             }
         }
         Formato::PostScript | Formato::Hpgl2 => {}
@@ -432,6 +439,7 @@ struct Pdf {
     /// Dimensioni della prima pagina.
     mm: Option<(f64, f64)>,
     formati: Formati,
+    misure: Vec<Option<(f64, f64)>>,
 }
 
 fn leggi_pdf(percorso: &Path) -> Result<Pdf> {
@@ -443,14 +451,14 @@ fn leggi_pdf(percorso: &Path) -> Result<Pdf> {
     let misure: Vec<_> = pagine.values().map(|&id| dimensioni_pagina_mm(&doc, id)).collect();
     let mm = misure.first().copied().flatten();
     let mut formati = Vec::new();
-    for m in misure {
+    for m in misure.iter().copied() {
         let nome = match m {
             Some((l, a)) => nome_formato(l, a),
             None => "misure ignote".to_string(),
         };
         aggiungi_formato(&mut formati, nome, 1);
     }
-    Ok(Pdf { pagine: pagine.len(), mm, formati })
+    Ok(Pdf { pagine: pagine.len(), mm, formati, misure })
 }
 
 /// Nome del formato di una pagina: "A4" se ISO, altrimenti le misure al mm,
@@ -536,10 +544,10 @@ pub(crate) fn box_e_rotazione(doc: &lopdf::Document, pagina: lopdf::ObjectId) ->
     Some((visibile, ruota.rem_euclid(360)))
 }
 
-/// Lati della pagina in mm come appare (con /Rotate applicato).
-fn dimensioni_pagina_mm(doc: &lopdf::Document, pagina: lopdf::ObjectId) -> Option<(f64, f64)> {
+/// Lati della pagina in mm come appare (con `/Rotate` e `/UserUnit` applicati).
+pub(crate) fn dimensioni_pagina_mm(doc: &lopdf::Document, pagina: lopdf::ObjectId) -> Option<(f64, f64)> {
     let ([x0, y0, x1, y1], ruota) = box_e_rotazione(doc, pagina)?;
-    let pt_mm = 25.4 / 72.0;
+    let pt_mm = 25.4 / 72.0 * unita_utente(doc, pagina);
     let (l, a) = ((x1 - x0) * pt_mm, (y1 - y0) * pt_mm);
     Some(if ruota % 180 == 90 { (a, l) } else { (l, a) })
 }
