@@ -29,6 +29,7 @@ dei rispettivi proprietari e qui compaiono solo per indicare la compatibilità. 
   iqclock stampa tavola.pdf --scala 500x700!     # 500 × 700 mm, deformando
   iqclock stampa logo.png --cornice              # con la cornice di taglio attorno
   iqclock stampa a.pdf b.pdf --nesting           # più pezzi sullo stesso foglio
+  iqclock stampa a4.pdf --rotolo foglio          # su foglio singolo (ingresso manuale)
   iqclock stato                                  # stato, inchiostri, carta
   iqclock snmp 1.3.6.1.2.1.43                    # diagnostica SNMP
   ```
@@ -112,6 +113,47 @@ Da riga di comando: `iqclock stampa a.pdf b.pdf --nesting`, con `--distanza MM` 
 `--senza-rotazione`; la larghezza del rotolo si legge dalla stampante o si dà con
 `--larghezza-rotolo`. Con `--prn` viene scritto solo il primo foglio.
 
+## Foglio singolo
+
+Con **Foglio singolo** (sezione CARTA) il job non va sul rotolo: la stampante prende un
+foglio dall'ingresso manuale. IQClock mantiene la scala scelta, quindi allineamento, nesting e
+conferma della larghezza del rotolo non si applicano. Il formato del foglio si sceglie in
+CARTA (A4–A0, verticale o orizzontale, oppure una misura a mano) o resta **Dalla
+stampante**: sulla T2600 l'ingresso manuale dichiara le misure del foglio caricato (un A4
+verticale in carta patinata pesante: 210 × 297 mm, letto il 06/11/2026). L'anteprima
+disegna i fogli al posto del rotolo. **Il foglio deve essere più grande della pagina**: la
+stampante si prende 22 mm sul lato d'entrata (il margine che HP dichiara per i fogli,
+3 × 22 × 3 × 3 mm) e 5 mm per lato, così per un A4 chiede un foglio di 220 × 319 mm — il
+06/11/2026, con un A4 caricato, ha chiesto quello invece di stampare. L'anteprima dice
+allora la misura minima da caricare; oltre a quella la pagina esce ridotta o tagliata.
+Una pagina per foglio, un PDF di tre pagine consuma tre fogli.
+
+L'opzione **Adatta all'area stampabile**, disattivata di default, riduce in proporzione
+le pagine troppo grandi dopo la scala scelta, senza ingrandire quelle piccole. Su un
+foglio A4 l'area utile è 200 × 275 mm: una pagina A4 viene ridotta al 92,6% circa.
+L'anteprima mostra la percentuale di adattamento di ciascuna pagina rispetto alla scala
+scelta; il calcolo riserva anche lo spazio dell'eventuale cornice. Disattivando l'opzione
+si torna alla scala scelta e all'avviso sulla misura minima del foglio. Vale per PDF,
+JPEG, PNG e TIFF a pagina singola; sui TIFF multipagina l'invio viene rifiutato con un
+messaggio esplicito. PostScript e HP-GL/2 restano invariati.
+
+Dopo l'invio, per due minuti lo stato si rilegge ogni 5 s e in STAMPANTE compare la riga
+dell'ingresso manuale («In attesa del foglio…», o «Foglio caricato»). Se il foglio è
+caricato ma è più piccolo di quello che serve alla pagina, la riga dice la misura minima
+da mettere: sulla T2600 è successo con un A4 per una pagina A4. Mentre aspetta il foglio
+la stampante resta «pronta con avvisi» via SNMP e l'ingresso manuale risulta «vuoto / da
+caricare» (letto il 06/11/2026), come a stampante ferma: la riga dice che l'ingresso non
+è pronto, non che un job è in coda. Un job vero, mandato il 06/11/2026, si è visto passare
+da «pronta» a «sta stampando» e tornare «pronta» con la rilettura ogni 5 s.
+
+Da riga di comando `--rotolo foglio`. Il valore PJL `MEDIASOURCE` del foglio
+(`MANUALFEED`) **non è documentato da HP**: il 06/11/2026 il job con quel valore è andato
+all'ingresso manuale. Una pagina A4 ha chiesto un foglio di 220 × 319 mm; una successiva
+prova da 200 × 275 mm su foglio A4 ha completato il ciclo SNMP «pronta → sta stampando →
+pronta», consumando il foglio manuale. La verifica visiva del contenuto stampato resta
+da confermare. Se un altro modello richiedesse un altro valore si cambia solo
+`MEDIASOURCE_FOGLIO` in `pjl.rs`. Anche la rotazione di una pagina sul foglio non è verificata.
+
 ## Ridimensionamento
 
 Ogni documento può partire **originale** (default), adattato a un **formato** ISO A0–A4,
@@ -188,7 +230,7 @@ nel file di configurazione; con la finestra impostazioni (#18) si sposterà lì.
 ```
 <ESC>%-12345X@PJL JOB NAME="tavola.pdf"
 @PJL SET COPIES=2
-@PJL SET MEDIASOURCE=ROLL1        (solo se scelto)
+@PJL SET MEDIASOURCE=ROLL1        (solo se scelto; per il foglio MANUALFEED)
 @PJL SET RENDERMODE=COLOR|GRAYSCALE
 @PJL SET CUTTER=ON|OFF            (solo se scelto)
 @PJL ENTER LANGUAGE=PDF           (POSTSCRIPT, HPGL2; omesso per TIFF/JPEG/PNG)
@@ -201,6 +243,7 @@ nel file di configurazione; con la finestra impostazioni (#18) si sposterà lì.
 |---|---|---|
 | UEL, JOB/EOJ, ENTER LANGUAGE, COPIES, RENDERMODE | HP PJL Technical Reference Manual (2003) | no |
 | MEDIASOURCE=ROLL1/ROLL2/AUTO | tabella PJL dei DesignJet XL 3600 | no |
+| MEDIASOURCE per il foglio singolo (`MANUALFEED`) | scelto per tentativi, non documentato da HP | che il job va all'ingresso manuale (06/11/2026) |
 | CUTTER=ON/OFF | driver CUPS per DesignJet, non documentato da HP | no |
 | `@PJL INFO STATUS` | manuale PJL | **non supportato**: risponde `"?"` |
 
@@ -244,9 +287,14 @@ La tabella carta standard espone solo nomi e stati: le dimensioni stanno nella
 MIB privata HP (passerella PML), verificata il 28/10/2026 contro l'EWS
 (`DevMgmt/MediaHandlingDyn.xml`: Roll1 914.400000 mm, restano 69552.065476 mm).
 La larghezza mostrata in GUI (`Rotolo rilevato`) e da `iqclock stato` è quella
-della riga HP dell'ingresso pronto; se manca (walk vuoti o valori ≤ 0) si usa il
-fallback manuale e l'anteprima va su quello. Le stringhe PML hanno due byte
-binari di testa che vengono scartati in lettura.
+della riga HP di un ingresso chiamato `ROLL` ed è pronta; se manca (walk vuoti o
+valori ≤ 0) si usa il fallback manuale e l'anteprima va su quello. Il foglio
+caricato nell'ingresso manuale non conta come rotolo: la sua riga riporta le
+misure del foglio, non quelle del rotolo. Le stringhe PML hanno due byte
+binari di testa che vengono scartati in lettura. Con un foglio nell'ingresso
+manuale le stesse colonne 10 e 11 riportano le sue misure: un A4 caricato dà
+5952 × 8418 decipoint = 210 × 297 mm (letto il 06/11/2026), e la GUI le usa per
+il formato del foglio singolo.
 
 ## Limiti del prototipo
 

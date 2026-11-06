@@ -7,6 +7,7 @@ mod config;
 #[cfg(target_os = "linux")]
 mod desktop;
 mod file;
+mod foglio;
 mod gui;
 mod impagina;
 mod lavorazione;
@@ -31,7 +32,7 @@ use pjl::{Formato, OpzioniJob, Sorgente};
 
 const USO: &str = "\
 Senza argomenti (o con dei file) apre l'interfaccia. Da riga di comando:
-  iqclock stampa FILE... [--host IP] [--copie N] [--rotolo 1|2|auto] [--grigi] [--prn OUT]
+  iqclock stampa FILE... [--host IP] [--copie N] [--rotolo 1|2|auto|foglio] [--grigi] [--prn OUT]
                  [--allinea sinistra|centro|destra] [--larghezza-rotolo MM] [--margine MM]
                  [--scala A3|50%|500x700|500x700!] [--cornice]
                  [--nesting] [--distanza MM] [--senza-rotazione]
@@ -42,6 +43,8 @@ Senza argomenti (o con dei file) apre l'interfaccia. Da riga di comando:
       --nesting mette più file sullo stesso foglio (PDF e immagini): un job per foglio,
       distanza tra i pezzi in mm e ruota i pezzi per stare nel rotolo (--senza-rotazione
       li lascia come sono). Con --prn scrive solo il primo foglio.
+      --rotolo foglio stampa su foglio singolo dall'ingresso manuale: il file parte
+      della sua misura, senza allineamento né nesting.
   iqclock stato [--host IP]
   iqclock snmp OID [--host IP]      (diagnostica: elenca le voci sotto OID)";
 
@@ -136,7 +139,8 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
         Some("1") => Sorgente::Rotolo1,
         Some("2") => Sorgente::Rotolo2,
         Some("auto") => Sorgente::Auto,
-        Some(a) => bail!("--rotolo vuole 1, 2 o auto (non {a})"),
+        Some("foglio") => Sorgente::Foglio,
+        Some(a) => bail!("--rotolo vuole 1, 2, auto o foglio (non {a})"),
     };
     let scala_di_grigi = prendi_flag(&mut args, "--grigi");
     let prn = prendi(&mut args, "--prn")?.map(PathBuf::from);
@@ -158,7 +162,7 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
         distanza_mm: config.cornice_distanza_mm,
         spessore_mm: config.cornice_spessore_mm,
     });
-    let lavorazione = Lavorazione { scala, cornice };
+    let lavorazione = Lavorazione { scala, cornice, ..Default::default() };
     let nesting = prendi_flag(&mut args, "--nesting");
     let distanza_mm = prendi(&mut args, "--distanza")?
         .map(|m| m.parse::<f64>())
@@ -169,6 +173,18 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
         bail!("--distanza vuole un numero di mm maggiore o uguale a 0");
     }
     let ruota = !prendi_flag(&mut args, "--senza-rotazione");
+    // Sul foglio singolo non c'è un rotolo da riempire: nesting e allineamento
+    // non si applicano e la larghezza del rotolo non serve.
+    let foglio = sorgente == Sorgente::Foglio;
+    if foglio {
+        if nesting {
+            eprintln!("attenzione: con --rotolo foglio il nesting non si applica");
+        }
+        if allineamento != Allineamento::Sinistra {
+            eprintln!("attenzione: con --rotolo foglio l'allineamento non si applica");
+        }
+    }
+    let nesting = nesting && !foglio;
     if args.is_empty() {
         bail!("nessun file da stampare\n{USO}");
     }
@@ -179,7 +195,7 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
     // la pagina: o la dice la stampante, o la si indica esplicitamente.
     let rotolo_mm = match larghezza_rotolo {
         Some(mm) => Some(mm),
-        None if nesting || allineamento != Allineamento::Sinistra => Some(
+        None if !foglio && (nesting || allineamento != Allineamento::Sinistra) => Some(
             stato::leggi(&config.host)
                 .context("lettura del rotolo dalla stampante")?
                 .larghezza_rotolo_mm()
@@ -190,6 +206,8 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
     };
     // Con il nesting l'allineamento non si applica: il foglio è composto dai pezzi.
     let impaginazione = match (nesting, allineamento) {
+        // Il foglio è già tagliato: una pagina, nessun rotolo da allineare.
+        _ if foglio => None,
         (true, Allineamento::Sinistra) => None,
         (true, _) => {
             eprintln!("attenzione: con --nesting l'allineamento non si applica");
@@ -402,7 +420,9 @@ fn riga_di_comando_stato(args: &[String]) -> Result<()> {
     }
     match s.larghezza_rotolo_mm() {
         Some((nome, mm)) => println!("Rotolo:   {mm:.0} mm (rilevato da {nome})"),
-        None => println!("Rotolo:   non rilevato (MIB senza dimensioni o SNMP non raggiungibile)"),
+        None => println!(
+            "Rotolo:   non rilevato (l'ingresso del rotolo non dichiara la larghezza, o SNMP non raggiungibile)"
+        ),
     }
     Ok(())
 }

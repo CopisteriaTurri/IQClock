@@ -5,6 +5,8 @@
 //!   ENTER LANGUAGE, COPIES, RENDERMODE. Righe terminate da CR LF.
 //!   (`INFO STATUS` sulla T2600 risponde solo `"?"`: lo stato si legge via SNMP.)
 //! - MEDIASOURCE=ROLL1..ROLL6/AUTO: tabella PJL dei DesignJet recenti (XL 3600).
+//! - Foglio singolo: `MEDIASOURCE_FOGLIO`, valore **non documentato**, provato
+//!   sulla T2600 (vedi lì).
 //! - CUTTER=ON/OFF: visto in driver CUPS per DesignJet, **non documentato** nel
 //!   manuale: per questo è disattivato di default.
 
@@ -15,6 +17,16 @@ use crate::lavorazione::Lavorazione;
 
 /// Universal Exit Language: deve aprire e chiudere ogni job PJL.
 pub const UEL: &[u8] = b"\x1b%-12345X";
+
+/// Valore di MEDIASOURCE per stampare su foglio singolo (ingresso manuale
+/// `MANUAL_FEED` della T2600). Non è documentato da HP, ma sulla T2600 il job
+/// con questo valore va all'ingresso manuale (06/11/2026): la stampante ha
+/// chiesto il foglio — 220 × 319 mm per un A4 — e non il rotolo. Una prova da
+/// 200 × 275 mm su A4 ha poi completato il ciclo SNMP pronta/stampa/pronta,
+/// consumando il foglio; il contenuto stampato resta da confermare a vista. Se
+/// un altro modello ne volesse un altro (SHEET, TRAY1, …) si cambia solo
+/// questa riga.
+pub const MEDIASOURCE_FOGLIO: &str = "MANUALFEED";
 
 /// Formato del file, ricavato dai primi byte.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,14 +72,17 @@ pub enum Sorgente {
     Auto,
     Rotolo1,
     Rotolo2,
+    /// Foglio singolo dall'ingresso manuale (vedi `MEDIASOURCE_FOGLIO`).
+    Foglio,
 }
 
 impl Sorgente {
-    pub const TUTTE: [Sorgente; 4] = [
+    pub const TUTTE: [Sorgente; 5] = [
         Sorgente::Stampante,
         Sorgente::Auto,
         Sorgente::Rotolo1,
         Sorgente::Rotolo2,
+        Sorgente::Foglio,
     ];
 
     fn valore_pjl(self) -> Option<&'static str> {
@@ -76,6 +91,7 @@ impl Sorgente {
             Sorgente::Auto => Some("AUTO"),
             Sorgente::Rotolo1 => Some("ROLL1"),
             Sorgente::Rotolo2 => Some("ROLL2"),
+            Sorgente::Foglio => Some(MEDIASOURCE_FOGLIO),
         }
     }
 
@@ -85,6 +101,7 @@ impl Sorgente {
             Sorgente::Auto => "Automatico",
             Sorgente::Rotolo1 => "Rotolo 1",
             Sorgente::Rotolo2 => "Rotolo 2",
+            Sorgente::Foglio => "Foglio singolo",
         }
     }
 }
@@ -188,6 +205,9 @@ mod test {
             Sorgente::Auto => s += "@PJL SET MEDIASOURCE=AUTO\r\n",
             Sorgente::Rotolo1 => s += "@PJL SET MEDIASOURCE=ROLL1\r\n",
             Sorgente::Rotolo2 => s += "@PJL SET MEDIASOURCE=ROLL2\r\n",
+            Sorgente::Foglio => {
+                s += &format!("@PJL SET MEDIASOURCE={MEDIASOURCE_FOGLIO}\r\n")
+            }
         }
         s += if opz.scala_di_grigi {
             "@PJL SET RENDERMODE=GRAYSCALE\r\n"
@@ -323,6 +343,25 @@ mod test {
                 }
             }
         }
+    }
+
+    /// Il foglio singolo manda il proprio MEDIASOURCE, e l'etichetta che vede
+    /// l'utente è quella della GUI.
+    #[test]
+    fn foglio_singolo_ha_il_suo_mediasource() {
+        let opz = OpzioniJob {
+            nome: "a4.pdf".into(),
+            sorgente: Sorgente::Foglio,
+            ..Default::default()
+        };
+        let h = testo(intestazione(&opz, Formato::Pdf));
+        assert!(
+            h.contains(&format!("@PJL SET MEDIASOURCE={MEDIASOURCE_FOGLIO}\r\n")),
+            "{h:?}"
+        );
+        assert!(h.contains("@PJL ENTER LANGUAGE=PDF\r\n"), "{h:?}");
+        assert_eq!(Sorgente::Foglio.etichetta(), "Foglio singolo");
+        assert_eq!(Sorgente::TUTTE.len(), 5);
     }
 
     #[test]

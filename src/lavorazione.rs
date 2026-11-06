@@ -201,6 +201,9 @@ impl Cornice {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Lavorazione {
     pub scala: Scala,
+    /// Area utile del foglio (lato corto, lungo). Riduce dopo la scala scelta,
+    /// riservando lo spazio della cornice; None mantiene la scala dell'utente.
+    pub area_foglio_mm: Option<(f64, f64)>,
     /// Cornice di taglio attorno al contenuto (la accende il toggle di FINITURA
     /// nella GUI): viaggia per documento, così impaginazione e nesting la
     /// trattano come parte del pezzo.
@@ -208,10 +211,29 @@ pub struct Lavorazione {
 }
 
 impl Lavorazione {
-    /// Indica se scala e cornice permettono di inviare il documento originale
+    /// Indica se scala, adattamento e cornice permettono di inviare il documento originale
     /// senza applicare una lavorazione.
     pub fn nulla(&self) -> bool {
-        self.scala.originale() && self.cornice.is_none()
+        self.scala.originale() && self.cornice.is_none() && self.area_foglio_mm.is_none()
+    }
+
+    /// Riduzione proporzionale aggiuntiva, senza ingrandire le pagine piccole.
+    pub fn riduzione_foglio(&self, larghezza: f64, altezza: f64) -> f64 {
+        let Some((corto, lungo)) = self.area_foglio_mm else { return 1.0 };
+        let (sx, sy) = fattori(&self.scala, larghezza, altezza);
+        let (l, a) = (larghezza * sx, altezza * sy);
+        let bordo = self.cornice.map_or(0.0, |c| 2.0 * c.ingombro_mm());
+        if !(l > 0.0 && a > 0.0 && corto > bordo && lungo > bordo) {
+            return 1.0;
+        }
+        ((corto - bordo) / l.min(a)).min((lungo - bordo) / l.max(a)).min(1.0)
+    }
+
+    /// Fattori finali condivisi da stampa, anteprima e controllo delle misure.
+    pub fn fattori(&self, larghezza: f64, altezza: f64) -> (f64, f64) {
+        let (sx, sy) = fattori(&self.scala, larghezza, altezza);
+        let r = self.riduzione_foglio(larghezza, altezza);
+        (sx * r, sy * r)
     }
 }
 
@@ -352,7 +374,7 @@ pub fn componi_pdf(
         }
         let cambierebbero = pagine
             .iter()
-            .filter(|&&id| scala_pagina(&doc, id, &lav.scala).is_some())
+            .filter(|&&id| scala_pagina(&doc, id, lav).is_some())
             .count();
         if cambierebbero > 0 {
             bail!(
@@ -369,7 +391,7 @@ pub fn componi_pdf(
     let fattori_scala = doc
         .get_pages()
         .into_values()
-        .map(|id| scala_pagina(&doc, id, &lav.scala).map_or((1.0, 1.0), |p| p.fattori))
+        .map(|id| scala_pagina(&doc, id, lav).map_or((1.0, 1.0), |p| p.fattori))
         .collect();
     let mut cambiato = applica_scala(&mut doc, lav)?;
     if let Some(cornice) = &lav.cornice {
@@ -399,12 +421,12 @@ pub fn componi_pdf(
 /// Applica la scala richiesta alle pagine modificabili del PDF; restituisce
 /// true se almeno una pagina cambia.
 fn applica_scala(doc: &mut Document, lav: &Lavorazione) -> Result<bool> {
-    if lav.scala.originale() {
+    if lav.scala.originale() && lav.area_foglio_mm.is_none() {
         return Ok(false);
     }
     let mut cambiato = false;
     for id in doc.get_pages().into_values().collect::<Vec<_>>() {
-        cambiato |= applica_scala_pagina(doc, id, &lav.scala)?;
+        cambiato |= applica_scala_pagina(doc, id, lav)?;
     }
     Ok(cambiato)
 }
@@ -471,13 +493,13 @@ const TOLLERANZA_SCALA: f64 = 1e-4;
 /// senza box, `/Rotate` non multiplo di 90, oppure scala ≈ 100 %). È la sola
 /// regola "questa pagina cambia?", usata sia per scalare sia per decidere se un
 /// PDF cifrato si può lasciare com'è.
-fn scala_pagina(doc: &Document, id: ObjectId, scala: &Scala) -> Option<ScalaPagina> {
+fn scala_pagina(doc: &Document, id: ObjectId, lav: &Lavorazione) -> Option<ScalaPagina> {
     let ([x0, y0, x1, y1], ruota) = file::box_e_rotazione(doc, id)?;
     if ruota % 90 != 0 {
         return None;
     }
     let (larghezza, altezza) = file::dimensioni_pagina_mm(doc, id)?;
-    let (sx_vis, sy_vis) = fattori(scala, larghezza, altezza);
+    let (sx_vis, sy_vis) = lav.fattori(larghezza, altezza);
     if (sx_vis - 1.0).abs() < TOLLERANZA_SCALA && (sy_vis - 1.0).abs() < TOLLERANZA_SCALA {
         return None;
     }
@@ -494,11 +516,11 @@ fn scala_pagina(doc: &Document, id: ObjectId, scala: &Scala) -> Option<ScalaPagi
 
 /// Scala una pagina in vettoriale. Le pagine senza box o con `/Rotate` non
 /// multiplo di 90 restano come sono.
-fn applica_scala_pagina(doc: &mut Document, id: ObjectId, scala: &Scala) -> Result<bool> {
+fn applica_scala_pagina(doc: &mut Document, id: ObjectId, lav: &Lavorazione) -> Result<bool> {
     let Some(ScalaPagina {
         riquadro: [x0, y0, x1, y1],
         fattori: (sx, sy),
-    }) = scala_pagina(doc, id, scala)
+    }) = scala_pagina(doc, id, lav)
     else {
         return Ok(false);
     };
@@ -867,13 +889,18 @@ fn prepara_immagine(
     lav: &Lavorazione,
     imp: Option<&Impaginazione>,
 ) -> Result<Option<(FileTemporaneo, Formato)>> {
+    // Il percorso DPI dei TIFF applica la stessa risoluzione a tutti gli IFD:
+    // adattare dalla sola prima pagina potrebbe lasciare le altre fuori foglio.
+    if lav.area_foglio_mm.is_some() && formato == Formato::Tiff && tiff_multipagina(percorso)? {
+        bail!("TIFF multipagina: adattamento al foglio non supportato; separa le pagine o disattiva l'adattamento");
+    }
     let dpi = file::dpi_immagine(percorso, formato);
     let dimensioni = imagesize::size(percorso).context("dimensioni dell'immagine")?;
     let (larghezza, altezza) = (
         dimensioni.width as f64 * 25.4 / dpi.0,
         dimensioni.height as f64 * 25.4 / dpi.1,
     );
-    let (sx, sy) = fattori(&lav.scala, larghezza, altezza);
+    let (sx, sy) = lav.fattori(larghezza, altezza);
     let scala = (sx - 1.0).abs() > 1e-9 || (sy - 1.0).abs() > 1e-9;
     let dpi_scalati = (dpi.0 / sx, dpi.1 / sy);
     let cornice = lav.cornice.as_ref();
@@ -1133,6 +1160,59 @@ mod test {
         (doc, id)
     }
 
+    /// Ogni pagina si adatta per conto proprio: orientamento conservato,
+    /// contenuto vettoriale scalato, pagine già piccole lasciate alla loro misura.
+    #[test]
+    fn adatta_foglio_pdf_misto_senza_ingrandire() {
+        let (mut doc, prima) = pagina(&pdf_a4_con_annotazione());
+        let parent = doc.get_dictionary(prima).unwrap().get(b"Parent").unwrap().as_reference().unwrap();
+        let mut orizzontale = doc.get_dictionary(prima).unwrap().clone();
+        orizzontale.set("Rotate", 90);
+        orizzontale.remove(b"Annots");
+        let seconda = doc.add_object(orizzontale);
+        let mut piccola = doc.get_dictionary(prima).unwrap().clone();
+        piccola.set("MediaBox", vec![Object::Real(0.0), 0.0.into(), (100.0 * MM_PT).into(), (120.0 * MM_PT).into()]);
+        piccola.remove(b"Annots");
+        let terza = doc.add_object(piccola);
+        let parent = doc.get_dictionary_mut(parent).unwrap();
+        parent.set("Kids", vec![Object::Reference(prima), seconda.into(), terza.into()]);
+        parent.set("Count", 3);
+        let mut dati = Vec::new();
+        doc.save_to(&mut dati).unwrap();
+        let lav = Lavorazione { area_foglio_mm: Some(crate::foglio::Foglio::default().area_utile()), ..Default::default() };
+        let composto = componi_pdf(&dati, &lav, None).unwrap().unwrap();
+        let doc = Document::load_mem(&composto.dati).unwrap();
+        let misure: Vec<_> = doc.get_pages().into_values().map(|id| file::dimensioni_pagina_mm(&doc, id).unwrap()).collect();
+        assert!((misure[0].1 - 275.0).abs() < 0.01);
+        assert!((misure[1].0 - 275.0).abs() < 0.01);
+        assert!((misure[0].0 / misure[0].1 - 210.0 / 297.0).abs() < 0.001);
+        assert!((misure[2].0 - 100.0).abs() < 0.01 && (misure[2].1 - 120.0).abs() < 0.01);
+        assert!(misure.iter().all(|&m| crate::foglio::Foglio::default().entra(m)));
+        for id in [prima, seconda] {
+            let m = matrice_di_scala(&doc, id);
+            assert!((m[0] - 275.0 / 297.0).abs() < 0.001 && (m[3] - m[0]).abs() < 0.001);
+        }
+        assert_eq!(composto.fattori_scala[2], (1.0, 1.0));
+        // Disattivando l'adattamento si mantiene il file e la scala originali.
+        assert!(componi_pdf(&dati, &Lavorazione::default(), None).unwrap().is_none());
+    }
+
+    #[test]
+    fn adatta_foglio_riserva_la_cornice_dopo_la_scala_scelta() {
+        let lav = Lavorazione {
+            scala: Scala::Percentuale { x: 200.0, y: 200.0 },
+            cornice: Some(Cornice::default()),
+            area_foglio_mm: Some((200.0, 275.0)),
+        };
+        let composto = componi_pdf(&pdf_a4_con_annotazione(), &lav, None).unwrap().unwrap();
+        let (doc, id) = pagina(&composto.dati);
+        let (l, a) = file::dimensioni_pagina_mm(&doc, id).unwrap();
+        assert!((a - 275.0).abs() < 0.01 && l <= 200.01, "{l} × {a}");
+        assert!(lav.riduzione_foglio(210.0, 297.0) < 0.5);
+        let piccola = Lavorazione { scala: Scala::Percentuale { x: 50.0, y: 50.0 }, ..lav };
+        assert_eq!(piccola.fattori(210.0, 297.0), (0.5, 0.5));
+    }
+
     /// Un documento che il nesting non riesce a leggere non ferma la coda:
     /// finisce fra gli esclusi e parte da solo, dove l'errore lo riporta il
     /// suo invio.
@@ -1208,7 +1288,7 @@ mod test {
                     doc.get_dictionary_mut(id).unwrap().set("UserUnit", riferimento);
                     let (l, a) = file::dimensioni_pagina_mm(&doc, id).unwrap();
                     let (sx, sy) = fattori(&scala, l, a);
-                    assert!(applica_scala_pagina(&mut doc, id, &scala).unwrap());
+                    assert!(applica_scala_pagina(&mut doc, id, &Lavorazione { scala, ..Default::default() }).unwrap());
                     let (uscita_l, uscita_a) = file::dimensioni_pagina_mm(&doc, id).unwrap();
                     assert!((uscita_l - l * sx).abs() < 0.001, "{unita} {ruota} {scala:?}");
                     assert!((uscita_a - a * sy).abs() < 0.001, "{unita} {ruota} {scala:?}");
@@ -1550,6 +1630,25 @@ mod test {
     }
 
     #[test]
+    fn adatta_foglio_immagini_cambia_i_dpi_senza_ricampionare() {
+        let dir = cartella("adatta-foglio");
+        let lav = Lavorazione { area_foglio_mm: Some((8.0, 20.0)), ..Default::default() };
+        for (percorso, formato) in [(png_100dpi(&dir), Formato::Png), (tiff_100dpi(&dir, 1), Formato::Tiff)] {
+            let (tmp, uscita) = prepara(&percorso, formato, &lav, None).unwrap().unwrap();
+            let originale = image::open(&percorso).unwrap().to_rgb8();
+            assert_eq!(image::open(tmp.percorso()).unwrap().to_rgb8(), originale);
+            let (l, a) = file::analizza(tmp.percorso()).unwrap().mm.unwrap();
+            assert_eq!(uscita, Formato::Tiff);
+            assert!(l.min(a) <= 8.01 && l.max(a) <= 20.01, "{l} × {a}");
+            assert!((l / a - originale.width() as f64 / originale.height() as f64).abs() < 0.001);
+        }
+        let multi = tiff_100dpi(&dir, 2);
+        let errore = prepara(&multi, Formato::Tiff, &lav, None).err().unwrap();
+        assert!(errore.to_string().contains("adattamento al foglio non supportato"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn nesting_esclude_solo_i_tiff_multipagina() {
         for pagine in [1, 2] {
             let dir = cartella(&format!("nesting-tiff-{pagine}"));
@@ -1585,7 +1684,7 @@ mod test {
                     if cornice.is_none() && allineamento.is_none() {
                         continue;
                     }
-                    let lav = Lavorazione { scala, cornice };
+                    let lav = Lavorazione { scala, cornice, ..Default::default() };
                     let errore = prepara(&p, Formato::Tiff, &lav, allineamento)
                         .err().expect("non deve produrre un TIFF con una sola pagina");
                     assert!(errore.to_string().contains("TIFF multipagina"), "{errore:#}");
@@ -1727,17 +1826,17 @@ mod test {
     fn la_pagina_cambia_solo_se_la_scala_la_tocca() {
         let doc = Document::load_mem(&pdf_a4_con_annotazione()).unwrap();
         let id = *doc.get_pages().values().next().unwrap();
-        assert!(scala_pagina(&doc, id, &Scala::Formato(FormatoIso::A4)).is_none());
-        assert!(scala_pagina(&doc, id, &Scala::Percentuale { x: 100.0, y: 100.0 }).is_none());
-        assert!(scala_pagina(&doc, id, &Scala::Formato(FormatoIso::A3)).is_some());
-        assert!(scala_pagina(&doc, id, &Scala::Percentuale { x: 50.0, y: 50.0 }).is_some());
+        assert!(scala_pagina(&doc, id, &Lavorazione { scala: Scala::Formato(FormatoIso::A4), ..Default::default() }).is_none());
+        assert!(scala_pagina(&doc, id, &Lavorazione { scala: Scala::Percentuale { x: 100.0, y: 100.0 }, ..Default::default() }).is_none());
+        assert!(scala_pagina(&doc, id, &Lavorazione { scala: Scala::Formato(FormatoIso::A3), ..Default::default() }).is_some());
+        assert!(scala_pagina(&doc, id, &Lavorazione { scala: Scala::Percentuale { x: 50.0, y: 50.0 }, ..Default::default() }).is_some());
 
         // Le misure "vere" di un A4 in punti (595,28 × 841,89) non sono un
         // cambio: la tolleranza assorbe i millesimi di millimetro.
         let dati = impagina::test::pdf(595.28, 841.89, (0.0, 0.0), 0);
         let doc = Document::load_mem(&dati).unwrap();
         let id = *doc.get_pages().values().next().unwrap();
-        assert!(scala_pagina(&doc, id, &Scala::Formato(FormatoIso::A4)).is_none());
+        assert!(scala_pagina(&doc, id, &Lavorazione { scala: Scala::Formato(FormatoIso::A4), ..Default::default() }).is_none());
     }
 
     /// Verifica che la sola scala di un JPEG aggiorni i DPI nei metadati
