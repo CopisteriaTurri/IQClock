@@ -5,6 +5,10 @@
 //! Non c'è un installer, quindi all'avvio scriviamo noi in `~/.local/share`
 //! il file `.desktop` (che punta a questo eseguibile) e l'icona, solo se
 //! mancano o sono cambiati. Così l'app compare anche nel menu applicazioni.
+//!
+//! Il collegamento usa XWayland: winit 0.30 non gestisce il drag & drop dei
+//! file su Wayland nativo (#57). Rimuovendo WAYLAND_DISPLAY solo per l'app,
+//! winit sceglie X11 anche nelle sessioni Wayland.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -25,7 +29,7 @@ fn voce_desktop(exe: &Path) -> String {
          Type=Application\n\
          Name=IQClock\n\
          Comment=Stampa su HP DesignJet PostScript\n\
-         Exec={} %F\n\
+         Exec=env -u WAYLAND_DISPLAY {} %F\n\
          Icon=iqclock\n\
          StartupWMClass=iqclock\n\
          Terminal=false\n\

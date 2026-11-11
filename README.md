@@ -336,6 +336,11 @@ in git: `iqclock.png` è quella della finestra e della taskbar, `iqclock.ico` la
 Su Linux, al primo avvio, l'app scrive `~/.local/share/applications/iqclock.desktop` e
 l'icona in `~/.local/share/icons/`: sotto Wayland è l'unico modo per avere l'icona nella
 barra (altrimenti si vede quella generica), e IQClock compare anche nel menu applicazioni.
+Il collegamento avvia IQClock tramite `env -u WAYLAND_DISPLAY`, usando XWayland
+nelle sessioni Wayland: è il workaround per il drag & drop dei file, non supportato
+dal backend Wayland di winit 0.30 (#57). Il collegamento esistente viene aggiornato
+al primo avvio della nuova versione. Avviando l'eseguibile direttamente, per avere
+lo stesso comportamento usare `env -u WAYLAND_DISPLAY ./iqclock-linux-x64`.
 
 pdfium viene da [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries),
 release `chromium/7881`: è la versione dell'API per cui è compilato `pdfium-render` 0.9
