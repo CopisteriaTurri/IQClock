@@ -58,7 +58,11 @@ impl Risoluzione {
 }
 
 fn valore_dpi(dpi: f64) -> String {
-    if (dpi - dpi.round()).abs() < 0.05 { format!("{dpi:.0}") } else { format!("{dpi:.1}") }
+    if (dpi - dpi.round()).abs() < 0.05 {
+        format!("{dpi:.0}")
+    } else {
+        format!("{dpi:.1}")
+    }
 }
 
 /// DPI effettivi di un'immagine raster: i suoi pixel divisi per il lato in mm
@@ -72,8 +76,16 @@ pub fn dpi_effettivi(px: u32, lato_mm: f64) -> f64 {
 /// quella presunta se il file non ne dichiara una utilizzabile.
 pub fn risoluzione_immagine(percorso: &Path, formato: Formato) -> Risoluzione {
     match risoluzione_dichiarata(percorso, formato) {
-        Some((x, y)) => Risoluzione { x, y, presunta: false },
-        None => Risoluzione { x: DPI_IMMAGINI, y: DPI_IMMAGINI, presunta: true },
+        Some((x, y)) => Risoluzione {
+            x,
+            y,
+            presunta: false,
+        },
+        None => Risoluzione {
+            x: DPI_IMMAGINI,
+            y: DPI_IMMAGINI,
+            presunta: true,
+        },
     }
 }
 
@@ -171,15 +183,25 @@ pub fn analizza(percorso: &Path) -> Result<InfoFile> {
     };
     match formato {
         Formato::Pdf => match leggi_pdf(percorso) {
-            Ok(Pdf { pagine, mm, formati, misure }) => {
+            Ok(Pdf {
+                pagine,
+                mm,
+                formati,
+                misure,
+            }) => {
                 info.pagine = pagine;
                 info.mm = mm;
-                info.dettagli =
-                    if pagine == 1 { "1 pagina".to_string() } else { format!("{pagine} pagine") };
+                info.dettagli = if pagine == 1 {
+                    "1 pagina".to_string()
+                } else {
+                    format!("{pagine} pagine")
+                };
                 if formati.len() > 1 {
-                    info.dettagli.push_str(&format!(" · {}", etichetta_formati(&formati)));
+                    info.dettagli
+                        .push_str(&format!(" · {}", etichetta_formati(&formati)));
                 } else if let Some((l, a)) = mm {
-                    info.dettagli.push_str(&format!(" · {l:.0} × {a:.0} mm{}", formato_iso(l, a)));
+                    info.dettagli
+                        .push_str(&format!(" · {l:.0} × {a:.0} mm{}", formato_iso(l, a)));
                 }
                 info.formati_pagine = formati;
                 info.pagine_mm = misure;
@@ -251,7 +273,8 @@ fn dpi_jpeg<R: Read + Seek>(r: &mut R) -> Option<(f64, f64)> {
             && let Some(contenuto) = dati.strip_prefix(b"Exif\0\0")
         {
             exif = exif.or_else(|| {
-                risoluzione_tiff(&mut Cursor::new(contenuto)).and_then(|(x, y)| dpi_plausibili(x, y))
+                risoluzione_tiff(&mut Cursor::new(contenuto))
+                    .and_then(|(x, y)| dpi_plausibili(x, y))
             });
         }
     }
@@ -278,7 +301,8 @@ pub(crate) fn prossimo_app_pos<R: Read + Seek>(r: &mut R) -> Option<(u8, u64, u6
             0xE0 | 0xE1 | 0xEE => return Some((marcatore, offset, lunghezza)),
             _ => {}
         }
-        r.seek(SeekFrom::Start(offset.checked_add(lunghezza)?)).ok()?;
+        r.seek(SeekFrom::Start(offset.checked_add(lunghezza)?))
+            .ok()?;
     }
 }
 
@@ -448,7 +472,10 @@ fn leggi_pdf(percorso: &Path) -> Result<Pdf> {
     if pagine.is_empty() && doc.is_encrypted() {
         bail!("cifrato (serve la password)");
     }
-    let misure: Vec<_> = pagine.values().map(|&id| dimensioni_pagina_mm(&doc, id)).collect();
+    let misure: Vec<_> = pagine
+        .values()
+        .map(|&id| dimensioni_pagina_mm(&doc, id))
+        .collect();
     let mm = misure.first().copied().flatten();
     let mut formati = Vec::new();
     for m in misure.iter().copied() {
@@ -458,7 +485,12 @@ fn leggi_pdf(percorso: &Path) -> Result<Pdf> {
         };
         aggiungi_formato(&mut formati, nome, 1);
     }
-    Ok(Pdf { pagine: pagine.len(), mm, formati, misure })
+    Ok(Pdf {
+        pagine: pagine.len(),
+        mm,
+        formati,
+        misure,
+    })
 }
 
 /// Nome del formato di una pagina: "A4" se ISO, altrimenti le misure al mm,
@@ -484,7 +516,11 @@ pub fn aggiungi_formato(formati: &mut Formati, nome: String, n: usize) {
 /// "A4: 9  |  A3: 2  |  320 × 450 mm: 1": formato prima del numero e barre
 /// tra i formati, così il × delle misure non si confonde col conteggio.
 pub fn etichetta_formati(formati: &[(String, usize)]) -> String {
-    formati.iter().map(|(f, n)| format!("{f}: {n}")).collect::<Vec<_>>().join("  |  ")
+    formati
+        .iter()
+        .map(|(f, n)| format!("{f}: {n}"))
+        .collect::<Vec<_>>()
+        .join("  |  ")
 }
 
 /// Valore di una chiave ereditabile della pagina (MediaBox, Rotate, …),
@@ -512,7 +548,8 @@ pub(crate) fn ereditato<'a>(
 /// La chiave non è ereditabile; riferimenti indiretti sono risolti e valori
 /// assenti, non numerici, non finiti o non positivi valgono 1.
 pub(crate) fn unita_utente(doc: &lopdf::Document, pagina: lopdf::ObjectId) -> f64 {
-    doc.get_dictionary(pagina).ok()
+    doc.get_dictionary(pagina)
+        .ok()
         .and_then(|pagina| pagina.get(b"UserUnit").ok())
         .and_then(|valore| doc.dereference(valore).ok())
         .and_then(|(_, valore)| valore.as_float().ok())
@@ -523,29 +560,54 @@ pub(crate) fn unita_utente(doc: &lopdf::Document, pagina: lopdf::ObjectId) -> f6
 
 /// Riquadro `[x0, y0, x1, y1]` normalizzato (x0 < x1, y0 < y1) da un array PDF.
 pub(crate) fn riquadro(o: &lopdf::Object) -> Option<[f64; 4]> {
-    let v: Vec<f64> = o.as_array().ok()?.iter().filter_map(|o| o.as_float().ok().map(f64::from)).collect();
+    let v: Vec<f64> = o
+        .as_array()
+        .ok()?
+        .iter()
+        .filter_map(|o| o.as_float().ok().map(f64::from))
+        .collect();
     if v.len() != 4 {
         return None;
     }
-    Some([v[0].min(v[2]), v[1].min(v[3]), v[0].max(v[2]), v[1].max(v[3])])
+    Some([
+        v[0].min(v[2]),
+        v[1].min(v[3]),
+        v[0].max(v[2]),
+        v[1].max(v[3]),
+    ])
 }
 
 /// Parte visibile della pagina `[x0, y0, x1, y1]` (in punti, con x0 < x1 e
 /// y0 < y1): il CropBox dentro il MediaBox se c'è, altrimenti il MediaBox. E
 /// /Rotate in gradi (0, 90, 180 o 270).
-pub(crate) fn box_e_rotazione(doc: &lopdf::Document, pagina: lopdf::ObjectId) -> Option<([f64; 4], i64)> {
+pub(crate) fn box_e_rotazione(
+    doc: &lopdf::Document,
+    pagina: lopdf::ObjectId,
+) -> Option<([f64; 4], i64)> {
     let media = riquadro(ereditato(doc, pagina, b"MediaBox")?)?;
     let visibile = ereditato(doc, pagina, b"CropBox")
         .and_then(riquadro)
-        .map(|c| [c[0].max(media[0]), c[1].max(media[1]), c[2].min(media[2]), c[3].min(media[3])])
+        .map(|c| {
+            [
+                c[0].max(media[0]),
+                c[1].max(media[1]),
+                c[2].min(media[2]),
+                c[3].min(media[3]),
+            ]
+        })
         .filter(|c| c[0] < c[2] && c[1] < c[3])
         .unwrap_or(media);
-    let ruota = ereditato(doc, pagina, b"Rotate").and_then(|o| o.as_i64().ok()).unwrap_or(0);
+    let ruota = ereditato(doc, pagina, b"Rotate")
+        .and_then(|o| o.as_i64().ok())
+        .unwrap_or(0);
     Some((visibile, ruota.rem_euclid(360)))
 }
 
 /// Lati della pagina in mm come appare (con `/Rotate` e `/UserUnit` applicati).
-pub(crate) fn dimensioni_pagina_mm(doc: &lopdf::Document, pagina: lopdf::ObjectId) -> Option<(f64, f64)> {
+pub(crate) fn dimensioni_pagina_mm(
+    doc: &lopdf::Document,
+    pagina: lopdf::ObjectId,
+) -> Option<(f64, f64)> {
     let ([x0, y0, x1, y1], ruota) = box_e_rotazione(doc, pagina)?;
     let pt_mm = 25.4 / 72.0 * unita_utente(doc, pagina);
     let (l, a) = ((x1 - x0) * pt_mm, (y1 - y0) * pt_mm);
@@ -648,7 +710,9 @@ mod test {
             assert_eq!(unita_utente(&doc, id), atteso);
         }
         let riferimento = doc.add_object(Object::Real(2.5));
-        doc.get_dictionary_mut(id).unwrap().set("UserUnit", riferimento);
+        doc.get_dictionary_mut(id)
+            .unwrap()
+            .set("UserUnit", riferimento);
         assert_eq!(unita_utente(&doc, id), 2.5);
     }
 
@@ -680,11 +744,19 @@ mod test {
     }
 
     fn pagina(l: f64, a: f64) -> PaginaTest {
-        PaginaTest { media_box: Some((l, a)), ruota: None }
+        PaginaTest {
+            media_box: Some((l, a)),
+            ruota: None,
+        }
     }
 
     fn media_box((l, a): (f64, f64)) -> Object {
-        Object::Array([0.0, 0.0, l, a].iter().map(|v| Object::Real(*v as f32)).collect())
+        Object::Array(
+            [0.0, 0.0, l, a]
+                .iter()
+                .map(|v| Object::Real(*v as f32))
+                .collect(),
+        )
     }
 
     /// PDF minimo ma valido, con pagina o MediaBox ereditato dal nodo `Pages`.
@@ -800,7 +872,10 @@ mod test {
         assert_eq!(info.pagine, 1);
         assert_eq!(info.dettagli, "1 pagina · 210 × 297 mm (A4)");
         let (l, a) = info.mm.unwrap();
-        assert!((l - 210.0).abs() < 0.5 && (a - 297.0).abs() < 0.5, "{l} × {a}");
+        assert!(
+            (l - 210.0).abs() < 0.5 && (a - 297.0).abs() < 0.5,
+            "{l} × {a}"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -816,9 +891,17 @@ mod test {
             ("A5", 148.0, 210.0),
         ];
         for (nome, l, a) in formati {
-            let p = scrivi(&dir, &format!("{nome}.pdf"), &pdf(&[pagina(pt(l), pt(a))], None));
+            let p = scrivi(
+                &dir,
+                &format!("{nome}.pdf"),
+                &pdf(&[pagina(pt(l), pt(a))], None),
+            );
             let info = analizza(&p).unwrap();
-            assert_eq!(info.dettagli, format!("1 pagina · {l:.0} × {a:.0} mm ({nome})"), "{nome}");
+            assert_eq!(
+                info.dettagli,
+                format!("1 pagina · {l:.0} × {a:.0} mm ({nome})"),
+                "{nome}"
+            );
         }
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -873,7 +956,10 @@ mod test {
     #[test]
     fn pdf_rotazione_e_media_box_entrambi_ereditati() {
         let dir = cartella("pdf-padre-completo");
-        let senza_niente = PaginaTest { media_box: None, ruota: None };
+        let senza_niente = PaginaTest {
+            media_box: None,
+            ruota: None,
+        };
         let info = analizza_bytes(
             &dir,
             "padre.pdf",
@@ -886,7 +972,10 @@ mod test {
     #[test]
     fn pdf_media_box_ereditato_dal_padre() {
         let dir = cartella("pdf-ereditato");
-        let senza_media_box = PaginaTest { media_box: None, ruota: None };
+        let senza_media_box = PaginaTest {
+            media_box: None,
+            ruota: None,
+        };
         let info = analizza_bytes(
             &dir,
             "ereditato.pdf",
@@ -923,7 +1012,10 @@ mod test {
         let info = analizza_bytes(&dir, "ciclo.pdf", &dati);
         assert_eq!(info.dettagli, "1 pagina · 210 × 297 mm (A4)");
 
-        let senza_media_box = PaginaTest { media_box: None, ruota: None };
+        let senza_media_box = PaginaTest {
+            media_box: None,
+            ruota: None,
+        };
         let dati = con_parent(&pdf(&[senza_media_box], None), None);
         let info = analizza_bytes(&dir, "ciclo-vuoto.pdf", &dati);
         assert_eq!(info.mm, None);
@@ -958,17 +1050,26 @@ mod test {
         let info = analizza_bytes(&dir, "misto.pdf", &pdf(&pagine, None));
         assert_eq!(info.pagine, 6);
         // Primo apparso, primo elencato; l'orientamento non separa i formati.
-        assert_eq!(info.dettagli, "6 pagine · A4: 3  |  A3: 2  |  320 × 450 mm: 1");
+        assert_eq!(
+            info.dettagli,
+            "6 pagine · A4: 3  |  A3: 2  |  320 × 450 mm: 1"
+        );
         // La prima pagina resta quella dell'anteprima.
         let (l, a) = info.mm.unwrap();
-        assert!((l - 210.0).abs() < 0.5 && (a - 297.0).abs() < 0.5, "{l} × {a}");
+        assert!(
+            (l - 210.0).abs() < 0.5 && (a - 297.0).abs() < 0.5,
+            "{l} × {a}"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn pdf_pagina_senza_misure_conta_a_parte() {
         let dir = cartella("pdf-formati-ignoti");
-        let senza_media_box = PaginaTest { media_box: None, ruota: None };
+        let senza_media_box = PaginaTest {
+            media_box: None,
+            ruota: None,
+        };
         let pagine = [pagina(pt(210.0), pt(297.0)), senza_media_box];
         let info = analizza_bytes(&dir, "ignoti.pdf", &pdf(&pagine, None));
         assert_eq!(info.dettagli, "2 pagine · A4: 1  |  misure ignote: 1");
@@ -999,7 +1100,11 @@ mod test {
     fn pdf_corrotto_finisce_nei_dettagli() {
         let dir = cartella("pdf-rotto");
         let info = analizza_bytes(&dir, "rotto.pdf", b"%PDF-1.7\nquesto non e un pdf");
-        assert!(info.dettagli.starts_with("PDF illeggibile: "), "{}", info.dettagli);
+        assert!(
+            info.dettagli.starts_with("PDF illeggibile: "),
+            "{}",
+            info.dettagli
+        );
         assert_eq!(info.pagine, 1);
         assert_eq!(info.mm, None);
         let _ = std::fs::remove_dir_all(dir);
@@ -1013,8 +1118,14 @@ mod test {
         cifratura.set("Filter", "Standard");
         cifratura.set("V", 1);
         cifratura.set("R", 2);
-        cifratura.set("O", Object::String(vec![0; 32], lopdf::StringFormat::Hexadecimal));
-        cifratura.set("U", Object::String(vec![0; 32], lopdf::StringFormat::Hexadecimal));
+        cifratura.set(
+            "O",
+            Object::String(vec![0; 32], lopdf::StringFormat::Hexadecimal),
+        );
+        cifratura.set(
+            "U",
+            Object::String(vec![0; 32], lopdf::StringFormat::Hexadecimal),
+        );
         cifratura.set("P", -4);
         let cifratura = doc.add_object(cifratura);
         doc.trailer.set("Encrypt", Object::Reference(cifratura));
@@ -1025,7 +1136,10 @@ mod test {
         assert_eq!(info.formato, Formato::Pdf);
         // Senza password le pagine non sono leggibili: meglio dirlo che
         // mostrare "0 pagine".
-        assert_eq!(info.dettagli, "PDF illeggibile: cifrato (serve la password)");
+        assert_eq!(
+            info.dettagli,
+            "PDF illeggibile: cifrato (serve la password)"
+        );
         assert_eq!(info.mm, None);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1047,10 +1161,17 @@ mod test {
             let info = analizza(&p).unwrap();
             assert_eq!(info.formato, atteso, "{nome}");
             assert_eq!(info.pagine, 1, "{nome}");
-            assert_eq!(info.dettagli, "40 × 30 px · 300 dpi (presunti) · 3 × 3 mm", "{nome}");
+            assert_eq!(
+                info.dettagli, "40 × 30 px · 300 dpi (presunti) · 3 × 3 mm",
+                "{nome}"
+            );
             assert_eq!(
                 info.risoluzione,
-                Some(Risoluzione { x: 300.0, y: 300.0, presunta: true }),
+                Some(Risoluzione {
+                    x: 300.0,
+                    y: 300.0,
+                    presunta: true
+                }),
                 "{nome}"
             );
             let (l, a) = info.mm.unwrap();
@@ -1113,7 +1234,10 @@ mod test {
 
     #[test]
     fn dpi_da_tiff() {
-        assert_eq!(risoluzione_tiff(&mut Cursor::new(tiff_le(300, 300, 300, 300, 2))), Some((300.0, 300.0)));
+        assert_eq!(
+            risoluzione_tiff(&mut Cursor::new(tiff_le(300, 300, 300, 300, 2))),
+            Some((300.0, 300.0))
+        );
     }
 
     #[test]
@@ -1125,7 +1249,10 @@ mod test {
     #[test]
     fn dpi_assenti_o_assurdi() {
         // Unità 1 = solo proporzioni: non sono DPI.
-        assert_eq!(risoluzione_tiff(&mut Cursor::new(tiff_le(300, 300, 300, 300, 1))), None);
+        assert_eq!(
+            risoluzione_tiff(&mut Cursor::new(tiff_le(300, 300, 300, 300, 1))),
+            None
+        );
         assert_eq!(dpi_plausibili(0.0, 0.0), None);
         assert_eq!(dpi_plausibili(1.0, 1.0), None);
         assert_eq!(dpi_plausibili(300.0, 300.0), Some((300.0, 300.0)));
@@ -1133,7 +1260,10 @@ mod test {
 
     #[test]
     fn dpi_da_jfif() {
-        assert_eq!(dpi_jpeg(&mut Cursor::new(jpeg_jfif(1, 300, 300))), Some((300.0, 300.0)));
+        assert_eq!(
+            dpi_jpeg(&mut Cursor::new(jpeg_jfif(1, 300, 300))),
+            Some((300.0, 300.0))
+        );
         let (x, y) = dpi_jpeg(&mut Cursor::new(jpeg_jfif(2, 118, 118))).unwrap();
         assert!((x - 299.72).abs() < 0.01 && (y - 299.72).abs() < 0.01);
         // Unità 0: solo rapporto d'aspetto, si ricade sui 300 presunti.
@@ -1142,7 +1272,10 @@ mod test {
 
     #[test]
     fn dpi_da_exif() {
-        assert_eq!(dpi_jpeg(&mut Cursor::new(jpeg_exif(150, 2))), Some((150.0, 150.0)));
+        assert_eq!(
+            dpi_jpeg(&mut Cursor::new(jpeg_exif(150, 2))),
+            Some((150.0, 150.0))
+        );
     }
 
     #[test]
@@ -1175,7 +1308,14 @@ mod test {
         img.y_resolution(Rational { n: 150, d: 1 });
         img.write_data(&vec![128u8; 400 * 300 * 3]).unwrap();
         let info = analizza(&p).unwrap();
-        assert_eq!(info.risoluzione, Some(Risoluzione { x: 150.0, y: 150.0, presunta: false }));
+        assert_eq!(
+            info.risoluzione,
+            Some(Risoluzione {
+                x: 150.0,
+                y: 150.0,
+                presunta: false
+            })
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1217,10 +1357,15 @@ mod test {
                     presunti: false,
                 };
                 if dpi < soglia {
-                    assert_eq!(d.etichetta(soglia), format!("< {soglia} dpi — sotto {soglia}"));
+                    assert_eq!(
+                        d.etichetta(soglia),
+                        format!("< {soglia} dpi — sotto {soglia}")
+                    );
                     assert_eq!(
                         d.avviso(soglia).unwrap(),
-                        format!("Attenzione: risoluzione < {soglia} dpi, sotto la soglia di {soglia}")
+                        format!(
+                            "Attenzione: risoluzione < {soglia} dpi, sotto la soglia di {soglia}"
+                        )
                     );
                 } else {
                     assert_eq!(d.etichetta(soglia), "200 dpi");
@@ -1244,17 +1389,35 @@ mod test {
 
         // 300 × 150 px a 150 dpi = 50,8 × 25,4 mm.
         let info = analizza_bytes(&dir, "dichiarati.tif", &tiff_le(300, 150, 150, 150, 2));
-        assert_eq!(info.risoluzione, Some(Risoluzione { x: 150.0, y: 150.0, presunta: false }));
+        assert_eq!(
+            info.risoluzione,
+            Some(Risoluzione {
+                x: 150.0,
+                y: 150.0,
+                presunta: false
+            })
+        );
         let (l, a) = info.mm.unwrap();
         assert!((l - 50.8).abs() < 0.1 && (a - 25.4).abs() < 0.1);
         assert!(info.dettagli.contains("150 dpi"), "{}", info.dettagli);
 
         // Unità relativa: DPI assenti, si usano i 300 presunti.
         let info = analizza_bytes(&dir, "presunti.tif", &tiff_le(300, 150, 300, 300, 1));
-        assert_eq!(info.risoluzione, Some(Risoluzione { x: 300.0, y: 300.0, presunta: true }));
+        assert_eq!(
+            info.risoluzione,
+            Some(Risoluzione {
+                x: 300.0,
+                y: 300.0,
+                presunta: true
+            })
+        );
         let (l, a) = info.mm.unwrap();
         assert!((l - 25.4).abs() < 0.1 && (a - 12.7).abs() < 0.1);
-        assert!(info.dettagli.contains("300 dpi (presunti)"), "{}", info.dettagli);
+        assert!(
+            info.dettagli.contains("300 dpi (presunti)"),
+            "{}",
+            info.dettagli
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1265,14 +1428,25 @@ mod test {
         let p = scrivi(&dir, "dichiarata.tif", &tiff_le(300, 150, 150, 150, 2));
         assert_eq!(
             risoluzione_immagine(&p, Formato::Tiff),
-            Risoluzione { x: 150.0, y: 150.0, presunta: false }
+            Risoluzione {
+                x: 150.0,
+                y: 150.0,
+                presunta: false
+            }
         );
         let p = scrivi(&dir, "presunta.tif", &tiff_le(300, 150, 300, 300, 1));
         assert_eq!(
             risoluzione_immagine(&p, Formato::Tiff),
-            Risoluzione { x: DPI_IMMAGINI, y: DPI_IMMAGINI, presunta: true }
+            Risoluzione {
+                x: DPI_IMMAGINI,
+                y: DPI_IMMAGINI,
+                presunta: true
+            }
         );
-        assert_eq!(dpi_immagine(&p, Formato::Tiff), (DPI_IMMAGINI, DPI_IMMAGINI));
+        assert_eq!(
+            dpi_immagine(&p, Formato::Tiff),
+            (DPI_IMMAGINI, DPI_IMMAGINI)
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1293,12 +1467,22 @@ mod test {
         let r = info.risoluzione.unwrap();
         assert!(!r.presunta && (r.x - 300.0).abs() < 0.01 && (r.y - 300.0).abs() < 0.01);
         let (l, a) = info.mm.unwrap();
-        assert!((l - 25.4).abs() < 0.1 && (a - 12.7).abs() < 0.1, "{l} × {a}");
+        assert!(
+            (l - 25.4).abs() < 0.1 && (a - 12.7).abs() < 0.1,
+            "{l} × {a}"
+        );
 
         // pHYs assurdo (1 px/m): si ricade sui 300 presunti.
         let p = scrivi(&dir, "assurdo.png", &png::test::con_phys(&png, 1));
         let info = analizza(&p).unwrap();
-        assert_eq!(info.risoluzione, Some(Risoluzione { x: 300.0, y: 300.0, presunta: true }));
+        assert_eq!(
+            info.risoluzione,
+            Some(Risoluzione {
+                x: 300.0,
+                y: 300.0,
+                presunta: true
+            })
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1308,7 +1492,8 @@ mod test {
         let dir = cartella("estensioni");
         let rgb = image::RgbImage::from_pixel(4, 4, image::Rgb([0, 0, 0]));
         let jpeg = dir.join("finta.pdf");
-        rgb.save_with_format(&jpeg, image::ImageFormat::Jpeg).unwrap();
+        rgb.save_with_format(&jpeg, image::ImageFormat::Jpeg)
+            .unwrap();
         assert_eq!(riconosci(&jpeg).unwrap(), Formato::Jpeg);
 
         let testo = scrivi(&dir, "finto.jpg", b"non sono un'immagine");
@@ -1340,7 +1525,11 @@ mod test {
             ("A5", 148.0, 210.0),
         ] {
             assert_eq!(formato_iso(corto, lungo), format!(" ({nome})"));
-            assert_eq!(formato_iso(lungo, corto), format!(" ({nome})"), "{nome} ruotato");
+            assert_eq!(
+                formato_iso(lungo, corto),
+                format!(" ({nome})"),
+                "{nome} ruotato"
+            );
         }
     }
 

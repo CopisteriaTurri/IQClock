@@ -82,9 +82,16 @@ impl Foglio {
     /// Foglio del formato ISO `formato`, verticale o orizzontale.
     pub fn iso(formato: FormatoIso, orizzontale: bool) -> Self {
         let (corto, lungo) = formato.mm();
-        let (larghezza_mm, altezza_mm) =
-            if orizzontale { (lungo, corto) } else { (corto, lungo) };
-        Self { scelta: SceltaFoglio::Iso(formato), larghezza_mm, altezza_mm }
+        let (larghezza_mm, altezza_mm) = if orizzontale {
+            (lungo, corto)
+        } else {
+            (corto, lungo)
+        };
+        Self {
+            scelta: SceltaFoglio::Iso(formato),
+            larghezza_mm,
+            altezza_mm,
+        }
     }
 
     /// Prende le misure dichiarate dalla stampante, se la scelta è ancora
@@ -107,12 +114,19 @@ impl Foglio {
     pub fn etichetta(&self) -> String {
         match self.scelta {
             SceltaFoglio::Stampante => {
-                format!("Dalla stampante: {:.0} × {:.0} mm", self.larghezza_mm, self.altezza_mm)
+                format!(
+                    "Dalla stampante: {:.0} × {:.0} mm",
+                    self.larghezza_mm, self.altezza_mm
+                )
             }
             SceltaFoglio::Iso(f) => format!(
                 "{} {}",
                 f.etichetta(),
-                if self.verticale() { "verticale" } else { "orizzontale" }
+                if self.verticale() {
+                    "verticale"
+                } else {
+                    "orizzontale"
+                }
             ),
             SceltaFoglio::Mano => {
                 format!("{:.0} × {:.0} mm", self.larghezza_mm, self.altezza_mm)
@@ -130,10 +144,7 @@ impl Foglio {
     /// in che verso è il foglio. Per un A4 sono (220, 319).
     pub fn minimo_lati(pagina: (f64, f64)) -> (f64, f64) {
         let (corto, lungo) = (pagina.0.min(pagina.1), pagina.0.max(pagina.1));
-        (
-            corto + 2.0 * MARGINE_LATO_MM,
-            lungo + MARGINE_ENTRATA_MM,
-        )
+        (corto + 2.0 * MARGINE_LATO_MM, lungo + MARGINE_ENTRATA_MM)
     }
 
     /// Foglio più piccolo che la stampante accetta per una pagina di `pagina`
@@ -141,7 +152,11 @@ impl Foglio {
     /// nello stesso verso della pagina.
     pub fn foglio_minimo(pagina: (f64, f64)) -> (f64, f64) {
         let (lar, alt) = Self::minimo_lati(pagina);
-        if pagina.1 >= pagina.0 { (lar, alt) } else { (alt, lar) }
+        if pagina.1 >= pagina.0 {
+            (lar, alt)
+        } else {
+            (alt, lar)
+        }
     }
 
     /// true se una pagina di `pagina` mm ci entra nel foglio, margini della
@@ -186,7 +201,11 @@ mod test {
         let mut v = Foglio::iso(FormatoIso::A3, false);
         v.ruota();
         assert_eq!((v.larghezza_mm, v.altezza_mm), (420.0, 297.0));
-        assert_eq!(v.scelta, SceltaFoglio::Iso(FormatoIso::A3), "girare non perde il formato");
+        assert_eq!(
+            v.scelta,
+            SceltaFoglio::Iso(FormatoIso::A3),
+            "girare non perde il formato"
+        );
     }
 
     /// Il foglio minimo è quello che la stampante chiede davvero: per un A4
@@ -209,8 +228,11 @@ mod test {
         // grande invece di stampare.
         let a4 = Foglio::default();
         assert!(!a4.entra((210.0, 297.0)));
-        let giusto =
-            Foglio { scelta: SceltaFoglio::Mano, larghezza_mm: 220.0, altezza_mm: 319.0 };
+        let giusto = Foglio {
+            scelta: SceltaFoglio::Mano,
+            larghezza_mm: 220.0,
+            altezza_mm: 319.0,
+        };
         assert!(giusto.entra((210.0, 297.0)));
         // Orientata diversamente: ci sta girata (la rotazione non è provata).
         assert!(giusto.entra((297.0, 210.0)));
@@ -218,14 +240,21 @@ mod test {
         assert!(giusto.entra((210.0014, 297.0014)));
         assert!(giusto.entra((210.0, 297.0 + TOLLERANZA_MM)));
         assert!(!giusto.entra((210.0, 297.0 + TOLLERANZA_MM + 0.1)));
-        assert!(!giusto.entra((420.0, 297.0)), "un A3 non entra in un foglio da A4 + margini");
+        assert!(
+            !giusto.entra((420.0, 297.0)),
+            "un A3 non entra in un foglio da A4 + margini"
+        );
         // Misure ignote: non si avvisa.
         assert!(giusto.entra((0.0, 0.0)));
     }
 
     #[test]
     fn misura_a_mano() {
-        let f = Foglio { scelta: SceltaFoglio::Mano, larghezza_mm: 300.0, altezza_mm: 200.0 };
+        let f = Foglio {
+            scelta: SceltaFoglio::Mano,
+            larghezza_mm: 300.0,
+            altezza_mm: 200.0,
+        };
         assert_eq!(f.etichetta(), "300 × 200 mm");
         assert!(!f.verticale());
         // 270 × 190 più 5 mm per lato e 22 sul lato d'entrata: 280 × 212, e i
@@ -236,7 +265,10 @@ mod test {
 
     #[test]
     fn la_stampante_aggiorna_solo_la_scelta_automatica() {
-        let mut f = Foglio { scelta: SceltaFoglio::Stampante, ..Default::default() };
+        let mut f = Foglio {
+            scelta: SceltaFoglio::Stampante,
+            ..Default::default()
+        };
         f.aggiorna_da_stampante(Some((210.0, 297.0)));
         assert_eq!((f.larghezza_mm, f.altezza_mm), (210.0, 297.0));
         assert_eq!(f.etichetta(), "Dalla stampante: 210 × 297 mm");

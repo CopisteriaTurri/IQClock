@@ -187,7 +187,10 @@ pub struct Cornice {
 impl Default for Cornice {
     /// Cornice iniziale: distanza di 3 mm e spessore di 0,25 mm.
     fn default() -> Self {
-        Self { distanza_mm: 3.0, spessore_mm: 0.25 }
+        Self {
+            distanza_mm: 3.0,
+            spessore_mm: 0.25,
+        }
     }
 }
 
@@ -220,14 +223,18 @@ impl Lavorazione {
 
     /// Riduzione proporzionale aggiuntiva, senza ingrandire le pagine piccole.
     pub fn riduzione_foglio(&self, larghezza: f64, altezza: f64) -> f64 {
-        let Some((corto, lungo)) = self.area_foglio_mm else { return 1.0 };
+        let Some((corto, lungo)) = self.area_foglio_mm else {
+            return 1.0;
+        };
         let (sx, sy) = fattori(&self.scala, larghezza, altezza);
         let (l, a) = (larghezza * sx, altezza * sy);
         let bordo = self.cornice.map_or(0.0, |c| 2.0 * c.ingombro_mm());
         if !(l > 0.0 && a > 0.0 && corto > bordo && lungo > bordo) {
             return 1.0;
         }
-        ((corto - bordo) / l.min(a)).min((lungo - bordo) / l.max(a)).min(1.0)
+        ((corto - bordo) / l.min(a))
+            .min((lungo - bordo) / l.max(a))
+            .min(1.0)
     }
 
     /// Fattori finali condivisi da stampa, anteprima e controllo delle misure.
@@ -262,7 +269,10 @@ pub fn fuori_limiti(scala: &Scala, larghezza_mm: f64, altezza_mm: f64) -> bool {
 /// Misure minime e massime (mm) che la scala accetta per una pagina così grande.
 pub fn limiti_mm(larghezza_mm: f64, altezza_mm: f64) -> ((f64, f64), (f64, f64)) {
     (
-        ((larghezza_mm * FATTORE_MIN).max(1.0), (altezza_mm * FATTORE_MIN).max(1.0)),
+        (
+            (larghezza_mm * FATTORE_MIN).max(1.0),
+            (altezza_mm * FATTORE_MIN).max(1.0),
+        ),
         (larghezza_mm * FATTORE_MAX, altezza_mm * FATTORE_MAX),
     )
 }
@@ -356,12 +366,14 @@ pub fn componi_pdf(
     imp: Option<&Impaginazione>,
 ) -> Result<Option<impagina::PdfComposto>> {
     if lav.nulla() && imp.is_none() {
-        return Ok(compatibilita::ritocca_byte(dati).map(|dati| impagina::PdfComposto {
-            dati,
-            // Pagine al loro posto e senza scala, come il file originale.
-            posizioni: Vec::new(),
-            fattori_scala: Vec::new(),
-        }));
+        return Ok(
+            compatibilita::ritocca_byte(dati).map(|dati| impagina::PdfComposto {
+                dati,
+                // Pagine al loro posto e senza scala, come il file originale.
+                posizioni: Vec::new(),
+                fattori_scala: Vec::new(),
+            }),
+        );
     }
     let mut doc = Document::load_mem(dati).context("apertura del PDF")?;
     // Senza lavorazioni qui c'è per forza un allineamento.
@@ -380,7 +392,9 @@ pub fn componi_pdf(
         // caso resta il rifiuto, come prima.
         let pagine: Vec<ObjectId> = doc.get_pages().into_values().collect();
         if pagine.is_empty() {
-            bail!("PDF cifrato: non si può ridimensionare (pagine non leggibili); scegli originale");
+            bail!(
+                "PDF cifrato: non si può ridimensionare (pagine non leggibili); scegli originale"
+            );
         }
         let cambierebbero = pagine
             .iter()
@@ -421,11 +435,13 @@ pub fn componi_pdf(
     if !cambiato {
         // Scala, cornice e allineamento non cambiano niente: il file non si
         // riscrive, come quando non c'è nessuna lavorazione.
-        return Ok(compatibilita::ritocca_byte(dati).map(|dati| impagina::PdfComposto {
-            dati,
-            posizioni,
-            fattori_scala,
-        }));
+        return Ok(
+            compatibilita::ritocca_byte(dati).map(|dati| impagina::PdfComposto {
+                dati,
+                posizioni,
+                fattori_scala,
+            }),
+        );
     }
     // Dopo gli altri passi, che misurano comunque la parte visibile.
     compatibilita::applica(&mut doc)?;
@@ -479,7 +495,12 @@ fn applica_cornice(doc: &mut Document, cornice: &Cornice) -> Result<bool> {
         // nascosta non invade lo spazio bianco. Ripristina poi lo stato iniziale:
         // matrice, clip e tratteggio lasciati dal contenuto non toccano la cornice.
         let ritaglio = format!("q {x0:.4} {y0:.4} {:.4} {:.4} re W n\n", x1 - x0, y1 - y0);
-        impagina::aggiungi_intorno_al_contenuto(doc, id, ritaglio.into_bytes(), linea.into_bytes())?;
+        impagina::aggiungi_intorno_al_contenuto(
+            doc,
+            id,
+            ritaglio.into_bytes(),
+            linea.into_bytes(),
+        )?;
         let riquadro: Vec<Object> = [x0 - d, y0 - d, x1 + d, y1 + d]
             .iter()
             .map(|&v| Object::Real(v as f32))
@@ -584,7 +605,8 @@ fn applica_scala_pagina(doc: &mut Document, id: ObjectId, lav: &Lavorazione) -> 
 
 /// Chiavi delle annotazioni che contengono coordinate in coppie x y (anche in
 /// array annidati, come `/InkList`).
-const CHIAVI_COORDINATE: [&[u8]; 6] = [b"Rect", b"QuadPoints", b"InkList", b"Vertices", b"L", b"CL"];
+const CHIAVI_COORDINATE: [&[u8]; 6] =
+    [b"Rect", b"QuadPoints", b"InkList", b"Vertices", b"L", b"CL"];
 
 /// Porta le coordinate delle annotazioni nello spazio scalato: stessa matrice
 /// del contenuto, cioè `(v - origine) * scala`. Il `/AP` si adatta da solo al
@@ -750,7 +772,11 @@ pub fn componi_nesting(
             Ok(Some((sorgente, misure))) => {
                 for (pagina, (l, a)) in misure.iter().enumerate() {
                     for copia in 0..d.copie.max(1) {
-                        pezzi.push(Pezzo { id: (d.id, pagina, copia), l: *l, a: *a });
+                        pezzi.push(Pezzo {
+                            id: (d.id, pagina, copia),
+                            l: *l,
+                            a: *a,
+                        });
                     }
                 }
                 sorgenti.push(sorgente);
@@ -766,7 +792,10 @@ pub fn componi_nesting(
     loop {
         let fuori: Vec<u64> = pezzi
             .iter()
-            .filter(|p| inclusi.contains(&p.id.0) && !nesting::entra(p, larghezza, nesting.ruota, nesting::ALTEZZA_MAX_MM))
+            .filter(|p| {
+                inclusi.contains(&p.id.0)
+                    && !nesting::entra(p, larghezza, nesting.ruota, nesting::ALTEZZA_MAX_MM)
+            })
             .map(|p| p.id.0)
             .collect();
         if fuori.is_empty() {
@@ -775,7 +804,11 @@ pub fn componi_nesting(
         inclusi.retain(|id| !fuori.contains(id));
         esclusi.extend(fuori);
     }
-    let attivi: Vec<Pezzo> = pezzi.iter().filter(|p| inclusi.contains(&p.id.0)).copied().collect();
+    let attivi: Vec<Pezzo> = pezzi
+        .iter()
+        .filter(|p| inclusi.contains(&p.id.0))
+        .copied()
+        .collect();
     let fogli = nesting::disponi(
         &attivi,
         larghezza,
@@ -783,8 +816,10 @@ pub fn componi_nesting(
         nesting.ruota,
         nesting::ALTEZZA_MAX_MM,
     );
-    let inclusi_sorgenti: Vec<Sorgente> =
-        sorgenti.into_iter().filter(|s| inclusi.contains(&s.id)).collect();
+    let inclusi_sorgenti: Vec<Sorgente> = sorgenti
+        .into_iter()
+        .filter(|s| inclusi.contains(&s.id))
+        .collect();
     let composti = nesting::componi(&fogli, &inclusi_sorgenti, larghezza)?;
 
     let mut pronti = Vec::new();
@@ -794,11 +829,19 @@ pub fn componi_nesting(
         let mut ids: Vec<u64> = foglio.posti.iter().map(|p| p.id.0).collect();
         ids.sort_unstable();
         ids.dedup();
-        pronti.push(FoglioPronto { file, documenti: ids });
+        pronti.push(FoglioPronto {
+            file,
+            documenti: ids,
+        });
     }
     esclusi.sort_unstable();
     esclusi.dedup();
-    Ok(Annidamento { fogli: pronti, pezzi: attivi.len(), documenti: inclusi.len(), esclusi })
+    Ok(Annidamento {
+        fogli: pronti,
+        pezzi: attivi.len(),
+        documenti: inclusi.len(),
+        esclusi,
+    })
 }
 
 /// Criterio condiviso da anteprima e composizione: la ricomposizione raster
@@ -831,7 +874,9 @@ fn sorgente_nesting(d: &DaAnnidare) -> Result<Option<DocumentoNesting>> {
                     None => originali,
                 }
             };
-            let Ok(doc) = Document::load_mem(&dati) else { return Ok(None) };
+            let Ok(doc) = Document::load_mem(&dati) else {
+                return Ok(None);
+            };
             if doc.is_encrypted() {
                 return Ok(None);
             }
@@ -840,10 +885,14 @@ fn sorgente_nesting(d: &DaAnnidare) -> Result<Option<DocumentoNesting>> {
                 .into_values()
                 .map(|id| {
                     let (_, ruota) = file::box_e_rotazione(&doc, id)?;
-                    (ruota % 90 == 0).then(|| file::dimensioni_pagina_mm(&doc, id)).flatten()
+                    (ruota % 90 == 0)
+                        .then(|| file::dimensioni_pagina_mm(&doc, id))
+                        .flatten()
                 })
                 .collect();
-            let Some(misure) = misure else { return Ok(None) };
+            let Some(misure) = misure else {
+                return Ok(None);
+            };
             let sorgente = Sorgente {
                 id: d.id,
                 contenuto: Contenuto::Pdf(dati),
@@ -884,7 +933,11 @@ fn sorgente_nesting(d: &DaAnnidare) -> Result<Option<DocumentoNesting>> {
                     }
                 }
             };
-            let sorgente = Sorgente { id: d.id, contenuto, misure: vec![misura] };
+            let sorgente = Sorgente {
+                id: d.id,
+                contenuto,
+                misure: vec![misura],
+            };
             Ok(Some((sorgente, vec![misura])))
         }
         Formato::PostScript | Formato::Hpgl2 => Ok(None),
@@ -913,7 +966,9 @@ fn prepara_immagine(
     // Il percorso DPI dei TIFF applica la stessa risoluzione a tutti gli IFD:
     // adattare dalla sola prima pagina potrebbe lasciare le altre fuori foglio.
     if lav.area_foglio_mm.is_some() && formato == Formato::Tiff && tiff_multipagina(percorso)? {
-        bail!("TIFF multipagina: adattamento al foglio non supportato; separa le pagine o disattiva l'adattamento");
+        bail!(
+            "TIFF multipagina: adattamento al foglio non supportato; separa le pagine o disattiva l'adattamento"
+        );
     }
     let dpi = file::dpi_immagine(percorso, formato);
     let dimensioni = imagesize::size(percorso).context("dimensioni dell'immagine")?;
@@ -951,7 +1006,9 @@ fn prepara_immagine(
     // multipagina prima di decodificare o produrre un file incompleto.
     // Il percorso dei soli DPI qui sopra conserva invece tutte le pagine.
     if formato == Formato::Tiff && tiff_multipagina(percorso)? {
-        bail!("TIFF multipagina: cornice e ricomposizione raster non supportate; nessuna pagina elaborata");
+        bail!(
+            "TIFF multipagina: cornice e ricomposizione raster non supportate; nessuna pagina elaborata"
+        );
     }
 
     let immagine = png::su_bianco(png::decodifica(percorso)?);
@@ -1186,36 +1243,68 @@ mod test {
     #[test]
     fn adatta_foglio_pdf_misto_senza_ingrandire() {
         let (mut doc, prima) = pagina(&pdf_a4_con_annotazione());
-        let parent = doc.get_dictionary(prima).unwrap().get(b"Parent").unwrap().as_reference().unwrap();
+        let parent = doc
+            .get_dictionary(prima)
+            .unwrap()
+            .get(b"Parent")
+            .unwrap()
+            .as_reference()
+            .unwrap();
         let mut orizzontale = doc.get_dictionary(prima).unwrap().clone();
         orizzontale.set("Rotate", 90);
         orizzontale.remove(b"Annots");
         let seconda = doc.add_object(orizzontale);
         let mut piccola = doc.get_dictionary(prima).unwrap().clone();
-        piccola.set("MediaBox", vec![Object::Real(0.0), 0.0.into(), (100.0 * MM_PT).into(), (120.0 * MM_PT).into()]);
+        piccola.set(
+            "MediaBox",
+            vec![
+                Object::Real(0.0),
+                0.0.into(),
+                (100.0 * MM_PT).into(),
+                (120.0 * MM_PT).into(),
+            ],
+        );
         piccola.remove(b"Annots");
         let terza = doc.add_object(piccola);
         let parent = doc.get_dictionary_mut(parent).unwrap();
-        parent.set("Kids", vec![Object::Reference(prima), seconda.into(), terza.into()]);
+        parent.set(
+            "Kids",
+            vec![Object::Reference(prima), seconda.into(), terza.into()],
+        );
         parent.set("Count", 3);
         let mut dati = Vec::new();
         doc.save_to(&mut dati).unwrap();
-        let lav = Lavorazione { area_foglio_mm: Some(crate::foglio::Foglio::default().area_utile()), ..Default::default() };
+        let lav = Lavorazione {
+            area_foglio_mm: Some(crate::foglio::Foglio::default().area_utile()),
+            ..Default::default()
+        };
         let composto = componi_pdf(&dati, &lav, None).unwrap().unwrap();
         let doc = Document::load_mem(&composto.dati).unwrap();
-        let misure: Vec<_> = doc.get_pages().into_values().map(|id| file::dimensioni_pagina_mm(&doc, id).unwrap()).collect();
+        let misure: Vec<_> = doc
+            .get_pages()
+            .into_values()
+            .map(|id| file::dimensioni_pagina_mm(&doc, id).unwrap())
+            .collect();
         assert!((misure[0].1 - 275.0).abs() < 0.01);
         assert!((misure[1].0 - 275.0).abs() < 0.01);
         assert!((misure[0].0 / misure[0].1 - 210.0 / 297.0).abs() < 0.001);
         assert!((misure[2].0 - 100.0).abs() < 0.01 && (misure[2].1 - 120.0).abs() < 0.01);
-        assert!(misure.iter().all(|&m| crate::foglio::Foglio::default().entra(m)));
+        assert!(
+            misure
+                .iter()
+                .all(|&m| crate::foglio::Foglio::default().entra(m))
+        );
         for id in [prima, seconda] {
             let m = matrice_di_scala(&doc, id);
             assert!((m[0] - 275.0 / 297.0).abs() < 0.001 && (m[3] - m[0]).abs() < 0.001);
         }
         assert_eq!(composto.fattori_scala[2], (1.0, 1.0));
         // Disattivando l'adattamento si mantiene il file e la scala originali.
-        assert!(componi_pdf(&dati, &Lavorazione::default(), None).unwrap().is_none());
+        assert!(
+            componi_pdf(&dati, &Lavorazione::default(), None)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1225,12 +1314,17 @@ mod test {
             cornice: Some(Cornice::default()),
             area_foglio_mm: Some((200.0, 275.0)),
         };
-        let composto = componi_pdf(&pdf_a4_con_annotazione(), &lav, None).unwrap().unwrap();
+        let composto = componi_pdf(&pdf_a4_con_annotazione(), &lav, None)
+            .unwrap()
+            .unwrap();
         let (doc, id) = pagina(&composto.dati);
         let (l, a) = file::dimensioni_pagina_mm(&doc, id).unwrap();
         assert!((a - 275.0).abs() < 0.01 && l <= 200.01, "{l} × {a}");
         assert!(lav.riduzione_foglio(210.0, 297.0) < 0.5);
-        let piccola = Lavorazione { scala: Scala::Percentuale { x: 50.0, y: 50.0 }, ..lav };
+        let piccola = Lavorazione {
+            scala: Scala::Percentuale { x: 50.0, y: 50.0 },
+            ..lav
+        };
         assert_eq!(piccola.fattori(210.0, 297.0), (0.5, 0.5));
     }
 
@@ -1273,21 +1367,37 @@ mod test {
         let ruotato = FileTemporaneo::nuovo("pdf");
         let alto = FileTemporaneo::nuovo("pdf");
         let jpeg = FileTemporaneo::nuovo("jpg");
-        std::fs::write(buono.percorso(), impagina::test::pdf(pt(210.0), pt(297.0), (0.0, 0.0), 90)).unwrap();
-        std::fs::write(ruotato.percorso(), impagina::test::pdf(pt(210.0), pt(297.0), (0.0, 0.0), 45)).unwrap();
-        std::fs::write(alto.percorso(), impagina::test::pdf(pt(100.0), pt(6000.0), (0.0, 0.0), 0)).unwrap();
+        std::fs::write(
+            buono.percorso(),
+            impagina::test::pdf(pt(210.0), pt(297.0), (0.0, 0.0), 90),
+        )
+        .unwrap();
+        std::fs::write(
+            ruotato.percorso(),
+            impagina::test::pdf(pt(210.0), pt(297.0), (0.0, 0.0), 45),
+        )
+        .unwrap();
+        std::fs::write(
+            alto.percorso(),
+            impagina::test::pdf(pt(100.0), pt(6000.0), (0.0, 0.0), 0),
+        )
+        .unwrap();
         // imagesize accetta la larghezza zero; il parser del nesting la rifiuta.
         let mut dati_jpeg = vec![0xff, 0xd8, 0xff, 0xc0, 0, 8, 8, 0, 30, 0, 0, 3];
         dati_jpeg.resize(32, 0);
         std::fs::write(jpeg.percorso(), dati_jpeg).unwrap();
         assert_eq!(imagesize::size(jpeg.percorso()).unwrap().width, 0);
-        let documenti: Vec<_> = [&buono, &ruotato, &alto, &jpeg].iter().enumerate().map(|(i, f)| DaAnnidare {
-            id: i as u64,
-            percorso: f.percorso().to_path_buf(),
-            formato: if i == 3 { Formato::Jpeg } else { Formato::Pdf },
-            lavorazione: Lavorazione::default(),
-            copie: 2,
-        }).collect();
+        let documenti: Vec<_> = [&buono, &ruotato, &alto, &jpeg]
+            .iter()
+            .enumerate()
+            .map(|(i, f)| DaAnnidare {
+                id: i as u64,
+                percorso: f.percorso().to_path_buf(),
+                formato: if i == 3 { Formato::Jpeg } else { Formato::Pdf },
+                lavorazione: Lavorazione::default(),
+                copie: 2,
+            })
+            .collect();
         let esito = componi_nesting(&documenti, 914.0, 5.0, &Nesting::default()).unwrap();
         assert_eq!(esito.esclusi, vec![1, 2, 3]);
         assert_eq!(esito.documenti, 1);
@@ -1301,18 +1411,45 @@ mod test {
             for ruota in [0, 90, 180, 270] {
                 for scala in [
                     Scala::Formato(FormatoIso::A4),
-                    Scala::Misura { larghezza_mm: 300.0, altezza_mm: 400.0, proporzioni: false },
+                    Scala::Misura {
+                        larghezza_mm: 300.0,
+                        altezza_mm: 400.0,
+                        proporzioni: false,
+                    },
                     Scala::Percentuale { x: 150.0, y: 200.0 },
                 ] {
-                    let (mut doc, id) = pagina(&impagina::test::pdf(pt(210.0), pt(297.0), (0.0, 0.0), ruota));
+                    let (mut doc, id) = pagina(&impagina::test::pdf(
+                        pt(210.0),
+                        pt(297.0),
+                        (0.0, 0.0),
+                        ruota,
+                    ));
                     let riferimento = doc.add_object(Object::Real(unita));
-                    doc.get_dictionary_mut(id).unwrap().set("UserUnit", riferimento);
+                    doc.get_dictionary_mut(id)
+                        .unwrap()
+                        .set("UserUnit", riferimento);
                     let (l, a) = file::dimensioni_pagina_mm(&doc, id).unwrap();
                     let (sx, sy) = fattori(&scala, l, a);
-                    assert!(applica_scala_pagina(&mut doc, id, &Lavorazione { scala, ..Default::default() }).unwrap());
+                    assert!(
+                        applica_scala_pagina(
+                            &mut doc,
+                            id,
+                            &Lavorazione {
+                                scala,
+                                ..Default::default()
+                            }
+                        )
+                        .unwrap()
+                    );
                     let (uscita_l, uscita_a) = file::dimensioni_pagina_mm(&doc, id).unwrap();
-                    assert!((uscita_l - l * sx).abs() < 0.001, "{unita} {ruota} {scala:?}");
-                    assert!((uscita_a - a * sy).abs() < 0.001, "{unita} {ruota} {scala:?}");
+                    assert!(
+                        (uscita_l - l * sx).abs() < 0.001,
+                        "{unita} {ruota} {scala:?}"
+                    );
+                    assert!(
+                        (uscita_a - a * sy).abs() < 0.001,
+                        "{unita} {ruota} {scala:?}"
+                    );
                 }
             }
         }
@@ -1399,8 +1536,12 @@ mod test {
         assert!((rect[0] - 10.0 * s).abs() < 0.01, "{rect:?}");
         assert!((rect[1] - 20.0 * s).abs() < 0.01, "{rect:?}");
         assert!((rect[2] - 110.0 * s).abs() < 0.01, "{rect:?}");
-        assert!((rect[3] - 70.0 * s).abs() < 0.01, "{rect:?}");        let quad = annot.get(b"QuadPoints").unwrap().as_array().unwrap();
-        assert!((numero_o(&quad[1]).unwrap() - 70.0 * s).abs() < 0.01, "{quad:?}");
+        assert!((rect[3] - 70.0 * s).abs() < 0.01, "{rect:?}");
+        let quad = annot.get(b"QuadPoints").unwrap().as_array().unwrap();
+        assert!(
+            (numero_o(&quad[1]).unwrap() - 70.0 * s).abs() < 0.01,
+            "{quad:?}"
+        );
     }
 
     /// Verifica che le annotazioni Ink seguano la traslazione dell’origine
@@ -1431,10 +1572,7 @@ mod test {
         let composto = componi_pdf(
             &dati,
             &Lavorazione {
-                scala: Scala::Percentuale {
-                    x: 200.0,
-                    y: 200.0,
-                },
+                scala: Scala::Percentuale { x: 200.0, y: 200.0 },
                 ..Default::default()
             },
             None,
@@ -1442,15 +1580,28 @@ mod test {
         .unwrap()
         .unwrap();
         let (doc, id) = pagina(&composto.dati);
-        let annot = doc.get_dictionary(id).unwrap().get(b"Annots").unwrap().as_array().unwrap()[0]
+        let annot = doc
+            .get_dictionary(id)
+            .unwrap()
+            .get(b"Annots")
+            .unwrap()
+            .as_array()
+            .unwrap()[0]
             .as_reference()
             .unwrap();
         let annot = doc.get_dictionary(annot).unwrap();
         let numeri = |o: &Object| -> Vec<f64> {
-            o.as_array().unwrap().iter().map(|o| numero_o(o).unwrap()).collect()
+            o.as_array()
+                .unwrap()
+                .iter()
+                .map(|o| numero_o(o).unwrap())
+                .collect()
         };
         // (v - origine) * 2: il rettangolo di contenuto diventa 0..200 × 0..100.
-        assert_eq!(numeri(annot.get(b"Rect").unwrap()), [0.0, 0.0, 200.0, 100.0]);
+        assert_eq!(
+            numeri(annot.get(b"Rect").unwrap()),
+            [0.0, 0.0, 200.0, 100.0]
+        );
         let ink = annot.get(b"InkList").unwrap().as_array().unwrap();
         assert_eq!(numeri(&ink[0]), [0.0, 0.0, 200.0, 100.0]);
         assert_eq!(numeri(&ink[1]), [100.0, 20.0]);
@@ -1465,10 +1616,7 @@ mod test {
         let composto = componi_pdf(
             &dati,
             &Lavorazione {
-                scala: Scala::Percentuale {
-                    x: 50.0,
-                    y: 50.0,
-                },
+                scala: Scala::Percentuale { x: 50.0, y: 50.0 },
                 ..Default::default()
             },
             None,
@@ -1479,7 +1627,10 @@ mod test {
         let ([x0, y0, _, _], _) = file::box_e_rotazione(&doc, id).unwrap();
         assert!(x0.abs() < 0.01 && y0.abs() < 0.01, "{x0} {y0}");
         let m = matrice_di_scala(&doc, id);
-        assert!((m[4] + 25.0).abs() < 1e-4 && (m[5] + 15.0).abs() < 1e-4, "{m:?}");
+        assert!(
+            (m[4] + 25.0).abs() < 1e-4 && (m[5] + 15.0).abs() < 1e-4,
+            "{m:?}"
+        );
     }
 
     /// Verifica che su una pagina ruotata di 90 gradi i fattori visivi di scala
@@ -1511,7 +1662,10 @@ mod test {
         assert!((x1 - pt(210.0) * 0.25).abs() < 0.01, "{x1}");
         assert!((y1 - pt(297.0) * 0.5).abs() < 0.01, "{y1}");
         let m = matrice_di_scala(&doc, id);
-        assert!((m[0] - 0.25).abs() < 1e-5 && (m[3] - 0.5).abs() < 1e-5, "{m:?}");
+        assert!(
+            (m[0] - 0.25).abs() < 1e-5 && (m[3] - 0.5).abs() < 1e-5,
+            "{m:?}"
+        );
     }
 
     /// Verifica che il Form XObject usato per la scala conservi le risorse
@@ -1528,14 +1682,24 @@ mod test {
         doc.save_to(&mut dati).unwrap();
         let composto = componi_pdf(
             &dati,
-            &Lavorazione { scala: Scala::Percentuale { x: 50.0, y: 50.0 }, ..Default::default() },
+            &Lavorazione {
+                scala: Scala::Percentuale { x: 50.0, y: 50.0 },
+                ..Default::default()
+            },
             None,
         )
         .unwrap()
         .unwrap();
         let (doc, id) = pagina(&composto.dati);
         let form = form_di_scala(&doc, id);
-        assert!(form.dict.get(b"Resources").unwrap().as_dict().unwrap().has(b"Pattern"));
+        assert!(
+            form.dict
+                .get(b"Resources")
+                .unwrap()
+                .as_dict()
+                .unwrap()
+                .has(b"Pattern")
+        );
     }
 
     /// Verifica che la scala usi il CropBox visibile anziché l’intero MediaBox.
@@ -1547,20 +1711,34 @@ mod test {
         let id = *doc.get_pages().values().next().unwrap();
         let (l, a) = (pt(210.0), pt(297.0));
         let dizionario = doc.get_dictionary_mut(id).unwrap();
-        dizionario.set("MediaBox", vec![(-pt(3.0)).into(), (-pt(3.0)).into(), (l + pt(3.0)).into(), (a + pt(3.0)).into()]);
+        dizionario.set(
+            "MediaBox",
+            vec![
+                (-pt(3.0)).into(),
+                (-pt(3.0)).into(),
+                (l + pt(3.0)).into(),
+                (a + pt(3.0)).into(),
+            ],
+        );
         dizionario.set("CropBox", vec![0.into(), 0.into(), l.into(), a.into()]);
         let mut dati = Vec::new();
         doc.save_to(&mut dati).unwrap();
         let composto = componi_pdf(
             &dati,
-            &Lavorazione { scala: Scala::Percentuale { x: 50.0, y: 50.0 }, ..Default::default() },
+            &Lavorazione {
+                scala: Scala::Percentuale { x: 50.0, y: 50.0 },
+                ..Default::default()
+            },
             None,
         )
         .unwrap()
         .unwrap();
         let (doc, id) = pagina(&composto.dati);
         let ([_, _, x1, y1], _) = file::box_e_rotazione(&doc, id).unwrap();
-        assert!((x1 - l * 0.5).abs() < 0.01 && (y1 - a * 0.5).abs() < 0.01, "{x1} {y1}");
+        assert!(
+            (x1 - l * 0.5).abs() < 0.01 && (y1 - a * 0.5).abs() < 0.01,
+            "{x1} {y1}"
+        );
     }
 
     /// Una scala che non cambia niente non deve far riscrivere il PDF da lopdf:
@@ -1571,11 +1749,22 @@ mod test {
         let id = *doc.get_pages().values().next().unwrap();
         let (l, a) = (pt(210.0), pt(297.0));
         let dizionario = doc.get_dictionary_mut(id).unwrap();
-        dizionario.set("MediaBox", vec![(-pt(3.0)).into(), (-pt(3.0)).into(), (l + pt(3.0)).into(), (a + pt(3.0)).into()]);
+        dizionario.set(
+            "MediaBox",
+            vec![
+                (-pt(3.0)).into(),
+                (-pt(3.0)).into(),
+                (l + pt(3.0)).into(),
+                (a + pt(3.0)).into(),
+            ],
+        );
         dizionario.set("CropBox", vec![0.into(), 0.into(), l.into(), a.into()]);
         let mut dati = Vec::new();
         doc.save_to(&mut dati).unwrap();
-        let lav = Lavorazione { scala: Scala::Formato(FormatoIso::A4), ..Default::default() };
+        let lav = Lavorazione {
+            scala: Scala::Formato(FormatoIso::A4),
+            ..Default::default()
+        };
         assert!(!lav.nulla());
         let composto = componi_pdf(&dati, &lav, None).unwrap().unwrap();
         assert_eq!(composto.dati.len(), dati.len());
@@ -1586,7 +1775,10 @@ mod test {
     /// quando non sono richieste altre lavorazioni.
     #[test]
     fn cento_percento_e_come_l_originale() {
-        let lav = Lavorazione { scala: Scala::Percentuale { x: 100.0, y: 100.0 }, ..Default::default() };
+        let lav = Lavorazione {
+            scala: Scala::Percentuale { x: 100.0, y: 100.0 },
+            ..Default::default()
+        };
         assert!(lav.nulla());
         // Un PDF illeggibile non fallisce se la scala non cambia niente.
         assert!(componi_pdf(b"non e un pdf", &lav, None).unwrap().is_none());
@@ -1594,12 +1786,27 @@ mod test {
 
     #[test]
     fn limiti_della_scala() {
-        let grande = Scala::Misura { larghezza_mm: 5000.0, altezza_mm: 7000.0, proporzioni: true };
+        let grande = Scala::Misura {
+            larghezza_mm: 5000.0,
+            altezza_mm: 7000.0,
+            proporzioni: true,
+        };
         assert!(fuori_limiti(&grande, 210.0, 297.0));
         assert!(!fuori_limiti(&Scala::Formato(FormatoIso::A3), 210.0, 297.0));
-        assert!(!fuori_limiti(&Scala::Percentuale { x: 1000.0, y: 1000.0 }, 210.0, 297.0));
+        assert!(!fuori_limiti(
+            &Scala::Percentuale {
+                x: 1000.0,
+                y: 1000.0
+            },
+            210.0,
+            297.0
+        ));
         let ((min_l, _), (max_l, max_a)) = limiti_mm(210.0, 297.0);
-        assert!((min_l - 2.1).abs() < 1e-9 && (max_l - 2100.0).abs() < 1e-9 && (max_a - 2970.0).abs() < 1e-9);
+        assert!(
+            (min_l - 2.1).abs() < 1e-9
+                && (max_l - 2100.0).abs() < 1e-9
+                && (max_a - 2970.0).abs() < 1e-9
+        );
     }
 
     /// Verifica che una pagina senza MediaBox sia saltata senza errori
@@ -1664,7 +1871,8 @@ mod test {
         for pagina in 0..pagine {
             let mut img = encoder.new_image::<colortype::RGB8>(100, 50).unwrap();
             img.resolution(tiff::tags::ResolutionUnit::Inch, Rational { n: 100, d: 1 });
-            img.write_data(&vec![20 + pagina as u8; 100 * 50 * 3]).unwrap();
+            img.write_data(&vec![20 + pagina as u8; 100 * 50 * 3])
+                .unwrap();
         }
         p
     }
@@ -1672,8 +1880,14 @@ mod test {
     #[test]
     fn adatta_foglio_immagini_cambia_i_dpi_senza_ricampionare() {
         let dir = cartella("adatta-foglio");
-        let lav = Lavorazione { area_foglio_mm: Some((8.0, 20.0)), ..Default::default() };
-        for (percorso, formato) in [(png_100dpi(&dir), Formato::Png), (tiff_100dpi(&dir, 1), Formato::Tiff)] {
+        let lav = Lavorazione {
+            area_foglio_mm: Some((8.0, 20.0)),
+            ..Default::default()
+        };
+        for (percorso, formato) in [
+            (png_100dpi(&dir), Formato::Png),
+            (tiff_100dpi(&dir, 1), Formato::Tiff),
+        ] {
             let (tmp, uscita) = prepara(&percorso, formato, &lav, None).unwrap().unwrap();
             let originale = image::open(&percorso).unwrap().to_rgb8();
             assert_eq!(image::open(tmp.percorso()).unwrap().to_rgb8(), originale);
@@ -1684,7 +1898,11 @@ mod test {
         }
         let multi = tiff_100dpi(&dir, 2);
         let errore = prepara(&multi, Formato::Tiff, &lav, None).err().unwrap();
-        assert!(errore.to_string().contains("adattamento al foglio non supportato"));
+        assert!(
+            errore
+                .to_string()
+                .contains("adattamento al foglio non supportato")
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1693,7 +1911,10 @@ mod test {
         for pagine in [1, 2] {
             let dir = cartella(&format!("nesting-tiff-{pagine}"));
             let percorso = tiff_100dpi(&dir, pagine);
-            assert_eq!(annidabile_file(&percorso, Formato::Tiff).unwrap(), pagine == 1);
+            assert_eq!(
+                annidabile_file(&percorso, Formato::Tiff).unwrap(),
+                pagine == 1
+            );
             let documento = DaAnnidare {
                 id: 1,
                 percorso,
@@ -1724,10 +1945,18 @@ mod test {
                     if cornice.is_none() && allineamento.is_none() {
                         continue;
                     }
-                    let lav = Lavorazione { scala, cornice, ..Default::default() };
+                    let lav = Lavorazione {
+                        scala,
+                        cornice,
+                        ..Default::default()
+                    };
                     let errore = prepara(&p, Formato::Tiff, &lav, allineamento)
-                        .err().expect("non deve produrre un TIFF con una sola pagina");
-                    assert!(errore.to_string().contains("TIFF multipagina"), "{errore:#}");
+                        .err()
+                        .expect("non deve produrre un TIFF con una sola pagina");
+                    assert!(
+                        errore.to_string().contains("TIFF multipagina"),
+                        "{errore:#}"
+                    );
                 }
             }
         }
@@ -1739,7 +1968,11 @@ mod test {
     fn tiff_multipagina_originale_e_sola_scala_conservano_le_pagine() {
         let dir = cartella("multipagina-scala");
         let p = tiff_100dpi(&dir, 2);
-        assert!(prepara(&p, Formato::Tiff, &Lavorazione::default(), None).unwrap().is_none());
+        assert!(
+            prepara(&p, Formato::Tiff, &Lavorazione::default(), None)
+                .unwrap()
+                .is_none()
+        );
         let lav = Lavorazione {
             scala: Scala::Percentuale { x: 200.0, y: 200.0 },
             ..Default::default()
@@ -1773,7 +2006,10 @@ mod test {
     fn tiff_singola_pagina_con_cornice_conserva_contenuto_e_dpi() {
         let dir = cartella("tiff-cornice");
         let p = tiff_100dpi(&dir, 1);
-        let lav = Lavorazione { cornice: Some(Cornice::default()), ..Default::default() };
+        let lav = Lavorazione {
+            cornice: Some(Cornice::default()),
+            ..Default::default()
+        };
         let (tmp, formato) = prepara(&p, Formato::Tiff, &lav, None).unwrap().unwrap();
         assert_eq!(formato, Formato::Tiff);
         let letta = image::open(tmp.percorso()).unwrap().to_rgb8();
@@ -1782,7 +2018,11 @@ mod test {
         assert_eq!(letta.get_pixel(12, 30).0, [255, 255, 255]);
         assert_eq!(letta.get_pixel(23, 23).0, [20, 20, 20]);
         assert_eq!(dpi_tiff(tmp.percorso()), (100.0, 100.0));
-        assert!(!Decoder::new(std::fs::File::open(tmp.percorso()).unwrap()).unwrap().more_images());
+        assert!(
+            !Decoder::new(std::fs::File::open(tmp.percorso()).unwrap())
+                .unwrap()
+                .more_images()
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1866,17 +2106,67 @@ mod test {
     fn la_pagina_cambia_solo_se_la_scala_la_tocca() {
         let doc = Document::load_mem(&pdf_a4_con_annotazione()).unwrap();
         let id = *doc.get_pages().values().next().unwrap();
-        assert!(scala_pagina(&doc, id, &Lavorazione { scala: Scala::Formato(FormatoIso::A4), ..Default::default() }).is_none());
-        assert!(scala_pagina(&doc, id, &Lavorazione { scala: Scala::Percentuale { x: 100.0, y: 100.0 }, ..Default::default() }).is_none());
-        assert!(scala_pagina(&doc, id, &Lavorazione { scala: Scala::Formato(FormatoIso::A3), ..Default::default() }).is_some());
-        assert!(scala_pagina(&doc, id, &Lavorazione { scala: Scala::Percentuale { x: 50.0, y: 50.0 }, ..Default::default() }).is_some());
+        assert!(
+            scala_pagina(
+                &doc,
+                id,
+                &Lavorazione {
+                    scala: Scala::Formato(FormatoIso::A4),
+                    ..Default::default()
+                }
+            )
+            .is_none()
+        );
+        assert!(
+            scala_pagina(
+                &doc,
+                id,
+                &Lavorazione {
+                    scala: Scala::Percentuale { x: 100.0, y: 100.0 },
+                    ..Default::default()
+                }
+            )
+            .is_none()
+        );
+        assert!(
+            scala_pagina(
+                &doc,
+                id,
+                &Lavorazione {
+                    scala: Scala::Formato(FormatoIso::A3),
+                    ..Default::default()
+                }
+            )
+            .is_some()
+        );
+        assert!(
+            scala_pagina(
+                &doc,
+                id,
+                &Lavorazione {
+                    scala: Scala::Percentuale { x: 50.0, y: 50.0 },
+                    ..Default::default()
+                }
+            )
+            .is_some()
+        );
 
         // Le misure "vere" di un A4 in punti (595,28 × 841,89) non sono un
         // cambio: la tolleranza assorbe i millesimi di millimetro.
         let dati = impagina::test::pdf(595.28, 841.89, (0.0, 0.0), 0);
         let doc = Document::load_mem(&dati).unwrap();
         let id = *doc.get_pages().values().next().unwrap();
-        assert!(scala_pagina(&doc, id, &Lavorazione { scala: Scala::Formato(FormatoIso::A4), ..Default::default() }).is_none());
+        assert!(
+            scala_pagina(
+                &doc,
+                id,
+                &Lavorazione {
+                    scala: Scala::Formato(FormatoIso::A4),
+                    ..Default::default()
+                }
+            )
+            .is_none()
+        );
     }
 
     /// Verifica che la sola scala di un JPEG aggiorni i DPI nei metadati
@@ -1908,7 +2198,7 @@ mod test {
     /// aggiornando soltanto la risoluzione.
     #[test]
     fn tiff_cmyk_con_sola_scala_resta_cmyk() {
-        use tiff::decoder::{DecodingResult, Decoder as Lettore};
+        use tiff::decoder::{Decoder as Lettore, DecodingResult};
         use tiff::encoder::{Rational, TiffEncoder, colortype};
         let dir = cartella("cmyk");
         let p = dir.join("cmyk.tif");
@@ -2026,7 +2316,10 @@ mod test {
     /// e non lasci passare un PDF illeggibile.
     #[test]
     fn la_sola_cornice_non_e_nulla() {
-        let lav = Lavorazione { cornice: Some(Cornice::default()), ..Default::default() };
+        let lav = Lavorazione {
+            cornice: Some(Cornice::default()),
+            ..Default::default()
+        };
         assert!(!lav.nulla());
         // La cornice tocca le pagine: un PDF illeggibile non può partire com'è.
         assert!(componi_pdf(b"non e un pdf", &lav, None).is_err());
@@ -2040,7 +2333,10 @@ mod test {
         // lato, cioè 216,5 × 303,5 mm.
         let composto = componi_pdf(
             &pdf_a4_con_annotazione(),
-            &Lavorazione { cornice: Some(Cornice::default()), ..Default::default() },
+            &Lavorazione {
+                cornice: Some(Cornice::default()),
+                ..Default::default()
+            },
             None,
         )
         .unwrap()
@@ -2049,12 +2345,18 @@ mod test {
         let (x0, y0, x1, y1) = box_mm(&doc, id);
         assert!((x1 - x0 - 216.5).abs() < 0.01, "larghezza {x1} {x0}");
         assert!((y1 - y0 - 303.5).abs() < 0.01, "altezza {y1} {y0}");
-        assert!((x0 + 3.25).abs() < 0.01 && (y0 + 3.25).abs() < 0.01, "{x0} {y0}");
+        assert!(
+            (x0 + 3.25).abs() < 0.01 && (y0 + 3.25).abs() < 0.01,
+            "{x0} {y0}"
+        );
         let testo = String::from_utf8_lossy(&doc.get_page_content(id)).into_owned();
         // Il contenuto originale è intatto e la linea arriva dopo.
         assert!(testo.contains("re f"), "contenuto originale: {testo}");
         assert!(testo.contains("0 G"), "linea nera: {testo}");
-        assert!(testo.trim_end().ends_with("re S Q"), "linea in coda: {testo}");
+        assert!(
+            testo.trim_end().ends_with("re S Q"),
+            "linea in coda: {testo}"
+        );
     }
 
     /// Verifica misure fisiche costanti su pagine con UserUnit assente, 1, 10 e 0,5.
@@ -2084,10 +2386,19 @@ mod test {
                 assert!((delta * unita / MM_PT - 3.25).abs() < 0.001);
             }
             let contenuto = lopdf::content::Content::decode(&doc.get_page_content(id)).unwrap();
-            let spessore = contenuto.operations.iter().find(|op| op.operator == "w").unwrap();
+            let spessore = contenuto
+                .operations
+                .iter()
+                .find(|op| op.operator == "w")
+                .unwrap();
             let spessore = f64::from(spessore.operands[0].as_float().unwrap());
             assert!((spessore * unita / MM_PT - 0.25).abs() < 0.001);
-            let linea = contenuto.operations.iter().rev().find(|op| op.operator == "re").unwrap();
+            let linea = contenuto
+                .operations
+                .iter()
+                .rev()
+                .find(|op| op.operator == "re")
+                .unwrap();
             let x_linea = f64::from(linea.operands[0].as_float().unwrap());
             let distanza = (10.0 - x_linea - spessore / 2.0) * unita / MM_PT;
             assert!((distanza - 3.0).abs() < 0.001);
@@ -2113,7 +2424,9 @@ mod test {
                     .into()
             })
             .collect();
-        doc.get_dictionary_mut(id).unwrap().set("Contents", contenuti);
+        doc.get_dictionary_mut(id)
+            .unwrap()
+            .set("Contents", contenuti);
         applica_cornice(&mut doc, &Cornice::default()).unwrap();
         let contenuto = lopdf::content::Content::decode(&doc.get_page_content(id)).unwrap();
         let mut profondita = 0;
@@ -2144,7 +2457,10 @@ mod test {
     /// la cornice sia disegnata dopo aver rimosso quel clip.
     #[test]
     fn cornice_conserva_il_clip_visibile_prima_di_allargare_i_box() {
-        for crop in [None, Some(vec![20.into(), 30.into(), 190.into(), 280.into()])] {
+        for crop in [
+            None,
+            Some(vec![20.into(), 30.into(), 190.into(), 280.into()]),
+        ] {
             let dati = impagina::test::pdf(200.0, 300.0, (10.0, 20.0), 0);
             let (mut doc, id) = pagina(&dati);
             if let Some(crop) = crop {
@@ -2156,14 +2472,18 @@ mod test {
                 Dictionary::new(),
                 b"-100 -100 1000 1000 re f".to_vec(),
             ));
-            doc.get_dictionary_mut(id).unwrap().set("Contents", originale);
+            doc.get_dictionary_mut(id)
+                .unwrap()
+                .set("Contents", originale);
             applica_cornice(&mut doc, &Cornice::default()).unwrap();
             let contenuto = lopdf::content::Content::decode(&doc.get_page_content(id)).unwrap();
             let ops = &contenuto.operations;
             // Il clip usa il vecchio box nello spazio pagina, prima della grafica.
             assert_eq!(ops[0].operator, "q");
             assert_eq!(ops[1].operator, "re");
-            let rettangolo: Vec<f64> = ops[1].operands.iter()
+            let rettangolo: Vec<f64> = ops[1]
+                .operands
+                .iter()
                 .map(|v| f64::from(v.as_float().unwrap()))
                 .collect();
             assert_eq!(rettangolo, [x0, y0, x1 - x0, y1 - y0]);
@@ -2193,7 +2513,10 @@ mod test {
         };
         let composto = componi_pdf(
             &dati,
-            &Lavorazione { cornice: Some(Cornice::default()), ..Default::default() },
+            &Lavorazione {
+                cornice: Some(Cornice::default()),
+                ..Default::default()
+            },
             Some(&imp),
         )
         .unwrap()
@@ -2217,20 +2540,29 @@ mod test {
     fn cornice_sull_immagine_allarga_i_pixel_e_disegna_il_bordo() {
         let dir = cartella("cornice");
         let p = png_100dpi(&dir);
-        let lav = Lavorazione { cornice: Some(Cornice::default()), ..Default::default() };
+        let lav = Lavorazione {
+            cornice: Some(Cornice::default()),
+            ..Default::default()
+        };
         let (tiff, formato) = prepara(&p, Formato::Png, &lav, None).unwrap().unwrap();
         assert_eq!(formato, Formato::Tiff);
         let letta = image::open(tiff.percorso()).unwrap().to_rgb8();
         // 3,25 mm a 100 dpi, 13 px per lato.
         assert_eq!(letta.dimensions(), (100 + 2 * 13, 50 + 2 * 13));
         assert_eq!(letta.get_pixel(0, 0).0, [0, 0, 0]);
-        assert_eq!(letta.get_pixel(100 + 2 * 13 - 1, 50 + 2 * 13 - 1).0, [0, 0, 0]);
+        assert_eq!(
+            letta.get_pixel(100 + 2 * 13 - 1, 50 + 2 * 13 - 1).0,
+            [0, 0, 0]
+        );
         // Contenuto al suo posto, con la distanza bianca attorno.
         assert_eq!(letta.get_pixel(13 + 10, 13 + 10).0, [20, 40, 60]);
         assert_eq!(letta.get_pixel(12, 30).0, [255, 255, 255]);
         assert_eq!(letta.get_pixel(60, 12).0, [255, 255, 255]);
         let (dx, dy) = dpi_tiff(tiff.percorso());
-        assert!((dx - 100.0).abs() < 0.1 && (dy - 100.0).abs() < 0.1, "{dx} {dy}");
+        assert!(
+            (dx - 100.0).abs() < 0.1 && (dy - 100.0).abs() < 0.1,
+            "{dx} {dy}"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

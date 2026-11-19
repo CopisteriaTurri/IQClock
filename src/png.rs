@@ -77,7 +77,9 @@ pub fn decodifica(percorso: &Path) -> Result<DynamicImage> {
     // Senza limiti: quelli di default di `image` (512 MiB) bocciano già un A0 a 300 dpi.
     let mut lettore = image::ImageReader::open(percorso)?.with_guessed_format()?;
     lettore.no_limits();
-    lettore.decode().with_context(|| format!("lettura di {}", percorso.display()))
+    lettore
+        .decode()
+        .with_context(|| format!("lettura di {}", percorso.display()))
 }
 
 /// Scrive un TIFF RGB 8 bit (LZW con predittore) in un file temporaneo, una
@@ -95,7 +97,8 @@ pub fn tiff_temporaneo(
 ) -> Result<FileTemporaneo> {
     let dest = FileTemporaneo::nuovo("tiff");
     let mut out = BufWriter::new(File::create(dest.percorso())?);
-    scrivi_tiff(&mut out, larghezza, altezza, (dpi_x, dpi_y), riga).context("scrittura del TIFF")?;
+    scrivi_tiff(&mut out, larghezza, altezza, (dpi_x, dpi_y), riga)
+        .context("scrittura del TIFF")?;
     out.flush()?;
     Ok(dest)
 }
@@ -152,7 +155,10 @@ fn scrivi_tiff<W: Write + Seek>(
     let (offset, conteggi) = if n_strisce == 1 {
         (offset_strisce[0], byte_strisce[0])
     } else {
-        (fuori(&lunghi(&offset_strisce)), fuori(&lunghi(&byte_strisce)))
+        (
+            fuori(&lunghi(&offset_strisce)),
+            fuori(&lunghi(&byte_strisce)),
+        )
     };
     if extra.len() % 2 == 1 {
         extra.push(0);
@@ -189,7 +195,11 @@ fn scrivi_tiff<W: Write + Seek>(
     }
     out.write_all(&0u32.to_le_bytes())?;
     out.seek(SeekFrom::Start(4))?;
-    out.write_all(&u32::try_from(directory).context("TIFF oltre 4 GB")?.to_le_bytes())?;
+    out.write_all(
+        &u32::try_from(directory)
+            .context("TIFF oltre 4 GB")?
+            .to_le_bytes(),
+    )?;
     Ok(())
 }
 
@@ -219,8 +229,8 @@ fn razionale(dpi: f64) -> Rational {
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
-    use std::path::PathBuf;
     use image::{ImageBuffer, Rgb, RgbImage, RgbaImage};
+    use std::path::PathBuf;
     use tiff::decoder::Decoder;
     use tiff::decoder::ifd::Value;
     use tiff::tags::Tag;
@@ -249,7 +259,11 @@ pub(crate) mod test {
         for &b in dati {
             c ^= b as u32;
             for _ in 0..8 {
-                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+                c = if c & 1 != 0 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
             }
         }
         !c
@@ -287,7 +301,10 @@ pub(crate) mod test {
         // 11811 px/m ≈ 300 dpi, 5906 ≈ 150 dpi.
         std::fs::write(&p, con_phys(&std::fs::read(&p).unwrap(), 11811)).unwrap();
         let (x, y) = dpi(&p).unwrap();
-        assert!((x - 300.0).abs() < 0.1 && (y - 300.0).abs() < 0.1, "{x} {y}");
+        assert!(
+            (x - 300.0).abs() < 0.1 && (y - 300.0).abs() < 0.1,
+            "{x} {y}"
+        );
 
         std::fs::write(&p, con_phys(&std::fs::read(&p).unwrap(), 5906)).unwrap();
         let (x, _) = dpi(&p).unwrap();
@@ -315,7 +332,9 @@ pub(crate) mod test {
     fn il_tiff_porta_i_dpi_del_png() {
         let dir = cartella("dpi");
         let p = dir.join("foto.png");
-        ImageBuffer::from_pixel(4, 2, Rgb([1u8, 2, 3])).save(&p).unwrap();
+        ImageBuffer::from_pixel(4, 2, Rgb([1u8, 2, 3]))
+            .save(&p)
+            .unwrap();
 
         // Senza pHYs: 300 dpi presunti.
         let tiff = png_a_tiff(&p).unwrap();
@@ -331,7 +350,10 @@ pub(crate) mod test {
         std::fs::write(&p, con_phys(&std::fs::read(&p).unwrap(), 5906)).unwrap();
         let tiff = png_a_tiff(&p).unwrap();
         let (x, y) = dpi_scritti(tiff.percorso());
-        assert!((x - 150.0).abs() < 0.1 && (y - 150.0).abs() < 0.1, "{x} {y}");
+        assert!(
+            (x - 150.0).abs() < 0.1 && (y - 150.0).abs() < 0.1,
+            "{x} {y}"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -340,7 +362,9 @@ pub(crate) mod test {
         // 3 strisce (64 + 64 + 2 righe) con pixel tutti diversi: verifica
         // predittore, LZW e tabella delle strisce.
         let (l, a) = (37, 130);
-        let img = RgbImage::from_fn(l, a, |x, y| Rgb([(x * 7 + y) as u8, (y * 3) as u8, (x ^ y) as u8]));
+        let img = RgbImage::from_fn(l, a, |x, y| {
+            Rgb([(x * 7 + y) as u8, (y * 3) as u8, (x ^ y) as u8])
+        });
         let tiff = tiff_temporaneo(l, a, (200.0, 100.0), |y, out| {
             let byte = l as usize * 3;
             out.copy_from_slice(&img.as_raw()[y as usize * byte..(y as usize + 1) * byte]);
@@ -349,6 +373,9 @@ pub(crate) mod test {
         let letta = image::open(tiff.percorso()).unwrap().to_rgb8();
         assert!(letta == img, "pixel diversi dopo la rilettura");
         let (x, y) = dpi_scritti(tiff.percorso());
-        assert!((x - 200.0).abs() < 0.01 && (y - 100.0).abs() < 0.01, "{x} {y}");
+        assert!(
+            (x - 200.0).abs() < 0.01 && (y - 100.0).abs() < 0.01,
+            "{x} {y}"
+        );
     }
 }

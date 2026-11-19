@@ -124,7 +124,9 @@ impl StatoStampante {
     /// Ingresso del foglio singolo (manuale), se la stampante lo dichiara:
     /// sulla T2600 si chiama `MANUAL_FEED`.
     pub fn manuale(&self) -> Option<&Ingresso> {
-        self.ingressi.iter().find(|i| nome_ingresso(&i.nome) == "MANUALFEED")
+        self.ingressi
+            .iter()
+            .find(|i| nome_ingresso(&i.nome) == "MANUALFEED")
     }
 
     /// Misure del foglio caricato nell'ingresso manuale, se la stampante le
@@ -223,12 +225,17 @@ fn colore_hp730(nome: &str) -> Option<&'static str> {
         ("P2V72A", "Grigio"),
         ("P2V73A", "Nero fotografico"),
     ];
-    CODICI.iter().find(|(c, _)| nome.contains(c)).map(|(_, n)| *n)
+    CODICI
+        .iter()
+        .find(|(c, _)| nome.contains(c))
+        .map(|(_, n)| *n)
 }
 
 /// L'ultimo arco dell'OID è l'indice della riga.
 fn per_indice(voci: Vec<(Vec<u32>, Valore)>) -> Vec<(u32, Valore)> {
-    voci.into_iter().filter_map(|(o, v)| Some((*o.last()?, v))).collect()
+    voci.into_iter()
+        .filter_map(|(o, v)| Some((*o.last()?, v)))
+        .collect()
 }
 
 pub fn leggi(host: &str) -> Result<StatoStampante> {
@@ -239,7 +246,11 @@ pub fn leggi_da(host: &str, porta: u16) -> Result<StatoStampante> {
     let mut c = Client::new_con_porta(host, porta, "public")?;
     let mut stato = StatoStampante::default();
 
-    for (o, v) in c.get(&[snmp::oid(MODELLO), snmp::oid(STATO_STAMPANTE), snmp::oid(STATO_DISPOSITIVO)])? {
+    for (o, v) in c.get(&[
+        snmp::oid(MODELLO),
+        snmp::oid(STATO_STAMPANTE),
+        snmp::oid(STATO_DISPOSITIVO),
+    ])? {
         match o {
             o if o == snmp::oid(MODELLO) => stato.modello = v.testo(),
             o if o == snmp::oid(STATO_STAMPANTE) => stato.stampante = v.intero(),
@@ -253,10 +264,18 @@ pub fn leggi_da(host: &str, porta: u16) -> Result<StatoStampante> {
         let nome = v.testo().unwrap_or_default();
         let percentuale = livelli
             .iter()
-            .find(|(o, _)| o.len() == snmp::oid(LIVELLI_HP).len() + 3 && o[o.len() - 3] == i && o[o.len() - 2] == 1)
+            .find(|(o, _)| {
+                o.len() == snmp::oid(LIVELLI_HP).len() + 3
+                    && o[o.len() - 3] == i
+                    && o[o.len() - 2] == 1
+            })
             .and_then(|(_, v)| v.intero())
             .filter(|p| (0..=100).contains(p));
-        stato.cartucce.push(Cartuccia { colore: colore_hp730(&nome), nome, percentuale });
+        stato.cartucce.push(Cartuccia {
+            colore: colore_hp730(&nome),
+            nome,
+            percentuale,
+        });
     }
 
     let stati = per_indice(c.walk(&snmp::oid(STATI_INGRESSI))?);
@@ -278,7 +297,11 @@ pub fn leggi_da(host: &str, porta: u16) -> Result<StatoStampante> {
         }
     }
     for (i, v) in per_indice(c.walk(&snmp::oid(NOMI_INGRESSI))?) {
-        let s = stati.iter().find(|(j, _)| *j == i).and_then(|(_, v)| v.intero()).unwrap_or(5);
+        let s = stati
+            .iter()
+            .find(|(j, _)| *j == i)
+            .and_then(|(_, v)| v.intero())
+            .unwrap_or(5);
         let hp = righe_hp.get(&i);
         let m = media
             .iter()
@@ -361,7 +384,10 @@ mod test {
         t.insert(sotto(LIVELLI_HP, "2.1.0"), ber_intero(150));
         let s = leggi_da("127.0.0.1", avvia_agente(t)).unwrap();
         assert_eq!(s.cartucce[0].percentuale, Some(0));
-        assert_eq!(s.cartucce[1].percentuale, None, "oltre 100 non è una percentuale");
+        assert_eq!(
+            s.cartucce[1].percentuale, None,
+            "oltre 100 non è una percentuale"
+        );
     }
 
     #[test]
@@ -376,7 +402,10 @@ mod test {
             thread::sleep(Duration::from_secs(6));
         });
         let err = leggi_da("127.0.0.1", porta).unwrap_err();
-        assert!(format!("{err:#}").contains("nessuna risposta SNMP"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("nessuna risposta SNMP"),
+            "{err:#}"
+        );
     }
 
     #[test]
@@ -393,16 +422,32 @@ mod test {
 
     #[test]
     fn descrizione_e_ok() {
-        let pronta = StatoStampante { stampante: Some(3), dispositivo: Some(2), ..Default::default() };
+        let pronta = StatoStampante {
+            stampante: Some(3),
+            dispositivo: Some(2),
+            ..Default::default()
+        };
         assert_eq!(pronta.descrizione(), "pronta");
         assert!(pronta.ok());
-        let stampa = StatoStampante { stampante: Some(4), dispositivo: Some(2), ..Default::default() };
+        let stampa = StatoStampante {
+            stampante: Some(4),
+            dispositivo: Some(2),
+            ..Default::default()
+        };
         assert_eq!(stampa.descrizione(), "sta stampando");
         assert!(stampa.ok());
-        let avvisi = StatoStampante { stampante: Some(3), dispositivo: Some(3), ..Default::default() };
+        let avvisi = StatoStampante {
+            stampante: Some(3),
+            dispositivo: Some(3),
+            ..Default::default()
+        };
         assert_eq!(avvisi.descrizione(), "pronta — con avvisi");
         assert!(!avvisi.ok());
-        let riscalda = StatoStampante { stampante: Some(5), dispositivo: Some(2), ..Default::default() };
+        let riscalda = StatoStampante {
+            stampante: Some(5),
+            dispositivo: Some(2),
+            ..Default::default()
+        };
         assert_eq!(riscalda.descrizione(), "in riscaldamento");
         assert!(!riscalda.ok());
         assert_eq!(StatoStampante::default().descrizione(), "stato sconosciuto");
@@ -410,20 +455,32 @@ mod test {
     }
 
     fn ingresso(nome: &str, stato: i64, larghezza_mm: Option<f64>) -> Ingresso {
-        Ingresso { nome: nome.into(), stato, media: None, larghezza_mm, rimanenti_mm: None }
+        Ingresso {
+            nome: nome.into(),
+            stato,
+            media: None,
+            larghezza_mm,
+            rimanenti_mm: None,
+        }
     }
 
     #[test]
     fn stati_ingressi_della_t2600() {
         // Valori letti dalla stampante: rotolo in uso, foglio singolo non caricato.
         assert_eq!(ingresso("ROLL", 6, None).descrizione(), "in uso");
-        assert_eq!(ingresso("MANUAL_FEED", 21, None).descrizione(), "vuoto / da caricare");
+        assert_eq!(
+            ingresso("MANUAL_FEED", 21, None).descrizione(),
+            "vuoto / da caricare"
+        );
     }
 
     #[test]
     fn colori_hp730() {
         assert_eq!(colore_hp730("HP 730 130ML ( P2V63A )"), Some("Magenta"));
-        assert_eq!(colore_hp730("HP 730 300ML ( P2V73A )"), Some("Nero fotografico"));
+        assert_eq!(
+            colore_hp730("HP 730 300ML ( P2V73A )"),
+            Some("Nero fotografico")
+        );
         assert_eq!(colore_hp730("altro"), None);
     }
 
