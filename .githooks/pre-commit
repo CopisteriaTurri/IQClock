@@ -1,0 +1,16 @@
+#!/bin/sh
+# Blocca i commit con codice Rust non formattato. Controlla il contenuto in stage
+# (quello che finisce nel commit), non il working tree.
+# Si attiva una volta per clone con: git config core.hooksPath .githooks
+PATH="$HOME/.cargo/bin:$PATH"
+cfg="$(git rev-parse --show-toplevel)/rustfmt.toml"
+male=""
+for f in $(git diff --cached --name-only --diff-filter=ACMR -- '*.rs'); do
+    # Con lo stdin, rustfmt --check esce sempre con 0: conta se stampa una diff.
+    [ -n "$(git show ":$f" | rustfmt --check --config-path "$cfg" 2>&1)" ] && male="$male $f"
+done
+if [ -n "$male" ]; then
+    echo "Non formattati (in stage):$male" >&2
+    echo "Lancia 'cargo fmt', fai 'git add' e riprova." >&2
+    exit 1
+fi
