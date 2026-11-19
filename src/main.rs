@@ -3,6 +3,7 @@
 //! IQClock: alternativa minima a HP Click per DesignJet PostScript.
 
 mod anteprima;
+mod compatibilita;
 mod config;
 #[cfg(target_os = "linux")]
 mod desktop;
