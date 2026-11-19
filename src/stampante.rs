@@ -31,7 +31,11 @@ fn connetti(host: &str, porta: u16) -> Result<TcpStream> {
 /// vedi `png.rs`), con una scala o un'impaginazione il file passa dalla pipeline
 /// comune (vedi `lavorazione.rs`). L'eventuale temporaneo va tenuto vivo fino
 /// alla fine dell'invio.
-fn da_mandare(percorso: &Path, formato: Formato, opz: &OpzioniJob) -> Result<Option<(FileTemporaneo, Formato)>> {
+fn da_mandare(
+    percorso: &Path,
+    formato: Formato,
+    opz: &OpzioniJob,
+) -> Result<Option<(FileTemporaneo, Formato)>> {
     if let Some(composto) = lavorazione::prepara(
         percorso,
         formato,
@@ -141,16 +145,25 @@ mod test {
     fn i_png_partono_come_tiff() {
         let p = std::env::temp_dir().join(format!("iqclock-png-{}.png", std::process::id()));
         image::save_buffer(&p, &[10, 20, 30, 40, 50, 60], 2, 1, image::ColorType::Rgb8).unwrap();
-        let opz = OpzioniJob { nome: "logo".into(), ..Default::default() };
+        let opz = OpzioniJob {
+            nome: "logo".into(),
+            ..Default::default()
+        };
         let mut job = Vec::new();
         scrivi_job(&mut job, &p, Formato::Png, &opz, |_| {}).unwrap();
         std::fs::remove_file(&p).unwrap();
 
         let testa = String::from_utf8_lossy(&job[..job.len().min(256)]).replace('\x1b', "<ESC>");
         assert!(testa.contains("@PJL JOB NAME=\"logo\""), "{testa}");
-        assert!(!testa.contains("ENTER LANGUAGE"), "i TIFF non hanno ENTER LANGUAGE: {testa}");
+        assert!(
+            !testa.contains("ENTER LANGUAGE"),
+            "i TIFF non hanno ENTER LANGUAGE: {testa}"
+        );
         // Dopo l'intestazione arrivano i byte del TIFF (little endian).
-        assert!(job.windows(4).any(|w| w == b"II*\0"), "manca la firma TIFF nel job");
+        assert!(
+            job.windows(4).any(|w| w == b"II*\0"),
+            "manca la firma TIFF nel job"
+        );
         assert!(job.ends_with(pjl::UEL));
         let testo = String::from_utf8_lossy(&job[job.len() - 120..]);
         assert!(testo.contains("@PJL EOJ NAME=\"logo\""));
@@ -161,7 +174,10 @@ mod test {
         // Più del buffer interno da 256 KiB: verifica streaming a chunk.
         let contenuto: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
         let p = FileTemp::nuovo("grande", &contenuto);
-        let opz = OpzioniJob { nome: "grande".into(), ..Default::default() };
+        let opz = OpzioniJob {
+            nome: "grande".into(),
+            ..Default::default()
+        };
         let mut passi = Vec::new();
         let mut job = Vec::new();
         scrivi_job(&mut job, &p.0, Formato::Pdf, &opz, |f| passi.push(f)).unwrap();
@@ -172,7 +188,10 @@ mod test {
         assert!(job.ends_with(&coda));
         assert_eq!(&job[testa.len()..job.len() - coda.len()], &contenuto);
         assert!(passi.len() > 2, "l'avanzamento deve scattare più volte");
-        assert!(passi.windows(2).all(|w| w[0] <= w[1]), "avanzamento monotono");
+        assert!(
+            passi.windows(2).all(|w| w[0] <= w[1]),
+            "avanzamento monotono"
+        );
         assert_eq!(passi.last(), Some(&1.0));
     }
 
@@ -192,7 +211,10 @@ mod test {
         });
 
         let p = FileTemp::nuovo("rst", &vec![0xABu8; 16 * 1024 * 1024]);
-        let opz = OpzioniJob { nome: "rst".into(), ..Default::default() };
+        let opz = OpzioniJob {
+            nome: "rst".into(),
+            ..Default::default()
+        };
         let err = invia("127.0.0.1", porta, &p.0, Formato::Pdf, &opz, |_| {}).unwrap_err();
         assert!(format!("{err:#}").contains("invio interrotto"), "{err:#}");
     }
@@ -200,11 +222,18 @@ mod test {
     #[test]
     fn porta_chiusa_da_errore_leggibile() {
         // Porta libera ma senza nessuno in ascolto: rifiuto immediato.
-        let porta = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let porta = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
         let p = FileTemp::nuovo("rifiuto", b"%PDF-1.4 finto");
         let opz = OpzioniJob::default();
         let err = invia("127.0.0.1", porta, &p.0, Formato::Pdf, &opz, |_| {}).unwrap_err();
-        assert!(format!("{err:#}").contains("stampante non raggiungibile"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("stampante non raggiungibile"),
+            "{err:#}"
+        );
     }
 
     #[test]
@@ -213,7 +242,10 @@ mod test {
         let p = FileTemp::nuovo("host", b"%PDF-1.4 finto");
         let opz = OpzioniJob::default();
         let err = invia("stampante.invalid", 9100, &p.0, Formato::Pdf, &opz, |_| {}).unwrap_err();
-        assert!(format!("{err:#}").contains("indirizzo non valido"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("indirizzo non valido"),
+            "{err:#}"
+        );
     }
 
     #[test]
@@ -229,7 +261,10 @@ mod test {
 
         let p = std::env::temp_dir().join(format!("iqclock-invio-{}.pdf", std::process::id()));
         std::fs::write(&p, b"%PDF-1.4 finto").unwrap();
-        let opz = OpzioniJob { nome: "prova".into(), ..Default::default() };
+        let opz = OpzioniJob {
+            nome: "prova".into(),
+            ..Default::default()
+        };
         let mut ultimo = 0.0;
         invia("127.0.0.1", porta, &p, Formato::Pdf, &opz, |f| ultimo = f).unwrap();
         std::fs::remove_file(&p).unwrap();

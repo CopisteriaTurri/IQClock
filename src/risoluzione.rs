@@ -569,10 +569,8 @@ mod test {
     use std::path::PathBuf;
 
     fn cartella(nome: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "iqclock-risoluzione-{}-{nome}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("iqclock-risoluzione-{}-{nome}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -800,7 +798,10 @@ mod test {
             // quelli che differiscono sono al massimo 16.
             let inizio_razionali = 8 + 2 + 5 * 12 + 4;
             let cambi = differenze(&originale, &dopo);
-            assert!(!cambi.is_empty() && cambi.len() <= 16, "{grande}: {cambi:?}");
+            assert!(
+                !cambi.is_empty() && cambi.len() <= 16,
+                "{grande}: {cambi:?}"
+            );
             assert!(cambi.iter().all(|&i| i >= inizio_razionali), "{grande}");
             assert_eq!(
                 file::dpi_immagine(tmp.percorso(), Formato::Tiff),
@@ -889,7 +890,10 @@ mod test {
         for grande in [false, true] {
             let dir = cartella("tiff-senza");
             let originale = tiff_grigio_senza_risoluzione(grande);
-            assert_eq!(file::dpi_immagine(&scrivi(&dir, "a.tif", &originale), Formato::Tiff), (300.0, 300.0));
+            assert_eq!(
+                file::dpi_immagine(&scrivi(&dir, "a.tif", &originale), Formato::Tiff),
+                (300.0, 300.0)
+            );
             let p = scrivi(&dir, "orig.tif", &originale);
             let tmp = con_dpi(&p, Formato::Tiff, (150.0, 150.0)).unwrap().unwrap();
             let pixel = |decoder: &mut Decoder<File>| match decoder.read_image().unwrap() {
@@ -1130,8 +1134,10 @@ mod test {
                 let troncato = scrivi(&dir, "taglio.jpg", &dati[..fine]);
                 assert!(
                     con_dpi(&troncato, Formato::Jpeg, (150.0, 150.0))
-                        .unwrap().is_none(),
-                    "JPEG tagliato a {fine}/{}", dati.len()
+                        .unwrap()
+                        .is_none(),
+                    "JPEG tagliato a {fine}/{}",
+                    dati.len()
                 );
             }
             verifica_jpeg(&p, (150.0, 150.0));
@@ -1140,7 +1146,11 @@ mod test {
         let p = jpeg_con(&dir, "falso-eoi.jpg", &[vec![0xFF, 0xFE, 0, 4, 0xFF, 0xD9]]);
         let dati = std::fs::read(&p).unwrap();
         let p = scrivi(&dir, "falso-eoi.jpg", &dati[..dati.len() - 2]);
-        assert!(con_dpi(&p, Formato::Jpeg, (150.0, 150.0)).unwrap().is_none());
+        assert!(
+            con_dpi(&p, Formato::Jpeg, (150.0, 150.0))
+                .unwrap()
+                .is_none()
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1161,8 +1171,14 @@ mod test {
                 assert!(temp.is_none());
             } else {
                 let temp = temp.expect("risoluzione esistente riscrivibile");
-                assert_eq!(file::dpi_immagine(temp.percorso(), Formato::Jpeg), (150.0, 150.0));
-                assert_eq!(image::open(&p).unwrap().to_rgb8(), image::open(temp.percorso()).unwrap().to_rgb8());
+                assert_eq!(
+                    file::dpi_immagine(temp.percorso(), Formato::Jpeg),
+                    (150.0, 150.0)
+                );
+                assert_eq!(
+                    image::open(&p).unwrap().to_rgb8(),
+                    image::open(temp.percorso()).unwrap().to_rgb8()
+                );
             }
             assert_eq!(std::fs::read(&p).unwrap(), jpeg);
         }
@@ -1175,11 +1191,21 @@ mod test {
         let dati = include_bytes!("../tests/fixtures/progressivo.jpg");
         let p = scrivi(&dir, "progressivo.jpg", dati);
         let temp = con_dpi(&p, Formato::Jpeg, (150.0, 150.0)).unwrap().unwrap();
-        assert_eq!(file::dpi_immagine(temp.percorso(), Formato::Jpeg), (150.0, 150.0));
-        assert_eq!(image::open(&p).unwrap().to_rgb8(), image::open(temp.percorso()).unwrap().to_rgb8());
+        assert_eq!(
+            file::dpi_immagine(temp.percorso(), Formato::Jpeg),
+            (150.0, 150.0)
+        );
+        assert_eq!(
+            image::open(&p).unwrap().to_rgb8(),
+            image::open(temp.percorso()).unwrap().to_rgb8()
+        );
         for fine in 2..dati.len() {
             let p = scrivi(&dir, "taglio.jpg", &dati[..fine]);
-            assert!(con_dpi(&p, Formato::Jpeg, (150.0, 150.0)).unwrap().is_none());
+            assert!(
+                con_dpi(&p, Formato::Jpeg, (150.0, 150.0))
+                    .unwrap()
+                    .is_none()
+            );
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1239,8 +1265,13 @@ mod test {
     fn jpeg_con_dpi_non_interi_arrotonda_nel_jfif() {
         let dir = cartella("jpeg-frazioni");
         let p = jpeg_con(&dir, "frazioni.jpg", &[jfif(1, 300, 300)]);
-        let tmp = con_dpi(&p, Formato::Jpeg, (428.57, 428.57)).unwrap().unwrap();
-        assert_eq!(jfif_letto(&std::fs::read(tmp.percorso()).unwrap()), Some((1, 429, 429)));
+        let tmp = con_dpi(&p, Formato::Jpeg, (428.57, 428.57))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            jfif_letto(&std::fs::read(tmp.percorso()).unwrap()),
+            Some((1, 429, 429))
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

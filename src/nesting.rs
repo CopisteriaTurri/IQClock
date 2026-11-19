@@ -47,7 +47,10 @@ pub struct Nesting {
 
 impl Default for Nesting {
     fn default() -> Self {
-        Self { distanza_mm: 5.0, ruota: true }
+        Self {
+            distanza_mm: 5.0,
+            ruota: true,
+        }
     }
 }
 
@@ -83,10 +86,19 @@ pub fn annidabile(formato: Formato) -> bool {
 
 /// Orientamento scelto per un pezzo: (larghezza, altezza, ruotato) oppure
 /// `None` se non entra nel foglio in nessun verso.
-fn orienta(pezzo: &Pezzo, larghezza: f64, ruota: bool, altezza_max: f64) -> Option<(f64, f64, bool)> {
+fn orienta(
+    pezzo: &Pezzo,
+    larghezza: f64,
+    ruota: bool,
+    altezza_max: f64,
+) -> Option<(f64, f64, bool)> {
     if ruota {
         // Sdraiato: il lato più corto in altezza, così il foglio consuma meno.
-        let (corto, lungo) = if pezzo.l <= pezzo.a { (pezzo.l, pezzo.a) } else { (pezzo.a, pezzo.l) };
+        let (corto, lungo) = if pezzo.l <= pezzo.a {
+            (pezzo.l, pezzo.a)
+        } else {
+            (pezzo.a, pezzo.l)
+        };
         if lungo <= larghezza + TOLLERANZA_MM && corto <= altezza_max + TOLLERANZA_MM {
             // Girato solo se la pagina era verticale (lato corto in larghezza).
             return Some((lungo, corto, pezzo.l < pezzo.a));
@@ -130,11 +142,13 @@ pub fn disponi(
     let mut orientati: Vec<Orientato> = pezzi
         .iter()
         .filter_map(|p| {
-            orienta(p, larghezza, ruota, altezza_max).map(|(larghezza, altezza, ruotato)| Orientato {
-                id: p.id,
-                larghezza,
-                altezza,
-                ruotato,
+            orienta(p, larghezza, ruota, altezza_max).map(|(larghezza, altezza, ruotato)| {
+                Orientato {
+                    id: p.id,
+                    larghezza,
+                    altezza,
+                    ruotato,
+                }
             })
         })
         .collect();
@@ -148,9 +162,18 @@ pub fn disponi(
     for pezzo in orientati {
         let mut messo = false;
         for riga in &mut righe {
-            let x = if riga.usata > 0.0 { riga.usata + distanza } else { 0.0 };
+            let x = if riga.usata > 0.0 {
+                riga.usata + distanza
+            } else {
+                0.0
+            };
             if x + pezzo.larghezza <= larghezza + TOLLERANZA_MM {
-                posti.push(Posto { id: pezzo.id, x, y: riga.y, ruotato: pezzo.ruotato });
+                posti.push(Posto {
+                    id: pezzo.id,
+                    x,
+                    y: riga.y,
+                    ruotato: pezzo.ruotato,
+                });
                 riga.usata = x + pezzo.larghezza;
                 riga.altezza = riga.altezza.max(pezzo.altezza);
                 fondo = fondo.max(riga.y + riga.altezza);
@@ -162,20 +185,39 @@ pub fn disponi(
             continue;
         }
         // La nuova fila parte sotto il fondo di tutte quelle già aperte.
-        let mut nuova = if righe.is_empty() { 0.0 } else { fondo + distanza };
+        let mut nuova = if righe.is_empty() {
+            0.0
+        } else {
+            fondo + distanza
+        };
         // I pezzi troppo alti sono già esclusi da `orienta`.
         if !righe.is_empty() && nuova + pezzo.altezza > altezza_max + TOLLERANZA_MM {
-            fogli.push(Foglio { altezza: fondo, posti: std::mem::take(&mut posti) });
+            fogli.push(Foglio {
+                altezza: fondo,
+                posti: std::mem::take(&mut posti),
+            });
             righe.clear();
             fondo = 0.0;
             nuova = 0.0;
         }
-        righe.push(Riga { y: nuova, altezza: pezzo.altezza, usata: pezzo.larghezza });
-        posti.push(Posto { id: pezzo.id, x: 0.0, y: nuova, ruotato: pezzo.ruotato });
+        righe.push(Riga {
+            y: nuova,
+            altezza: pezzo.altezza,
+            usata: pezzo.larghezza,
+        });
+        posti.push(Posto {
+            id: pezzo.id,
+            x: 0.0,
+            y: nuova,
+            ruotato: pezzo.ruotato,
+        });
         fondo = fondo.max(nuova + pezzo.altezza);
     }
     if !posti.is_empty() {
-        fogli.push(Foglio { altezza: fondo, posti });
+        fogli.push(Foglio {
+            altezza: fondo,
+            posti,
+        });
     }
     fogli
 }
@@ -187,7 +229,11 @@ pub enum Contenuto {
     /// Byte JPEG così come sono: nessuna ricompressione.
     Jpeg(Vec<u8>),
     /// Pixel RGB 8 bit, già su bianco.
-    Rgb { larghezza: u32, altezza: u32, pixel: Vec<u8> },
+    Rgb {
+        larghezza: u32,
+        altezza: u32,
+        pixel: Vec<u8>,
+    },
 }
 
 /// Un documento da annidare: il suo contenuto e le misure finali di ogni
@@ -200,7 +246,10 @@ pub struct Sorgente {
 
 /// Compone un PDF per ogni foglio, largo quanto la larghezza utile del rotolo.
 pub fn componi(fogli: &[Foglio], sorgenti: &[Sorgente], larghezza_mm: f64) -> Result<Vec<Vec<u8>>> {
-    fogli.iter().map(|f| componi_foglio(f, sorgenti, larghezza_mm)).collect()
+    fogli
+        .iter()
+        .map(|f| componi_foglio(f, sorgenti, larghezza_mm))
+        .collect()
 }
 
 /// Risorsa già creata per una pagina: nome nel dizionario XObject e sue
@@ -233,10 +282,18 @@ fn componi_foglio(foglio: &Foglio, sorgenti: &[Sorgente], larghezza_mm: f64) -> 
             .with_context(|| format!("pagina {} senza misure", posto.id.1))?;
         let chiave = (sorgente.id, posto.id.1);
         if !risorse.contains_key(&chiave) {
-            let (xobject, larghezza, altezza) = crea_oggetto(&mut doc, sorgente, posto, &mut importati)?;
+            let (xobject, larghezza, altezza) =
+                crea_oggetto(&mut doc, sorgente, posto, &mut importati)?;
             let nome = format!("IQN{}", risorse.len());
             xobjects.set(nome.clone(), doc.add_object(xobject));
-            risorse.insert(chiave, Risorsa { nome, larghezza, altezza });
+            risorse.insert(
+                chiave,
+                Risorsa {
+                    nome,
+                    larghezza,
+                    altezza,
+                },
+            );
         }
         let risorsa = &risorse[&chiave];
         let nome = &risorsa.nome;
@@ -293,7 +350,8 @@ fn componi_foglio(foglio: &Foglio, sorgenti: &[Sorgente], larghezza_mm: f64) -> 
     doc.trailer.set("Root", catalogo);
 
     let mut out = Vec::new();
-    doc.save_to(&mut out).context("scrittura del foglio annidato")?;
+    doc.save_to(&mut out)
+        .context("scrittura del foglio annidato")?;
     Ok(out)
 }
 
@@ -313,7 +371,8 @@ fn crea_oggetto(
             let pagina = *importati[&sorgente.id]
                 .get(posto.id.1)
                 .with_context(|| format!("pagina {} assente nel PDF", posto.id.1))?;
-            let ([x0, y0, x1, y1], ruota) = file::box_e_rotazione(doc, pagina).context("pagina senza misure")?;
+            let ([x0, y0, x1, y1], ruota) =
+                file::box_e_rotazione(doc, pagina).context("pagina senza misure")?;
             let (larghezza, altezza) = if ruota % 180 == 90 {
                 (y1 - y0, x1 - x0)
             } else {
@@ -324,9 +383,11 @@ fn crea_oggetto(
         // Un'Image XObject vive nel quadrato unitario: la matrice la porta
         // direttamente alle misure in punti del pezzo.
         Contenuto::Jpeg(dati) => Ok((immagine_jpeg(dati)?, 1.0, 1.0)),
-        Contenuto::Rgb { larghezza, altezza, pixel } => {
-            Ok((immagine_rgb(*larghezza, *altezza, pixel.clone()), 1.0, 1.0))
-        }
+        Contenuto::Rgb {
+            larghezza,
+            altezza,
+            pixel,
+        } => Ok((immagine_rgb(*larghezza, *altezza, pixel.clone()), 1.0, 1.0)),
     }
 }
 
@@ -350,7 +411,8 @@ fn importa_pdf(dest: &mut Document, dati: &[u8]) -> Result<Vec<ObjectId>> {
 /// Pagina di un PDF come Form XObject: box visibile normalizzato a `[0 0 w h]`
 /// con la matrice che porta lo spazio utente (compreso `/Rotate`) dentro il box.
 fn form_xobject(doc: &Document, pagina: ObjectId) -> Result<Stream> {
-    let ([x0, y0, x1, y1], ruota) = file::box_e_rotazione(doc, pagina).context("pagina senza misure")?;
+    let ([x0, y0, x1, y1], ruota) =
+        file::box_e_rotazione(doc, pagina).context("pagina senza misure")?;
     if ruota % 90 != 0 {
         bail!("pagina ruotata di {ruota}°: non si può annidare");
     }
@@ -404,17 +466,23 @@ pub fn dimensioni_jpeg(dati: &[u8]) -> Result<Jpeg> {
     }
     let mut adobe = false;
     loop {
-        let Some((marcatore, offset, lunghezza)) = file::prossimo_segmento_jpeg(&mut lettore) else {
+        let Some((marcatore, offset, lunghezza)) = file::prossimo_segmento_jpeg(&mut lettore)
+        else {
             bail!("JPEG senza intestazione SOF");
         };
         match marcatore {
             0xEE => {
-                if let Some(dati) = file::leggi_a(&mut lettore, offset, usize::try_from(lunghezza).unwrap_or(0)) {
+                if let Some(dati) = file::leggi_a(
+                    &mut lettore,
+                    offset,
+                    usize::try_from(lunghezza).unwrap_or(0),
+                ) {
                     adobe = dati.starts_with(b"Adobe");
                 }
             }
             0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => {
-                let sof = file::leggi_a(&mut lettore, offset, 6).context("intestazione SOF troncata")?;
+                let sof =
+                    file::leggi_a(&mut lettore, offset, 6).context("intestazione SOF troncata")?;
                 let altezza = u16::from_be_bytes([sof[1], sof[2]]);
                 let larghezza = u16::from_be_bytes([sof[3], sof[4]]);
                 if larghezza == 0 || altezza == 0 {
@@ -495,7 +563,11 @@ mod test {
     /// Rettangolo occupato da un posto, in mm (x, y, larghezza, altezza).
     fn rettangolo(posto: &Posto, pezzi: &[Pezzo]) -> (f64, f64, f64, f64) {
         let p = pezzi.iter().find(|p| p.id == posto.id).unwrap();
-        if posto.ruotato { (posto.x, posto.y, p.a, p.l) } else { (posto.x, posto.y, p.l, p.a) }
+        if posto.ruotato {
+            (posto.x, posto.y, p.a, p.l)
+        } else {
+            (posto.x, posto.y, p.l, p.a)
+        }
     }
 
     fn sovrapposti(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
@@ -514,13 +586,25 @@ mod test {
         let fogli = disponi(&pezzi, 904.0, 5.0, true, ALTEZZA_MAX_MM);
         assert_eq!(fogli.len(), 1);
         assert_eq!(fogli[0].posti.len(), 4);
-        assert!((fogli[0].altezza - 425.0).abs() < 1e-9, "{}", fogli[0].altezza);
+        assert!(
+            (fogli[0].altezza - 425.0).abs() < 1e-9,
+            "{}",
+            fogli[0].altezza
+        );
         assert!(fogli[0].posti.iter().all(|p| p.ruotato));
-        let prima: Vec<_> = fogli[0].posti.iter().filter(|p| (p.y - 0.0).abs() < 1e-9).collect();
+        let prima: Vec<_> = fogli[0]
+            .posti
+            .iter()
+            .filter(|p| (p.y - 0.0).abs() < 1e-9)
+            .collect();
         assert_eq!(prima.len(), 3);
         assert!((prima[1].x - 302.0).abs() < 1e-9);
         assert!((prima[2].x - 604.0).abs() < 1e-9);
-        let seconda = fogli[0].posti.iter().find(|p| (p.y - 215.0).abs() < 1e-9).unwrap();
+        let seconda = fogli[0]
+            .posti
+            .iter()
+            .find(|p| (p.y - 215.0).abs() < 1e-9)
+            .unwrap();
         assert!((seconda.x - 0.0).abs() < 1e-9);
     }
 
@@ -533,7 +617,11 @@ mod test {
         assert!(fogli[0].posti.iter().all(|p| !p.ruotato));
         assert_eq!(fogli[0].posti.len(), 3);
         // Due file da 297 più i 5 mm tra loro.
-        assert!((fogli[0].altezza - 599.0).abs() < 1e-9, "{}", fogli[0].altezza);
+        assert!(
+            (fogli[0].altezza - 599.0).abs() < 1e-9,
+            "{}",
+            fogli[0].altezza
+        );
     }
 
     #[test]
@@ -544,13 +632,27 @@ mod test {
             pezzo((2, 0, 0), 120.0, 500.0),
         ];
         let fogli = disponi(&pezzi, 904.0, 5.0, true, ALTEZZA_MAX_MM);
-        let posti: Vec<_> = fogli.iter().flat_map(|f| &f.posti).map(|p| p.id.0).collect();
+        let posti: Vec<_> = fogli
+            .iter()
+            .flat_map(|f| &f.posti)
+            .map(|p| p.id.0)
+            .collect();
         assert!(posti.contains(&0));
         assert!(!posti.contains(&1), "1000 mm non entra in nessun verso");
         // 120 × 500 sdraiato sul lato lungo (500 ≤ 904) ci sta.
         assert!(posti.contains(&2));
-        assert!(!entra(&pezzo((9, 0, 0), 1000.0, 904.0), 904.0, true, ALTEZZA_MAX_MM));
-        assert!(entra(&pezzo((9, 0, 0), 904.0, 1000.0), 904.0, true, ALTEZZA_MAX_MM));
+        assert!(!entra(
+            &pezzo((9, 0, 0), 1000.0, 904.0),
+            904.0,
+            true,
+            ALTEZZA_MAX_MM
+        ));
+        assert!(entra(
+            &pezzo((9, 0, 0), 904.0, 1000.0),
+            904.0,
+            true,
+            ALTEZZA_MAX_MM
+        ));
     }
 
     /// Nessuna sovrapposizione e tutti dentro la larghezza, su misure
@@ -559,7 +661,9 @@ mod test {
     fn disposizione_senza_sovrapposizioni() {
         let mut stato = 12345u64;
         let mut misure = move || {
-            stato = stato.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            stato = stato
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (stato >> 33) as u32
         };
         let pezzi: Vec<_> = (0..200)
@@ -573,7 +677,11 @@ mod test {
         let tutti: Vec<_> = fogli.iter().flat_map(|f| f.posti.clone()).collect();
         assert_eq!(tutti.len(), pezzi.len());
         for foglio in &fogli {
-            assert!(foglio.altezza <= 4000.0 + 1e-6, "foglio troppo lungo: {}", foglio.altezza);
+            assert!(
+                foglio.altezza <= 4000.0 + 1e-6,
+                "foglio troppo lungo: {}",
+                foglio.altezza
+            );
             let rettangoli: Vec<_> = foglio.posti.iter().map(|p| rettangolo(p, &pezzi)).collect();
             for (i, r) in rettangoli.iter().enumerate() {
                 assert!(r.0 >= -1e-9, "{r:?}");
@@ -603,7 +711,10 @@ mod test {
     fn oltre_l_altezza_massima_si_apre_un_altro_foglio() {
         // Due pezzi larghi 900 × 400, senza rotazione: ciascuno sta in una fila
         // da solo e insieme (400 + 5 + 400 = 805) superano il limite di 700.
-        let pezzi = [pezzo((0, 0, 0), 900.0, 400.0), pezzo((0, 1, 0), 900.0, 400.0)];
+        let pezzi = [
+            pezzo((0, 0, 0), 900.0, 400.0),
+            pezzo((0, 1, 0), 900.0, 400.0),
+        ];
         let fogli = disponi(&pezzi, 904.0, 5.0, false, 700.0);
         assert_eq!(fogli.len(), 2);
         assert!((fogli[0].altezza - 400.0).abs() < 1e-9);
@@ -653,10 +764,23 @@ mod test {
         assert_eq!(fogli.len(), 2);
         assert_eq!(fogli[0].altezza, 600.0);
         assert_eq!(fogli[1].altezza, 505.0);
-        assert_eq!(fogli[1].posti, [
-            Posto { id: (2, 0, 0), x: 0.0, y: 0.0, ruotato: false },
-            Posto { id: (3, 0, 0), x: 0.0, y: 305.0, ruotato: false },
-        ]);
+        assert_eq!(
+            fogli[1].posti,
+            [
+                Posto {
+                    id: (2, 0, 0),
+                    x: 0.0,
+                    y: 0.0,
+                    ruotato: false
+                },
+                Posto {
+                    id: (3, 0, 0),
+                    x: 0.0,
+                    y: 305.0,
+                    ruotato: false
+                },
+            ]
+        );
     }
 
     // ---- composizione ----
@@ -719,9 +843,16 @@ mod test {
                 contenuto: Contenuto::Pdf(pdf),
                 misure: vec![(210.0, 297.0)],
             },
-            Sorgente { id: 1, contenuto: rgb, misure: vec![(100.0, 60.0)] },
+            Sorgente {
+                id: 1,
+                contenuto: rgb,
+                misure: vec![(100.0, 60.0)],
+            },
         ];
-        let pezzi = [pezzo((0, 0, 0), 210.0, 297.0), pezzo((1, 0, 0), 100.0, 60.0)];
+        let pezzi = [
+            pezzo((0, 0, 0), 210.0, 297.0),
+            pezzo((1, 0, 0), 100.0, 60.0),
+        ];
         let fogli = disponi(&pezzi, 904.0, 5.0, false, ALTEZZA_MAX_MM);
         let dati = componi(&fogli, &sorgenti, 904.0).unwrap();
         assert_eq!(dati.len(), 1);
@@ -768,12 +899,21 @@ mod test {
             contenuto: Contenuto::Pdf(pdf),
             misure: vec![(210.0, 297.0)],
         }];
-        let fogli = disponi(&[pezzo((0, 0, 0), 210.0, 297.0)], 904.0, 5.0, true, ALTEZZA_MAX_MM);
+        let fogli = disponi(
+            &[pezzo((0, 0, 0), 210.0, 297.0)],
+            904.0,
+            5.0,
+            true,
+            ALTEZZA_MAX_MM,
+        );
         assert!(fogli[0].posti[0].ruotato);
         let dati = componi(&fogli, &sorgenti, 904.0).unwrap();
         let doc = leggi(&dati[0]);
         let (_, a) = larghezza_altezza(&doc);
-        assert!((a - 210.0).abs() < 0.01, "il pezzo sdraiato è alto 210 mm: {a}");
+        assert!(
+            (a - 210.0).abs() < 0.01,
+            "il pezzo sdraiato è alto 210 mm: {a}"
+        );
         let contenuto = String::from_utf8_lossy(
             &doc.get_page_content(*doc.get_pages().values().next().unwrap()),
         )
@@ -796,14 +936,25 @@ mod test {
             contenuto: Contenuto::Pdf(pdf),
             misure: vec![(210.0, 297.0)],
         }];
-        let fogli = disponi(&[pezzo((0, 0, 0), 210.0, 297.0)], 904.0, 5.0, false, ALTEZZA_MAX_MM);
+        let fogli = disponi(
+            &[pezzo((0, 0, 0), 210.0, 297.0)],
+            904.0,
+            5.0,
+            false,
+            ALTEZZA_MAX_MM,
+        );
         let dati = componi(&fogli, &sorgenti, 904.0).unwrap();
         let doc = leggi(&dati[0]);
         let form = doc
             .objects
             .values()
             .filter_map(|o| o.as_stream().ok())
-            .find(|s| s.dict.get(b"Subtype").and_then(Object::as_name).is_ok_and(|n| n == b"Form"))
+            .find(|s| {
+                s.dict
+                    .get(b"Subtype")
+                    .and_then(Object::as_name)
+                    .is_ok_and(|n| n == b"Form")
+            })
             .expect("Form XObject");
         let risorse = form.dict.get(b"Resources").unwrap().as_dict().unwrap();
         assert!(risorse.has(b"ProcSet"), "risorse perse");
@@ -817,7 +968,12 @@ mod test {
             .objects
             .values()
             .filter_map(|o| o.as_stream().ok())
-            .find(|s| s.dict.get(b"Subtype").and_then(Object::as_name).is_ok_and(|n| n == b"Form"))
+            .find(|s| {
+                s.dict
+                    .get(b"Subtype")
+                    .and_then(Object::as_name)
+                    .is_ok_and(|n| n == b"Form")
+            })
             .expect("Form XObject");
         let numeri = |chiave: &[u8]| -> Vec<f64> {
             stream
@@ -842,7 +998,13 @@ mod test {
             contenuto: Contenuto::Pdf(pdf),
             misure: vec![(297.0, 210.0)],
         }];
-        let fogli = disponi(&[pezzo((0, 0, 0), 297.0, 210.0)], 904.0, 5.0, false, ALTEZZA_MAX_MM);
+        let fogli = disponi(
+            &[pezzo((0, 0, 0), 297.0, 210.0)],
+            904.0,
+            5.0,
+            false,
+            ALTEZZA_MAX_MM,
+        );
         let dati = componi(&fogli, &sorgenti, 904.0).unwrap();
         let doc = leggi(&dati[0]);
         let (_, a) = larghezza_altezza(&doc);
@@ -861,8 +1023,14 @@ mod test {
         };
         let (x0, y0) = punto(bbox[0], bbox[1]);
         let (x1, y1) = punto(bbox[2], bbox[3]);
-        assert!(((x1 - x0).abs() - 297.0 * MM_PT).abs() < 0.01, "{matrice:?}");
-        assert!(((y1 - y0).abs() - 210.0 * MM_PT).abs() < 0.01, "{matrice:?}");
+        assert!(
+            ((x1 - x0).abs() - 297.0 * MM_PT).abs() < 0.01,
+            "{matrice:?}"
+        );
+        assert!(
+            ((y1 - y0).abs() - 210.0 * MM_PT).abs() < 0.01,
+            "{matrice:?}"
+        );
     }
 
     /// Pagina ruotata di 270 con MediaBox spostato: il BBox resta il riquadro
@@ -916,7 +1084,9 @@ mod test {
     fn il_render_del_foglio_conserva_i_bordi_della_pagina_ruotata() {
         use pdfium_render::prelude::PdfRenderConfig;
 
-        let Some(pdfium) = crate::anteprima::pdfium_per_test() else { return };
+        let Some(pdfium) = crate::anteprima::pdfium_per_test() else {
+            return;
+        };
         // 300 × 400 nello spazio utente e /Rotate 270: il pezzo appare 400 ×
         // 300. Bordi verdi da 20 unità su tutti i lati e quadrato rosso in
         // alto a destra nello spazio utente, che dopo la rotazione finisce in
@@ -932,14 +1102,22 @@ mod test {
             misure: vec![(l, a)],
         }];
         let fogli = disponi(&[pezzo((0, 0, 0), l, a)], 904.0, 5.0, false, ALTEZZA_MAX_MM);
-        assert!(!fogli[0].posti[0].ruotato, "senza rotazione il pezzo resta dritto");
+        assert!(
+            !fogli[0].posti[0].ruotato,
+            "senza rotazione il pezzo resta dritto"
+        );
         let composto = componi(&fogli, &sorgenti, 904.0).unwrap();
         let doc = pdfium.load_pdf_from_byte_slice(&composto[0], None).unwrap();
         let pagina = doc.pages().get(0).unwrap();
         // 2562 px per i 2562,5 pt del foglio: il pezzo viene largo 400 px e
         // alto quanto il foglio, con bordi da 20 px.
         let config = PdfRenderConfig::new().set_target_width(2562);
-        let immagine = pagina.render_with_config(&config).unwrap().as_image().unwrap().to_rgba8();
+        let immagine = pagina
+            .render_with_config(&config)
+            .unwrap()
+            .as_image()
+            .unwrap()
+            .to_rgba8();
         let (larghezza, altezza) = immagine.dimensions();
         assert!(larghezza >= 2500, "foglio largo {larghezza} px");
         assert!((295..=305).contains(&altezza), "foglio alto {altezza} px");
@@ -957,7 +1135,11 @@ mod test {
             assert!(verde(x, y), "bordo mancante in {x},{y}: {:?}", colore(x, y));
         }
         assert!(rosso(8, 8), "angolo in alto a sinistra: {:?}", colore(8, 8));
-        assert!(!rosso(392, 8), "il quadrato rosso sta solo a sinistra: {:?}", colore(392, 8));
+        assert!(
+            !rosso(392, 8),
+            "il quadrato rosso sta solo a sinistra: {:?}",
+            colore(392, 8)
+        );
     }
 
     /// JPEG creato con la crate `image`, letto senza ricompressione.
@@ -978,16 +1160,30 @@ mod test {
             contenuto: Contenuto::Jpeg(dati.clone()),
             misure: vec![(100.0, 75.0)],
         }];
-        let fogli = disponi(&[pezzo((0, 0, 0), 100.0, 75.0)], 904.0, 5.0, false, ALTEZZA_MAX_MM);
+        let fogli = disponi(
+            &[pezzo((0, 0, 0), 100.0, 75.0)],
+            904.0,
+            5.0,
+            false,
+            ALTEZZA_MAX_MM,
+        );
         let composto = componi(&fogli, &sorgenti, 904.0).unwrap();
         let doc = leggi(&composto[0]);
         let immagine = doc
             .objects
             .values()
             .filter_map(|o| o.as_stream().ok())
-            .find(|s| s.dict.get(b"Subtype").and_then(Object::as_name).is_ok_and(|n| n == b"Image"))
+            .find(|s| {
+                s.dict
+                    .get(b"Subtype")
+                    .and_then(Object::as_name)
+                    .is_ok_and(|n| n == b"Image")
+            })
             .expect("immagine");
-        assert_eq!(immagine.dict.get(b"Filter").unwrap().as_name().unwrap(), b"DCTDecode");
+        assert_eq!(
+            immagine.dict.get(b"Filter").unwrap().as_name().unwrap(),
+            b"DCTDecode"
+        );
         assert_eq!(immagine.content, dati, "il JPEG non va ricompresso");
     }
 
@@ -1007,8 +1203,14 @@ mod test {
         assert_eq!(info.componenti, 4);
         assert!(info.adobe);
         let immagine = immagine_jpeg(&jpeg).unwrap();
-        assert_eq!(immagine.dict.get(b"ColorSpace").unwrap().as_name().unwrap(), b"DeviceCMYK");
-        assert!(immagine.dict.get(b"Decode").is_ok(), "CMYK Adobe va invertito");
+        assert_eq!(
+            immagine.dict.get(b"ColorSpace").unwrap().as_name().unwrap(),
+            b"DeviceCMYK"
+        );
+        assert!(
+            immagine.dict.get(b"Decode").is_ok(),
+            "CMYK Adobe va invertito"
+        );
     }
 
     #[test]

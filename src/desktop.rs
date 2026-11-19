@@ -18,9 +18,15 @@ pub fn installa(icona_png: &[u8]) -> io::Result<()> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
         .ok_or_else(|| io::Error::other("cartella dati utente non trovata"))?;
-    scrivi_se_diverso(&base.join("icons/hicolor/256x256/apps/iqclock.png"), icona_png)?;
+    scrivi_se_diverso(
+        &base.join("icons/hicolor/256x256/apps/iqclock.png"),
+        icona_png,
+    )?;
     let exe = std::env::current_exe()?;
-    scrivi_se_diverso(&base.join("applications/iqclock.desktop"), voce_desktop(&exe).as_bytes())
+    scrivi_se_diverso(
+        &base.join("applications/iqclock.desktop"),
+        voce_desktop(&exe).as_bytes(),
+    )
 }
 
 fn voce_desktop(exe: &Path) -> String {
@@ -70,7 +76,10 @@ mod test {
 
     #[test]
     fn exec_con_spazi_e_caratteri_speciali() {
-        assert_eq!(argomento_exec(Path::new("/home/a b/iqclock")), "\"/home/a b/iqclock\"");
+        assert_eq!(
+            argomento_exec(Path::new("/home/a b/iqclock")),
+            "\"/home/a b/iqclock\""
+        );
         assert_eq!(argomento_exec(Path::new("/x/$y%z")), "\"/x/\\\\$y%%z\"");
     }
 }

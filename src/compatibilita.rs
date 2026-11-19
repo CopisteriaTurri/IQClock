@@ -52,7 +52,10 @@ pub(crate) fn ritocca_byte(dati: &[u8]) -> Option<Vec<u8>> {
     if doc.is_encrypted() {
         return None;
     }
-    if metadati(&doc).into_iter().any(|id| xmp_compresso_con_hp(&doc, id)) {
+    if metadati(&doc)
+        .into_iter()
+        .any(|id| xmp_compresso_con_hp(&doc, id))
+    {
         if !applica(&mut doc).ok()? {
             return None;
         }
@@ -77,7 +80,10 @@ pub(crate) fn ritocca_byte(dati: &[u8]) -> Option<Vec<u8>> {
 /// illeggibili si saltano: il resto del PDF parte lo stesso.
 fn metadati(doc: &Document) -> Vec<ObjectId> {
     let catalogo = doc.catalog().ok().into_iter();
-    let pagine = doc.get_pages().into_values().filter_map(|id| doc.get_dictionary(id).ok());
+    let pagine = doc
+        .get_pages()
+        .into_values()
+        .filter_map(|id| doc.get_dictionary(id).ok());
     let mut ids: Vec<ObjectId> = catalogo
         .chain(pagine)
         .filter_map(|d| d.get(b"Metadata").ok()?.as_reference().ok())
@@ -88,7 +94,9 @@ fn metadati(doc: &Document) -> Vec<ObjectId> {
 }
 
 fn xmp_compresso_con_hp(doc: &Document, id: ObjectId) -> bool {
-    let Ok(Object::Stream(stream)) = doc.get_object(id) else { return false };
+    let Ok(Object::Stream(stream)) = doc.get_object(id) else {
+        return false;
+    };
     stream.dict.has(b"Filter")
         && stream
             .decompressed_content_with_limit(XMP_MASSIMO)
@@ -99,11 +107,15 @@ fn xmp_compresso_con_hp(doc: &Document, id: ObjectId) -> bool {
 /// l'oggetto non è in un object stream e i byte trovati sono proprio quelli
 /// letti da lopdf.
 fn stream_nei_byte(doc: &Document, id: ObjectId, dati: &[u8]) -> Option<std::ops::Range<usize>> {
-    let Ok(Object::Stream(stream)) = doc.get_object(id) else { return None };
+    let Ok(Object::Stream(stream)) = doc.get_object(id) else {
+        return None;
+    };
     if stream.dict.has(b"Filter") {
         return None;
     }
-    let Some(XrefEntry::Normal { offset, .. }) = doc.reference_table.get(id.0) else { return None };
+    let Some(XrefEntry::Normal { offset, .. }) = doc.reference_table.get(id.0) else {
+        return None;
+    };
     let inizio = *offset as usize;
     let oggetto = dati.get(inizio..(inizio + RICERCA_MASSIMA).min(dati.len()))?;
     if !oggetto.starts_with(format!("{} {} obj", id.0, id.1).as_bytes()) {
@@ -140,10 +152,15 @@ fn sbianca_hp_metadata(dati: &mut [u8]) -> bool {
     while let Some(i) = trova(&dati[da..], HP_METADATA).map(|i| i + da) {
         da = i + HP_METADATA.len();
         // Il nome finisce proprio qui (non `HpMetadataX`).
-        if dati.get(da).is_some_and(|&c| carattere_nome(c) || c == b':') {
+        if dati
+            .get(da)
+            .is_some_and(|&c| carattere_nome(c) || c == b':')
+        {
             continue;
         }
-        let Some(inizio) = inizio_nome(dati, i) else { continue };
+        let Some(inizio) = inizio_nome(dati, i) else {
+            continue;
+        };
         let fine = match dati[inizio] {
             b'<' => fine_elemento(dati, inizio, da),
             _ => fine_attributo(dati, da),
@@ -152,7 +169,9 @@ fn sbianca_hp_metadata(dati: &mut [u8]) -> bool {
         // potrebbe non essere quella vera, e sbiancare romperebbe l'XML.
         let fine = fine.filter(|&f| {
             let tratto = &dati[inizio..f];
-            [&b"<!--"[..], b"-->", b"<![CDATA[", b"]]>"].iter().all(|m| trova(tratto, m).is_none())
+            [&b"<!--"[..], b"-->", b"<![CDATA[", b"]]>"]
+                .iter()
+                .all(|m| trova(tratto, m).is_none())
         });
         if let Some(fine) = fine {
             dati[inizio..fine].fill(b' ');
@@ -228,23 +247,37 @@ fn fine_attributo(dati: &[u8], dopo_nome: usize) -> Option<usize> {
 /// pagina stessa, la pagina è un oggetto non compresso e le nuove misure ci
 /// stanno nello spazio delle vecchie.
 fn media_box_al_suo_posto(doc: &Document, id: ObjectId, dati: &mut [u8]) -> bool {
-    let Some(proprio) = doc.get_dictionary(id).ok().and_then(|d| d.get(b"MediaBox").ok()) else {
+    let Some(proprio) = doc
+        .get_dictionary(id)
+        .ok()
+        .and_then(|d| d.get(b"MediaBox").ok())
+    else {
         return false;
     };
-    let (Some(media), Some((visibile, _))) = (file::riquadro(proprio), file::box_e_rotazione(doc, id)) else {
+    let (Some(media), Some((visibile, _))) =
+        (file::riquadro(proprio), file::box_e_rotazione(doc, id))
+    else {
         return false;
     };
     if uguali(media, visibile) {
         return false;
     }
-    let Some(XrefEntry::Normal { offset, .. }) = doc.reference_table.get(id.0) else { return false };
+    let Some(XrefEntry::Normal { offset, .. }) = doc.reference_table.get(id.0) else {
+        return false;
+    };
     let inizio = *offset as usize;
-    let Some(oggetto) = dati.get(inizio..(inizio + RICERCA_MASSIMA).min(dati.len())) else { return false };
+    let Some(oggetto) = dati.get(inizio..(inizio + RICERCA_MASSIMA).min(dati.len())) else {
+        return false;
+    };
     if !oggetto.starts_with(format!("{} {} obj", id.0, id.1).as_bytes()) {
         return false;
     }
-    let Some(fine) = trova(oggetto, b"endobj") else { return false };
-    let Some((a, b)) = array_media_box(&oggetto[..fine], media) else { return false };
+    let Some(fine) = trova(oggetto, b"endobj") else {
+        return false;
+    };
+    let Some((a, b)) = array_media_box(&oggetto[..fine], media) else {
+        return false;
+    };
     let nuovo = format!("[{}]", visibile.map(numero).join(" "));
     let spazio = b + 1 - a;
     if nuovo.len() > spazio {
@@ -309,7 +342,9 @@ fn numero(v: f64) -> String {
 fn sbianca_xmp(doc: &mut Document) -> Result<bool> {
     let mut cambiato = false;
     for oggetto in metadati(doc) {
-        let Ok(Object::Stream(stream)) = doc.get_object_mut(oggetto) else { continue };
+        let Ok(Object::Stream(stream)) = doc.get_object_mut(oggetto) else {
+            continue;
+        };
         let compresso = stream.dict.has(b"Filter");
         let mut xmp = if compresso {
             match stream.decompressed_content_with_limit(XMP_MASSIMO) {
@@ -338,7 +373,9 @@ fn media_box_sul_visibile(doc: &mut Document, id: ObjectId) -> Result<bool> {
     let Some(media) = file::ereditato(doc, id, b"MediaBox").and_then(file::riquadro) else {
         return Ok(false);
     };
-    let Some((visibile, _)) = file::box_e_rotazione(doc, id) else { return Ok(false) };
+    let Some((visibile, _)) = file::box_e_rotazione(doc, id) else {
+        return Ok(false);
+    };
     if uguali(media, visibile) {
         return Ok(false);
     }
@@ -363,11 +400,20 @@ mod test {
         </rdf:Description></rdf:RDF></x:xmpmeta>";
 
     /// PDF di una pagina con MediaBox `media`, CropBox facoltativo e XMP.
-    fn pdf(media: [f64; 4], crop: Option<[f64; 4]>, xmp: Option<&[u8]>, comprimi: bool) -> Document {
+    fn pdf(
+        media: [f64; 4],
+        crop: Option<[f64; 4]>,
+        xmp: Option<&[u8]>,
+        comprimi: bool,
+    ) -> Document {
         let mut doc = Document::with_version("1.6");
         let pagine = doc.new_object_id();
         let contenuto = doc.add_object(Stream::new(Dictionary::new(), b"0 0 m 10 10 l S".to_vec()));
-        let a = |r: [f64; 4]| r.iter().map(|&v| Object::Real(v as f32)).collect::<Vec<_>>();
+        let a = |r: [f64; 4]| {
+            r.iter()
+                .map(|&v| Object::Real(v as f32))
+                .collect::<Vec<_>>()
+        };
         let mut pagina = dictionary! {
             "Type" => "Page", "Parent" => pagine, "Contents" => contenuto, "MediaBox" => a(media),
             "TrimBox" => a(media),
@@ -378,11 +424,16 @@ mod test {
         let pagina = doc.add_object(pagina);
         doc.objects.insert(
             pagine,
-            Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![pagina.into()], "Count" => 1 }),
+            Object::Dictionary(
+                dictionary! { "Type" => "Pages", "Kids" => vec![pagina.into()], "Count" => 1 },
+            ),
         );
         let mut catalogo = dictionary! { "Type" => "Catalog", "Pages" => pagine };
         if let Some(x) = xmp {
-            let mut s = Stream::new(dictionary! { "Type" => "Metadata", "Subtype" => "XML" }, x.to_vec());
+            let mut s = Stream::new(
+                dictionary! { "Type" => "Metadata", "Subtype" => "XML" },
+                x.to_vec(),
+            );
             if comprimi {
                 s.compress().unwrap();
                 assert!(s.dict.has(b"Filter"));
@@ -402,7 +453,11 @@ mod test {
 
     fn box_pagina(doc: &Document, chiave: &[u8]) -> Option<[f64; 4]> {
         let id = *doc.get_pages().values().next().unwrap();
-        doc.get_dictionary(id).unwrap().get(chiave).ok().and_then(file::riquadro)
+        doc.get_dictionary(id)
+            .unwrap()
+            .get(chiave)
+            .ok()
+            .and_then(file::riquadro)
     }
 
     fn circa(a: [f64; 4], b: [f64; 4]) -> bool {
@@ -426,9 +481,14 @@ mod test {
         // Nomi più lunghi e commenti XML in mezzo non si toccano.
         let mut x = b"<r><pdfx:HpMetadataX>a</pdfx:HpMetadataX></r>".to_vec();
         assert!(!sbianca_hp_metadata(&mut x));
-        let mut x = b"<r><!-- <pdfx:HpMetadata> --><t>T</t><pdfx:HpMetadata>X</pdfx:HpMetadata></r>".to_vec();
+        let mut x =
+            b"<r><!-- <pdfx:HpMetadata> --><t>T</t><pdfx:HpMetadata>X</pdfx:HpMetadata></r>"
+                .to_vec();
         assert!(sbianca_hp_metadata(&mut x));
-        let atteso = format!("<r><!-- <pdfx:HpMetadata> --><t>T</t>{}</r>", " ".repeat("<pdfx:HpMetadata>X</pdfx:HpMetadata>".len()));
+        let atteso = format!(
+            "<r><!-- <pdfx:HpMetadata> --><t>T</t>{}</r>",
+            " ".repeat("<pdfx:HpMetadata>X</pdfx:HpMetadata>".len())
+        );
         assert_eq!(String::from_utf8(x).unwrap(), atteso);
         let mut x = b"<pdfx:HpMetadata><![CDATA[</pdfx:HpMetadata>]]></pdfx:HpMetadata>".to_vec();
         assert!(!sbianca_hp_metadata(&mut x));
@@ -448,7 +508,10 @@ mod test {
         assert_eq!(ritoccato.len(), originale.len());
         assert!(trova(&ritoccato, HP_METADATA).is_none());
         let doc = Document::load_mem(&ritoccato).unwrap();
-        assert!(circa(box_pagina(&doc, b"MediaBox").unwrap(), [0.0, 0.0, 1950.09, 520.126]));
+        assert!(circa(
+            box_pagina(&doc, b"MediaBox").unwrap(),
+            [0.0, 0.0, 1950.09, 520.126]
+        ));
         // Il resto non cambia: l'XMP c'è ancora, e anche il TrimBox.
         assert!(doc.catalog().unwrap().has(b"Metadata"));
         assert!(box_pagina(&doc, b"TrimBox").is_some());
@@ -466,7 +529,12 @@ mod test {
     #[test]
     fn media_box_che_non_sta_nel_suo_spazio_resta() {
         // "[0 0 100 100]" non può contenere le misure del CropBox.
-        let originale = salva(pdf([0.0, 0.0, 100.0, 100.0], Some([0.5, 0.25, 99.75, 99.125]), None, false));
+        let originale = salva(pdf(
+            [0.0, 0.0, 100.0, 100.0],
+            Some([0.5, 0.25, 99.75, 99.125]),
+            None,
+            false,
+        ));
         assert!(ritocca_byte(&originale).is_none());
     }
 
@@ -475,9 +543,19 @@ mod test {
         // Un contenuto di pagina non compresso che "dice" HpMetadata resta com'è.
         let mut doc = pdf([0.0, 0.0, 595.0, 842.0], None, None, false);
         let pagina = *doc.get_pages().values().next().unwrap();
-        let contenuto = doc.get_dictionary(pagina).unwrap().get(b"Contents").unwrap().as_reference().unwrap();
+        let contenuto = doc
+            .get_dictionary(pagina)
+            .unwrap()
+            .get(b"Contents")
+            .unwrap()
+            .as_reference()
+            .unwrap();
         let testo = b"BT /F1 12 Tf (<pdfx:HpMetadata>x</pdfx:HpMetadata>) Tj ET".to_vec();
-        doc.get_object_mut(contenuto).unwrap().as_stream_mut().unwrap().set_content(testo);
+        doc.get_object_mut(contenuto)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(testo);
         assert!(ritocca_byte(&salva(doc)).is_none());
     }
 
@@ -486,8 +564,20 @@ mod test {
         let originale = salva(pdf([0.0, 0.0, 595.0, 842.0], None, Some(XMP_HP), true));
         let ritoccato = ritocca_byte(&originale).unwrap();
         let doc = Document::load_mem(&ritoccato).unwrap();
-        let id = doc.catalog().unwrap().get(b"Metadata").unwrap().as_reference().unwrap();
-        let xmp = doc.get_object(id).unwrap().as_stream().unwrap().get_plain_content().unwrap();
+        let id = doc
+            .catalog()
+            .unwrap()
+            .get(b"Metadata")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let xmp = doc
+            .get_object(id)
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .get_plain_content()
+            .unwrap();
         assert!(trova(&xmp, HP_METADATA).is_none());
         assert!(trova(&xmp, b"rdf:Description").is_some());
     }
@@ -495,7 +585,11 @@ mod test {
     #[test]
     fn byte_xmp_compresso_senza_elementi_da_togliere_resta() {
         // Abbastanza lungo perché lopdf lo comprima davvero.
-        let xmp = [&b"<rdf:Description pdfx:HpMetadataX=\"v\"/>"[..], &[b' '; 200]].concat();
+        let xmp = [
+            &b"<rdf:Description pdfx:HpMetadataX=\"v\"/>"[..],
+            &[b' '; 200],
+        ]
+        .concat();
         let originale = salva(pdf([0.0, 0.0, 595.0, 842.0], None, Some(&xmp), true));
         assert!(ritocca_byte(&originale).is_none());
     }
@@ -517,7 +611,12 @@ mod test {
             // Non è un array.
             b"<</MediaBox 5 0 R>>",
         ] {
-            assert_eq!(array_media_box(dubbio, m), None, "{}", String::from_utf8_lossy(dubbio));
+            assert_eq!(
+                array_media_box(dubbio, m),
+                None,
+                "{}",
+                String::from_utf8_lossy(dubbio)
+            );
         }
     }
 
@@ -525,7 +624,12 @@ mod test {
     fn byte_media_box_con_commento_resta() {
         // `[0 0 2302.56 %]` + a capo + `1506 ]`: per lopdf vale [0 0 2302.56 1506],
         // ma la prima `]` è nel commento.
-        let originale = salva(pdf([0.0, 0.0, 2302.56, 1506.48], Some([0.0, 0.0, 1950.09, 520.126]), None, false));
+        let originale = salva(pdf(
+            [0.0, 0.0, 2302.56, 1506.48],
+            Some([0.0, 0.0, 1950.09, 520.126]),
+            None,
+            false,
+        ));
         let vecchio = b"/MediaBox[0 0 2302.56 1506.48]";
         let i = trova(&originale, vecchio).expect("MediaBox scritto come atteso");
         let mut nuovo = b"/MediaBox[0 0 2302.56 %]\n1506".to_vec();
@@ -534,7 +638,10 @@ mod test {
         let mut dati = originale.clone();
         dati[i..i + vecchio.len()].copy_from_slice(&nuovo);
         let doc = Document::load_mem(&dati).unwrap();
-        assert!(circa(box_pagina(&doc, b"MediaBox").unwrap(), [0.0, 0.0, 2302.56, 1506.0]));
+        assert!(circa(
+            box_pagina(&doc, b"MediaBox").unwrap(),
+            [0.0, 0.0, 2302.56, 1506.0]
+        ));
         assert!(ritocca_byte(&dati).is_none());
     }
 
@@ -544,16 +651,27 @@ mod test {
             let mut doc = pdf([0.0, 0.0, 595.0, 842.0], None, Some(XMP_HP), comprimi);
             assert!(applica(&mut doc).unwrap());
             assert!(doc.catalog().unwrap().has(b"Metadata"));
-            assert!(trova(&salva(doc), HP_METADATA).is_none(), "l'elemento è rimasto nel file");
+            assert!(
+                trova(&salva(doc), HP_METADATA).is_none(),
+                "l'elemento è rimasto nel file"
+            );
         }
     }
 
     #[test]
     fn documento_media_box_portato_sul_crop_box() {
-        let mut doc = pdf([0.0, 0.0, 2302.56, 1506.48], Some([0.0, 0.0, 1950.09, 520.126]), None, false);
+        let mut doc = pdf(
+            [0.0, 0.0, 2302.56, 1506.48],
+            Some([0.0, 0.0, 1950.09, 520.126]),
+            None,
+            false,
+        );
         assert!(applica(&mut doc).unwrap());
         for chiave in [&b"MediaBox"[..], b"CropBox"] {
-            assert!(circa(box_pagina(&doc, chiave).unwrap(), [0.0, 0.0, 1950.09, 520.126]));
+            assert!(circa(
+                box_pagina(&doc, chiave).unwrap(),
+                [0.0, 0.0, 1950.09, 520.126]
+            ));
         }
         assert!(box_pagina(&doc, b"TrimBox").is_none());
     }

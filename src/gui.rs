@@ -40,17 +40,28 @@ fn configura_stile(ctx: &egui::Context) {
     use FontFamily::{Monospace, Proportional};
     let mut font = egui::FontDefinitions::default();
     for (nome, dati) in [
-        ("NotoSans-Regular", &include_bytes!("../assets/font/NotoSans-Regular.ttf")[..]),
-        ("NotoSans-Bold", &include_bytes!("../assets/font/NotoSans-Bold.ttf")[..]),
+        (
+            "NotoSans-Regular",
+            &include_bytes!("../assets/font/NotoSans-Regular.ttf")[..],
+        ),
+        (
+            "NotoSans-Bold",
+            &include_bytes!("../assets/font/NotoSans-Bold.ttf")[..],
+        ),
     ] {
-        font.font_data.insert(nome.into(), egui::FontData::from_static(dati).into());
+        font.font_data
+            .insert(nome.into(), egui::FontData::from_static(dati).into());
     }
     // I font di default restano dopo, per i simboli (▸, ✓, …) che Noto Sans non ha.
     let ripiego = font.families[&Proportional].clone();
-    font.families.get_mut(&Proportional).unwrap().insert(0, "NotoSans-Regular".into());
+    font.families
+        .get_mut(&Proportional)
+        .unwrap()
+        .insert(0, "NotoSans-Regular".into());
     let mut grassetto = vec!["NotoSans-Bold".to_string()];
     grassetto.extend(ripiego);
-    font.families.insert(FontFamily::Name(GRASSETTO.into()), grassetto);
+    font.families
+        .insert(FontFamily::Name(GRASSETTO.into()), grassetto);
     ctx.set_fonts(font);
     ctx.all_styles_mut(|s| {
         s.text_styles = [
@@ -60,13 +71,25 @@ fn configura_stile(ctx: &egui::Context) {
             (TextStyle::Heading, FontId::new(20.0, Proportional)),
             (TextStyle::Monospace, FontId::new(13.0, Monospace)),
             // Intestazioni di sezione (STAMPANTE, CARTA, …).
-            (TextStyle::Name(SEZIONE.into()), FontId::new(12.0, FontFamily::Name(GRASSETTO.into()))),
+            (
+                TextStyle::Name(SEZIONE.into()),
+                FontId::new(12.0, FontFamily::Name(GRASSETTO.into())),
+            ),
             // Pulsante Stampa.
-            (TextStyle::Name(AZIONE.into()), FontId::new(17.0, FontFamily::Name(GRASSETTO.into()))),
+            (
+                TextStyle::Name(AZIONE.into()),
+                FontId::new(17.0, FontFamily::Name(GRASSETTO.into())),
+            ),
             // Invito ad aggiungere file nell'anteprima vuota.
-            (TextStyle::Name(RICHIAMO.into()), FontId::new(20.0, Proportional)),
+            (
+                TextStyle::Name(RICHIAMO.into()),
+                FontId::new(20.0, Proportional),
+            ),
             // Sovrimpressione mentre si trascinano file.
-            (TextStyle::Name(RILASCIO.into()), FontId::new(28.0, Proportional)),
+            (
+                TextStyle::Name(RILASCIO.into()),
+                FontId::new(28.0, Proportional),
+            ),
         ]
         .into();
     });
@@ -81,7 +104,11 @@ fn sezione(ui: &mut egui::Ui, testo: &str) {
     ui.label(RichText::new(testo).text_style(stile(SEZIONE)).strong());
 }
 
-const LARGHEZZE_ROTOLO: [(&str, f64); 3] = [("24\" (610 mm)", 610.0), ("36\" (914 mm)", 914.0), ("44\" (1118 mm)", 1118.0)];
+const LARGHEZZE_ROTOLO: [(&str, f64); 3] = [
+    ("24\" (610 mm)", 610.0),
+    ("36\" (914 mm)", 914.0),
+    ("44\" (1118 mm)", 1118.0),
+];
 /// Attesa del foglio singolo: dopo l'invio lo stato si rilegge ogni 5 s per
 /// 2 minuti, per vedere quando la stampante chiede il foglio.
 const ATTESA_FOGLIO: std::time::Duration = std::time::Duration::from_secs(120);
@@ -98,8 +125,12 @@ enum ModoScala {
 }
 
 impl ModoScala {
-    const TUTTI: [ModoScala; 4] =
-        [ModoScala::Originale, ModoScala::Formato, ModoScala::Percentuale, ModoScala::Misura];
+    const TUTTI: [ModoScala; 4] = [
+        ModoScala::Originale,
+        ModoScala::Formato,
+        ModoScala::Percentuale,
+        ModoScala::Misura,
+    ];
 
     fn di(scala: &Scala) -> Self {
         match scala {
@@ -185,7 +216,8 @@ impl Documento {
         self.dpi_parziale = false;
         match file::analizza(&self.percorso) {
             Ok(info) => {
-                self.annidabile = lavorazione::annidabile_file(&self.percorso, info.formato).unwrap_or(false);
+                self.annidabile =
+                    lavorazione::annidabile_file(&self.percorso, info.formato).unwrap_or(false);
                 self.info = info;
             }
             Err(e) => {
@@ -214,7 +246,13 @@ impl Documento {
         }
         // Con il nesting servono le misure di tutte le pagine: `pagine_mm` le
         // ha, `info.mm` vale solo per la prima.
-        let base = self.info.pagine_mm.get(n).copied().flatten().or(self.info.mm);
+        let base = self
+            .info
+            .pagine_mm
+            .get(n)
+            .copied()
+            .flatten()
+            .or(self.info.mm);
         match base {
             Some((l, a)) => {
                 let (sx, sy) = self.lavorazione.fattori(l, a);
@@ -228,7 +266,9 @@ impl Documento {
 
     /// Spazio che la cornice aggiunge alle misure, in tutto (mm).
     fn cornice_mm(&self) -> f64 {
-        self.lavorazione.cornice.map_or(0.0, |c| 2.0 * c.ingombro_mm())
+        self.lavorazione
+            .cornice
+            .map_or(0.0, |c| 2.0 * c.ingombro_mm())
     }
 
     /// Misure finali della prima pagina con la scala scelta: quelle mostrate
@@ -244,7 +284,8 @@ impl Documento {
     /// può prevedere: la pagina resta dritta. Una pagina impaginata da IQClock
     /// è larga quanto la parte stampabile del rotolo e la stampante non la ruota più.
     fn ruotata(&self, n: usize, rotolo_mm: f64) -> bool {
-        self.mm_pagina(n).is_some_and(|(l, a)| rotazione::ruota(l, a, rotolo_mm))
+        self.mm_pagina(n)
+            .is_some_and(|(l, a)| rotazione::ruota(l, a, rotolo_mm))
     }
 
     /// true se la pagina `n` esce ruotata di 90°, da IQClock o dalla stampante.
@@ -256,7 +297,10 @@ impl Documento {
 /// Firma leggera del file: evita di riaprire e decodificare i TIFF invariati.
 fn impronta_file(percorso: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
     let meta = std::fs::metadata(percorso).ok()?;
-    Some((meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH), meta.len()))
+    Some((
+        meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+        meta.len(),
+    ))
 }
 
 enum Evento {
@@ -280,7 +324,11 @@ struct AttesaFoglio {
 impl AttesaFoglio {
     fn nuova(minimo: Option<(f64, f64)>) -> Self {
         let ora = std::time::Instant::now();
-        Self { inizio: ora, ultima: ora, minimo }
+        Self {
+            inizio: ora,
+            ultima: ora,
+            minimo,
+        }
     }
 }
 
@@ -391,7 +439,10 @@ impl App {
     /// Analizza un file, lo seleziona nella coda e ne richiede l’anteprima con
     /// la cornice corrente. Se non è leggibile, aggiunge un avviso.
     fn aggiungi(&mut self, percorso: PathBuf) {
-        let nome = percorso.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let nome = percorso
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         match file::analizza(&percorso) {
             Ok(info) => {
                 let id = self.prossimo_id;
@@ -401,8 +452,10 @@ impl App {
                     ..Default::default()
                 };
                 let imp = self.impaginazione_anteprime;
-                self.anteprime.richiedi(id, percorso.clone(), info.formato, lavorazione, imp);
-                let annidabile = lavorazione::annidabile_file(&percorso, info.formato).unwrap_or(false);
+                self.anteprime
+                    .richiedi(id, percorso.clone(), info.formato, lavorazione, imp);
+                let annidabile =
+                    lavorazione::annidabile_file(&percorso, info.formato).unwrap_or(false);
                 let impronta = impronta_file(&percorso);
                 self.documenti.push(Documento {
                     id,
@@ -439,8 +492,10 @@ impl App {
             return;
         }
         if attesa.ultima.elapsed() >= PASSO_ATTESA_FOGLIO {
-            self.attesa_foglio =
-                Some(AttesaFoglio { ultima: std::time::Instant::now(), ..attesa });
+            self.attesa_foglio = Some(AttesaFoglio {
+                ultima: std::time::Instant::now(),
+                ..attesa
+            });
             self.verifica_stampante(ctx);
         }
         ctx.request_repaint_after(PASSO_ATTESA_FOGLIO);
@@ -459,12 +514,15 @@ impl App {
         // Il foglio può essere caricato e comunque troppo piccolo: la T2600,
         // con un A4 per una pagina A4, lo tiene «in uso» e chiede un foglio da
         // 220 × 319 mm. Meglio dire quale foglio serve che «Foglio caricato».
-        let stretto = attesa.minimo.filter(|_| pronto).and_then(|(min_corto, min_lungo)| {
-            let (l, a) = letto.foglio_mm()?;
-            let (corto, lungo) = (l.min(a), l.max(a));
-            (corto + TOLLERANZA_MM < min_corto || lungo + TOLLERANZA_MM < min_lungo)
-                .then_some((l, a, min_corto, min_lungo))
-        });
+        let stretto = attesa
+            .minimo
+            .filter(|_| pronto)
+            .and_then(|(min_corto, min_lungo)| {
+                let (l, a) = letto.foglio_mm()?;
+                let (corto, lungo) = (l.min(a), l.max(a));
+                (corto + TOLLERANZA_MM < min_corto || lungo + TOLLERANZA_MM < min_lungo)
+                    .then_some((l, a, min_corto, min_lungo))
+            });
         let (testo, colore) = if let Some((l, a, min_corto, min_lungo)) = stretto {
             (
                 format!(
@@ -481,7 +539,9 @@ impl App {
                 .unwrap_or_else(|| "ingresso manuale non dichiarato".into());
             (format!("In attesa del foglio — {stato}"), ARANCIO)
         };
-        let resta = ATTESA_FOGLIO.saturating_sub(attesa.inizio.elapsed()).as_secs();
+        let resta = ATTESA_FOGLIO
+            .saturating_sub(attesa.inizio.elapsed())
+            .as_secs();
         Some((format!("{testo} (controllo per altri {resta} s)"), colore))
     }
 
@@ -563,10 +623,18 @@ impl App {
     /// Rilegge i file cambiati e rinnova la richiesta delle loro anteprime.
     fn aggiorna_file_documenti(&mut self) {
         for d in &mut self.documenti {
-            if matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_)) && d.aggiorna_file(self.prossimo_id) {
+            if matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_))
+                && d.aggiorna_file(self.prossimo_id)
+            {
                 self.prossimo_id += 1;
                 self.cache_nesting = None;
-                self.anteprime.richiedi(d.id, d.percorso.clone(), d.info.formato, d.lavorazione, d.anteprima.0);
+                self.anteprime.richiedi(
+                    d.id,
+                    d.percorso.clone(),
+                    d.info.formato,
+                    d.lavorazione,
+                    d.anteprima.0,
+                );
             }
         }
         self.ultimo_controllo_file = std::time::Instant::now();
@@ -641,7 +709,10 @@ impl App {
     /// Larghezza usata per anteprima e controllo di ingombro: quella rilevata
     /// via SNMP se disponibile, altrimenti il fallback scelto a mano.
     fn rotolo_effettivo(&self) -> f64 {
-        self.larghezza_rilevata.as_ref().map(|(_, m)| *m).unwrap_or(self.larghezza_rotolo)
+        self.larghezza_rilevata
+            .as_ref()
+            .map(|(_, m)| *m)
+            .unwrap_or(self.larghezza_rotolo)
     }
 
     /// Manda i documenti pronti uno dopo l'altro, su un unico thread: la porta
@@ -750,7 +821,8 @@ impl App {
                 })
                 .map_err(|e| format!("{e:#}"))
             };
-            let esclusi = match lavorazione::componi_nesting(&annidabili, rotolo, margine, &nesting) {
+            let esclusi = match lavorazione::componi_nesting(&annidabili, rotolo, margine, &nesting)
+            {
                 Err(e) => {
                     let errore = format!("{e:#}");
                     for d in &annidabili {
@@ -770,7 +842,12 @@ impl App {
                             nome: format!("Nesting ({} file)", annidamento.documenti),
                             ..base.clone()
                         };
-                        let r = invia(foglio.file.percorso(), Formato::Pdf, &opz, &foglio.documenti);
+                        let r = invia(
+                            foglio.file.percorso(),
+                            Formato::Pdf,
+                            &opz,
+                            &foglio.documenti,
+                        );
                         for id in &foglio.documenti {
                             let esito = esiti.entry(*id).or_insert_with(|| Ok(()));
                             if esito.is_ok() {
@@ -807,9 +884,17 @@ impl App {
         else {
             return;
         };
-        let r = std::fs::File::create(&dest).map_err(anyhow::Error::from).and_then(|mut f| {
-            stampante::scrivi_job(&mut f, &doc.percorso, doc.info.formato, &self.opzioni(doc), |_| {})
-        });
+        let r = std::fs::File::create(&dest)
+            .map_err(anyhow::Error::from)
+            .and_then(|mut f| {
+                stampante::scrivi_job(
+                    &mut f,
+                    &doc.percorso,
+                    doc.info.formato,
+                    &self.opzioni(doc),
+                    |_| {},
+                )
+            });
         if let Err(e) = r {
             self.avvisi.push(format!("Salvataggio non riuscito: {e:#}"));
         }
@@ -846,19 +931,35 @@ impl App {
                 Evento::Pagine(id, chiave, pagine) => {
                     // Se nel frattempo è cambiata scala o impaginazione, queste
                     // pagine sono superate: arriveranno quelle giuste.
-                    if let Some(d) = self.documenti.iter_mut().find(|d| d.id == id && d.anteprima == chiave) {
+                    if let Some(d) = self
+                        .documenti
+                        .iter_mut()
+                        .find(|d| d.id == id && d.anteprima == chiave)
+                    {
                         // I DPI sono del documento (il minimo fra le pagine):
                         // arrivano uguali su tutte.
                         d.dpi = pagine.first().and_then(|p| {
-                            Some(file::DpiStampa { dpi: p.dpi_min?, presunti: p.dpi_presunti })
+                            Some(file::DpiStampa {
+                                dpi: p.dpi_min?,
+                                presunti: p.dpi_presunti,
+                            })
                         });
                         d.dpi_parziale = pagine.first().is_some_and(|p| p.dpi_parziale);
                         d.pagine = pagine
                             .into_iter()
                             .enumerate()
                             .map(|(n, p)| {
-                                let tex = ctx.load_texture(format!("{}-{n}", d.id), p.immagine, TextureOptions::LINEAR);
-                                PaginaMostrata { tex, mm: p.mm, impaginata: p.impaginata, ruotata: p.ruotata }
+                                let tex = ctx.load_texture(
+                                    format!("{}-{n}", d.id),
+                                    p.immagine,
+                                    TextureOptions::LINEAR,
+                                );
+                                PaginaMostrata {
+                                    tex,
+                                    mm: p.mm,
+                                    impaginata: p.impaginata,
+                                    ruotata: p.ruotata,
+                                }
                             })
                             .collect();
                     }
@@ -874,8 +975,13 @@ impl App {
     }
 
     fn file_trascinati(&mut self, ctx: &egui::Context) {
-        let caduti: Vec<PathBuf> =
-            ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        let caduti: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
         for p in caduti {
             self.aggiungi(p);
         }
@@ -1422,11 +1528,19 @@ impl App {
 
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.add_space(10.0);
-            let pronti = self.documenti.iter().filter(|d| !matches!(d.stato, StatoJob::InInvio(_) | StatoJob::Inviato)).count();
-            let pulsante = egui::Button::new(RichText::new("Stampa").color(Color32::WHITE).text_style(stile(AZIONE)))
-                .fill(BLU_HP)
-                .corner_radius(CornerRadius::same(16))
-                .min_size(Vec2::new(ui.available_width(), 36.0));
+            let pronti = self
+                .documenti
+                .iter()
+                .filter(|d| !matches!(d.stato, StatoJob::InInvio(_) | StatoJob::Inviato))
+                .count();
+            let pulsante = egui::Button::new(
+                RichText::new("Stampa")
+                    .color(Color32::WHITE)
+                    .text_style(stile(AZIONE)),
+            )
+            .fill(BLU_HP)
+            .corner_radius(CornerRadius::same(16))
+            .min_size(Vec2::new(ui.available_width(), 36.0));
             if ui.add_enabled(pronti > 0, pulsante).clicked() {
                 self.chiedi_e_stampa(ui.ctx());
             }
@@ -1435,7 +1549,11 @@ impl App {
             }
             // Pagine dei PDF in coda per formato, copie comprese.
             let mut formati = Vec::new();
-            for d in self.documenti.iter().filter(|d| !matches!(d.stato, StatoJob::InInvio(_) | StatoJob::Inviato)) {
+            for d in self
+                .documenti
+                .iter()
+                .filter(|d| !matches!(d.stato, StatoJob::InInvio(_) | StatoJob::Inviato))
+            {
                 for (f, n) in &d.info.formati_pagine {
                     file::aggiungi_formato(&mut formati, f.clone(), n * d.copie as usize);
                 }
@@ -1456,25 +1574,41 @@ impl App {
                 let cornice = egui::Frame::new()
                     .inner_margin(6.0)
                     .corner_radius(4.0)
-                    .stroke(if selezionato { Stroke::new(2.0, BLU_HP) } else { Stroke::new(1.0, Color32::from_gray(210)) })
+                    .stroke(if selezionato {
+                        Stroke::new(2.0, BLU_HP)
+                    } else {
+                        Stroke::new(1.0, Color32::from_gray(210))
+                    })
                     .fill(Color32::WHITE);
                 let r = cornice
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 90.0), Sense::hover());
+                        let (rect, _) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 90.0),
+                            Sense::hover(),
+                        );
                         disegna_pagina(ui, rect, d, 0, false);
                         ui.label(RichText::new(&d.nome).small().strong());
-                        let mut didascalia =
-                            format!("{} · {}", d.info.formato.etichetta(), file::dimensione_leggibile(d.info.byte));
+                        let mut didascalia = format!(
+                            "{} · {}",
+                            d.info.formato.etichetta(),
+                            file::dimensione_leggibile(d.info.byte)
+                        );
                         if !d.lavorazione.scala.originale() {
-                            didascalia.push_str(&format!(" · {}", d.lavorazione.scala.didascalia()));
+                            didascalia
+                                .push_str(&format!(" · {}", d.lavorazione.scala.didascalia()));
                         }
-                        if (0..d.info.pagine.min(PAGINE_MAX)).any(|n| !self.su_foglio() && d.esce_ruotata(n, self.rotolo_effettivo())) {
+                        if (0..d.info.pagine.min(PAGINE_MAX)).any(|n| {
+                            !self.su_foglio() && d.esce_ruotata(n, self.rotolo_effettivo())
+                        }) {
                             didascalia.push_str(" · 90°");
                         }
                         ui.label(RichText::new(didascalia).small());
                         if !d.info.formati_pagine.is_empty() {
-                            ui.label(RichText::new(file::etichetta_formati(&d.info.formati_pagine)).small());
+                            ui.label(
+                                RichText::new(file::etichetta_formati(&d.info.formati_pagine))
+                                    .small(),
+                            );
                         }
                         match d.dpi {
                             Some(dpi) => {
@@ -1500,7 +1634,11 @@ impl App {
                             None => {
                                 if let Some(r) = &d.info.risoluzione {
                                     let testo = RichText::new(r.etichetta()).small();
-                                    ui.label(if r.presunta { testo.color(ARANCIO) } else { testo });
+                                    ui.label(if r.presunta {
+                                        testo.color(ARANCIO)
+                                    } else {
+                                        testo
+                                    });
                                 }
                             }
                         }
@@ -1513,7 +1651,8 @@ impl App {
                                 ui.colored_label(Color32::DARK_GREEN, "inviato");
                             }
                             StatoJob::Errore(e) => {
-                                ui.colored_label(Color32::RED, "errore (dettagli col mouse)").on_hover_text(e);
+                                ui.colored_label(Color32::RED, "errore (dettagli col mouse)")
+                                    .on_hover_text(e);
                             }
                         }
                     })
@@ -1531,7 +1670,12 @@ impl App {
             }
             if ui.button("+ Aggiungi file…").clicked()
                 && let Some(files) = rfd::FileDialog::new()
-                    .add_filter("Stampabili", &["pdf", "ps", "eps", "tif", "tiff", "jpg", "jpeg", "png", "plt", "hpgl"])
+                    .add_filter(
+                        "Stampabili",
+                        &[
+                            "pdf", "ps", "eps", "tif", "tiff", "jpg", "jpeg", "png", "plt", "hpgl",
+                        ],
+                    )
                     .pick_files()
             {
                 for f in files {
@@ -1543,7 +1687,8 @@ impl App {
             && !matches!(self.documenti[i].stato, StatoJob::InInvio(_))
         {
             self.documenti.remove(i);
-            self.selezionato = (!self.documenti.is_empty()).then(|| i.min(self.documenti.len() - 1));
+            self.selezionato =
+                (!self.documenti.is_empty()).then(|| i.min(self.documenti.len() - 1));
         }
     }
 
@@ -1598,7 +1743,9 @@ impl App {
         if misure.iter().any(|(l, a, _)| l.min(*a) > tolleranza) {
             nota.push_str("\nAttenzione: una pagina non entra nel rotolo, la stampante la ridimensionerà o taglierà");
         } else if misure.iter().any(|(_, a, r)| *r && *a > tolleranza) {
-            nota.push_str("\nLa stampante ruoterà di 90° le pagine segnate, per farle entrare nel rotolo");
+            nota.push_str(
+                "\nLa stampante ruoterà di 90° le pagine segnate, per farle entrare nel rotolo",
+            );
         } else if misure.iter().any(|(_, _, r)| *r) {
             nota.push_str("\nLa stampante ruoterà di 90° le pagine segnate, per risparmiare carta");
         }
@@ -1613,25 +1760,43 @@ impl App {
         // Anche senza un DPI da mostrare, la misura ferma alle prime pagine va
         // detta: il resto del documento non è stato guardato.
         if d.dpi_parziale {
-            nota.push_str(&format!("\nRisoluzione misurata solo sulle prime {PAGINE_DPI_MAX} pagine"));
+            nota.push_str(&format!(
+                "\nRisoluzione misurata solo sulle prime {PAGINE_DPI_MAX} pagine"
+            ));
         }
         // Didascalia centrata che va a capo: con nomi lunghi o avvisi non
         // starebbe nella larghezza dell'anteprima.
-        let mut testo = egui::text::LayoutJob::simple(nota, TextStyle::Body.resolve(ui.style()), Color32::from_gray(60), area.width() - 2.0 * margine);
+        let mut testo = egui::text::LayoutJob::simple(
+            nota,
+            TextStyle::Body.resolve(ui.style()),
+            Color32::from_gray(60),
+            area.width() - 2.0 * margine,
+        );
         testo.halign = Align::Center;
         let nota = ui.painter().layout_job(testo);
 
-        let lunghezza: f32 = misure.iter().map(|(_, a, _)| *a as f32 * scala + spazio_tra_pagine).sum();
+        let lunghezza: f32 = misure
+            .iter()
+            .map(|(_, a, _)| *a as f32 * scala + spazio_tra_pagine)
+            .sum();
         let alto_disponibile = area.height() - 2.0 * margine - nota.size().y;
         // Se il rotolo è troppo lungo per la finestra riduco tutto in proporzione.
         let rid = (alto_disponibile / lunghezza).min(1.0);
         let rotolo = Rect::from_min_size(
-            Pos2::new(area.center().x - rotolo_mm as f32 * scala * rid / 2.0, area.top() + margine),
+            Pos2::new(
+                area.center().x - rotolo_mm as f32 * scala * rid / 2.0,
+                area.top() + margine,
+            ),
             Vec2::new(rotolo_mm as f32 * scala * rid, lunghezza * rid),
         );
         let p = ui.painter();
         p.rect_filled(rotolo, 0.0, Color32::from_gray(250));
-        p.rect_stroke(rotolo, 0.0, Stroke::new(1.0, Color32::from_gray(160)), StrokeKind::Outside);
+        p.rect_stroke(
+            rotolo,
+            0.0,
+            Stroke::new(1.0, Color32::from_gray(160)),
+            StrokeKind::Outside,
+        );
 
         let mut y = rotolo.top();
         let piu_pagine = misure.len() > 1;
@@ -1640,7 +1805,10 @@ impl App {
             if n > 0 {
                 let y_riga = y - spazio_tra_pagine * rid / 2.0;
                 p.extend(egui::Shape::dashed_line(
-                    &[Pos2::new(rotolo.left(), y_riga), Pos2::new(rotolo.right(), y_riga)],
+                    &[
+                        Pos2::new(rotolo.left(), y_riga),
+                        Pos2::new(rotolo.right(), y_riga),
+                    ],
                     Stroke::new(1.0, Color32::from_gray(120)),
                     6.0,
                     4.0,
@@ -1656,17 +1824,33 @@ impl App {
             let r = Rect::from_min_size(Pos2::new(rotolo.left() + margine, y), dim);
             disegna_pagina(ui, r, d, n, *ruotata);
             if *ruotata || d.pagine.get(n).is_some_and(|p| p.ruotata) {
-                p.text(r.left_top() + Vec2::new(5.0, 4.0), Align2::LEFT_TOP, "90°", TextStyle::Small.resolve(ui.style()), Color32::from_gray(90));
+                p.text(
+                    r.left_top() + Vec2::new(5.0, 4.0),
+                    Align2::LEFT_TOP,
+                    "90°",
+                    TextStyle::Small.resolve(ui.style()),
+                    Color32::from_gray(90),
+                );
             }
             if piu_pagine {
                 // A destra del rotolo, fuori dalle pagine: non copre il contenuto.
-                p.text(Pos2::new(rotolo.right() + 4.0, r.top()), Align2::LEFT_TOP, (n + 1).to_string(), TextStyle::Small.resolve(ui.style()), Color32::from_gray(90));
+                p.text(
+                    Pos2::new(rotolo.right() + 4.0, r.top()),
+                    Align2::LEFT_TOP,
+                    (n + 1).to_string(),
+                    TextStyle::Small.resolve(ui.style()),
+                    Color32::from_gray(90),
+                );
             }
             y += dim.y + spazio_tra_pagine * rid;
         }
 
         let alto_nota = nota.size().y;
-        p.galley(Pos2::new(area.center().x, area.bottom() - 8.0 - alto_nota), nota, Color32::from_gray(60));
+        p.galley(
+            Pos2::new(area.center().x, area.bottom() - 8.0 - alto_nota),
+            nota,
+            Color32::from_gray(60),
+        );
     }
 
     /// Con il foglio singolo l'anteprima disegna i fogli al posto del rotolo:
@@ -1694,12 +1878,19 @@ impl App {
                 .map(|n| {
                     let base = d.info.pagine_mm.get(n).copied().flatten().or(d.info.mm);
                     match base {
-                        Some((l, a)) => format!("p. {}: {:.1}%", n + 1, 100.0 * d.lavorazione.riduzione_foglio(l, a)),
+                        Some((l, a)) => format!(
+                            "p. {}: {:.1}%",
+                            n + 1,
+                            100.0 * d.lavorazione.riduzione_foglio(l, a)
+                        ),
                         None => format!("p. {}: misura ignota", n + 1),
                     }
                 })
                 .collect();
-            nota.push_str(&format!("\nAdattamento rispetto alla scala scelta — {}", percentuali.join("; ")));
+            nota.push_str(&format!(
+                "\nAdattamento rispetto alla scala scelta — {}",
+                percentuali.join("; ")
+            ));
         } else if self.adatta_foglio {
             nota.push_str("\nAdattamento non supportato per questo documento");
         }
@@ -1752,7 +1943,9 @@ impl App {
                 // quello che sborda non uscirebbe.
                 let mut figlio = ui.new_child(egui::UiBuilder::new().max_rect(r));
                 figlio.set_clip_rect(r);
-                figlio.painter().rect_filled(r, 0.0, Color32::from_gray(250));
+                figlio
+                    .painter()
+                    .rect_filled(r, 0.0, Color32::from_gray(250));
                 if let Some((l, a)) = misura {
                     // Una pagina girata rispetto al foglio si mostra girata:
                     // sul foglio la rotazione della stampante non è provata.
@@ -1762,7 +1955,13 @@ impl App {
                     } else {
                         Vec2::new(*l as f32, *a as f32)
                     } * (scala * rid);
-                    disegna_pagina(&figlio, Rect::from_center_size(r.center(), dim), d, i, ruotata);
+                    disegna_pagina(
+                        &figlio,
+                        Rect::from_center_size(r.center(), dim),
+                        d,
+                        i,
+                        ruotata,
+                    );
                 }
             }
             let p = ui.painter();
@@ -1800,16 +1999,30 @@ impl App {
         let mut pezzi = Vec::new();
         let mut senza = 0.0;
         let mut singoli = 0;
-        for d in self.documenti.iter().filter(|d| matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_))) {
+        for d in self
+            .documenti
+            .iter()
+            .filter(|d| matches!(d.stato, StatoJob::Pronto | StatoJob::Errore(_)))
+        {
             if !d.annidabile {
                 singoli += 1;
                 continue;
             }
             for n in 0..d.info.pagine {
-                let Some((l, a)) = d.mm_pagina(n) else { continue };
+                let Some((l, a)) = d.mm_pagina(n) else {
+                    continue;
+                };
                 for copia in 0..d.copie.max(1) {
-                    pezzi.push(nesting::Pezzo { id: (d.id, n, copia), l, a });
-                    senza += if rotazione::ruota(l, a, rotolo_mm) { l } else { a };
+                    pezzi.push(nesting::Pezzo {
+                        id: (d.id, n, copia),
+                        l,
+                        a,
+                    });
+                    senza += if rotazione::ruota(l, a, rotolo_mm) {
+                        l
+                    } else {
+                        a
+                    };
                 }
             }
         }
@@ -1837,7 +2050,17 @@ impl App {
             .collect();
         // `senza` comprende anche questi documenti: il loro consumo singolo
         // va contato pure con il nesting, per confrontare la stessa coda.
-        let altezza_esclusi: f64 = pezzi.iter().filter(|p| fuori.contains(&p.id.0)).map(|p| if rotazione::ruota(p.l, p.a, rotolo_mm) { p.l } else { p.a }).sum();
+        let altezza_esclusi: f64 = pezzi
+            .iter()
+            .filter(|p| fuori.contains(&p.id.0))
+            .map(|p| {
+                if rotazione::ruota(p.l, p.a, rotolo_mm) {
+                    p.l
+                } else {
+                    p.a
+                }
+            })
+            .sum();
         pezzi.retain(|p| !fuori.contains(&p.id.0));
         if pezzi.is_empty() {
             ui.painter().text(
@@ -1860,9 +2083,18 @@ impl App {
             cache.pezzi == pezzi && cache.utile == utile && cache.opzioni == opzioni
         }) {
             let fogli = nesting::disponi(
-                &pezzi, utile, opzioni.distanza_mm, opzioni.ruota, nesting::ALTEZZA_MAX_MM,
+                &pezzi,
+                utile,
+                opzioni.distanza_mm,
+                opzioni.ruota,
+                nesting::ALTEZZA_MAX_MM,
             );
-            self.cache_nesting = Some(CacheNesting { pezzi, utile, opzioni, fogli });
+            self.cache_nesting = Some(CacheNesting {
+                pezzi,
+                utile,
+                opzioni,
+                fogli,
+            });
         }
         let fogli = &self.cache_nesting.as_ref().unwrap().fogli;
         let documenti: HashMap<_, _> = self.documenti.iter().map(|d| (d.id, d)).collect();
@@ -1879,7 +2111,9 @@ impl App {
             senza / 1000.0
         );
         if singoli > 0 {
-            nota.push_str(&format!("\n{singoli} documenti non annidabili: partono da soli"));
+            nota.push_str(&format!(
+                "\n{singoli} documenti non annidabili: partono da soli"
+            ));
         }
         if !fuori.is_empty() {
             nota.push_str(&format!(
@@ -1907,7 +2141,12 @@ impl App {
             Vec2::new(rotolo_mm as f32 * scala, totale * scala),
         );
         p.rect_filled(rotolo, 0.0, Color32::from_gray(250));
-        p.rect_stroke(rotolo, 0.0, Stroke::new(1.0, Color32::from_gray(160)), StrokeKind::Outside);
+        p.rect_stroke(
+            rotolo,
+            0.0,
+            Stroke::new(1.0, Color32::from_gray(160)),
+            StrokeKind::Outside,
+        );
         let sinistra = rotolo.left() + self.config.margine_mm as f32 * scala;
         let mut y = rotolo.top();
         let mut da_selezionare = None;
@@ -1924,11 +2163,18 @@ impl App {
                 ));
             }
             for posto in &foglio.posti {
-                let Some(d) = documenti.get(&posto.id.0) else { continue };
-                let Some((l, a)) = d.mm_pagina(posto.id.1) else { continue };
+                let Some(d) = documenti.get(&posto.id.0) else {
+                    continue;
+                };
+                let Some((l, a)) = d.mm_pagina(posto.id.1) else {
+                    continue;
+                };
                 let (pl, pa) = if posto.ruotato { (a, l) } else { (l, a) };
                 let r = Rect::from_min_size(
-                    Pos2::new(sinistra + posto.x as f32 * scala, y + posto.y as f32 * scala),
+                    Pos2::new(
+                        sinistra + posto.x as f32 * scala,
+                        y + posto.y as f32 * scala,
+                    ),
                     Vec2::new(pl as f32 * scala, pa as f32 * scala),
                 );
                 disegna_pagina(ui, r, d, posto.id.1, posto.ruotato);
@@ -1945,7 +2191,11 @@ impl App {
                         Color32::from_gray(80),
                     );
                 }
-                if self.selezionato.and_then(|i| self.documenti.get(i)).is_some_and(|s| s.id == d.id) {
+                if self
+                    .selezionato
+                    .and_then(|i| self.documenti.get(i))
+                    .is_some_and(|s| s.id == d.id)
+                {
                     p.rect_stroke(r, 0.0, Stroke::new(1.5, BLU_HP), StrokeKind::Outside);
                 }
                 // Click su un pezzo: si seleziona il file, così le copie si
@@ -1958,7 +2208,12 @@ impl App {
                 if risposta.clicked() {
                     da_selezionare = Some(d.id);
                 }
-                risposta.on_hover_text(format!("{} · copia {} di {}", d.nome, posto.id.2 + 1, copie));
+                risposta.on_hover_text(format!(
+                    "{} · copia {} di {}",
+                    d.nome,
+                    posto.id.2 + 1,
+                    copie
+                ));
             }
             y += foglio.altezza as f32 * scala + spazio * scala;
         }
@@ -1987,15 +2242,21 @@ fn barra_inchiostro(ui: &mut egui::Ui, c: &Cartuccia) {
         let dim = Vec2::new(120.0, ui.text_style_height(&TextStyle::Body));
         ui.allocate_ui_with_layout(dim, Layout::left_to_right(Align::Center), |ui| {
             ui.set_min_width(dim.x);
-            ui.add(egui::Label::new(nome).truncate()).on_hover_text(&c.nome);
+            ui.add(egui::Label::new(nome).truncate())
+                .on_hover_text(&c.nome);
         });
         let (r, _) = ui.allocate_exact_size(Vec2::new(70.0, 10.0), Sense::hover());
         ui.painter().rect_filled(r, 2.0, Color32::from_gray(225));
         if let Some(p) = c.percentuale {
-            let pieno = Rect::from_min_size(r.min, Vec2::new(r.width() * p as f32 / 100.0, r.height()));
+            let pieno =
+                Rect::from_min_size(r.min, Vec2::new(r.width() * p as f32 / 100.0, r.height()));
             ui.painter().rect_filled(pieno, 2.0, colore);
             let testo = RichText::new(format!("{p}%"));
-            ui.label(if p < 15 { testo.color(ARANCIO).strong() } else { testo });
+            ui.label(if p < 15 {
+                testo.color(ARANCIO).strong()
+            } else {
+                testo
+            });
         }
     });
 }
@@ -2007,7 +2268,10 @@ fn disegna_pagina(ui: &egui::Ui, spazio: Rect, d: &Documento, n: usize, ruotata:
     let tex = d.pagine.get(n).map(|p| &p.tex);
     let rapporto = match tex {
         Some(t) => t.aspect_ratio(),
-        None => d.mm_pagina(n).map(|(l, a)| (l / a) as f32).unwrap_or(210.0 / 297.0),
+        None => d
+            .mm_pagina(n)
+            .map(|(l, a)| (l / a) as f32)
+            .unwrap_or(210.0 / 297.0),
     };
     let rapporto = if ruotata { 1.0 / rapporto } else { rapporto };
     let dim = if spazio.width() / spazio.height() > rapporto {
@@ -2018,19 +2282,38 @@ fn disegna_pagina(ui: &egui::Ui, spazio: Rect, d: &Documento, n: usize, ruotata:
     let r = Rect::from_center_size(spazio.center(), dim);
     let p = ui.painter();
     p.rect_filled(r, 0.0, Color32::WHITE);
-    p.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::from_gray(150)), StrokeKind::Inside);
+    p.rect_stroke(
+        r,
+        0.0,
+        Stroke::new(1.0, Color32::from_gray(150)),
+        StrokeKind::Inside,
+    );
     if let Some(tex) = tex {
         if ruotata {
             // L'immagine si disegna dritta in un rettangolo coi lati scambiati
             // e si gira di 90° attorno al centro.
             egui::Image::from_texture(SizedTexture::from_handle(tex))
                 .rotate(std::f32::consts::FRAC_PI_2, Vec2::splat(0.5))
-                .paint_at(ui, Rect::from_center_size(r.center(), Vec2::new(r.height(), r.width())));
+                .paint_at(
+                    ui,
+                    Rect::from_center_size(r.center(), Vec2::new(r.height(), r.width())),
+                );
         } else {
-            p.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            p.image(
+                tex.id(),
+                r,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
         }
     } else {
-        p.text(r.center(), Align2::CENTER_CENTER, d.info.formato.etichetta(), FontId::proportional((r.height() / 6.0).clamp(9.0, 28.0)), Color32::from_gray(150));
+        p.text(
+            r.center(),
+            Align2::CENTER_CENTER,
+            d.info.formato.etichetta(),
+            FontId::proportional((r.height() / 6.0).clamp(9.0, 28.0)),
+            Color32::from_gray(150),
+        );
     }
 }
 
@@ -2082,7 +2365,9 @@ impl App {
     }
 
     fn foto_finestra(&mut self, ctx: &egui::Context) {
-        let Some((percorso, fotogrammi)) = &mut self.foto else { return };
+        let Some((percorso, fotogrammi)) = &mut self.foto else {
+            return;
+        };
         *fotogrammi += 1;
         // Lascia il tempo a miniature e stato stampante di arrivare.
         if *fotogrammi < 120 {
@@ -2094,7 +2379,13 @@ impl App {
         ctx.request_screenshot(move |img| {
             let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
             let [l, a] = img.size;
-            if let Err(e) = image::save_buffer(&percorso, &rgba, l as u32, a as u32, image::ColorType::Rgba8) {
+            if let Err(e) = image::save_buffer(
+                &percorso,
+                &rgba,
+                l as u32,
+                a as u32,
+                image::ColorType::Rgba8,
+            ) {
                 eprintln!("foto non salvata: {e}");
             }
             std::process::exit(0);
@@ -2121,8 +2412,12 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let sta_trascinando = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
 
-        egui::Panel::left("impostazioni").exact_size(260.0).show(ui, |ui| self.pannello_impostazioni(ui));
-        egui::Panel::left("miniature").exact_size(170.0).show(ui, |ui| self.pannello_miniature(ui));
+        egui::Panel::left("impostazioni")
+            .exact_size(260.0)
+            .show(ui, |ui| self.pannello_impostazioni(ui));
+        egui::Panel::left("miniature")
+            .exact_size(170.0)
+            .show(ui, |ui| self.pannello_miniature(ui));
         if !self.avvisi.is_empty() {
             egui::Panel::bottom("avvisi").show(ui, |ui| {
                 for a in &self.avvisi {
@@ -2140,9 +2435,22 @@ impl eframe::App for App {
 
         if sta_trascinando {
             let schermo = ui.ctx().content_rect();
-            let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("drop")));
-            p.rect_filled(schermo, 0.0, Color32::from_rgba_unmultiplied(0, 125, 186, 60));
-            p.text(schermo.center(), Align2::CENTER_CENTER, "Rilascia per aggiungere", stile(RILASCIO).resolve(ui.style()), Color32::WHITE);
+            let p = ui.ctx().layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::unique("drop"),
+            ));
+            p.rect_filled(
+                schermo,
+                0.0,
+                Color32::from_rgba_unmultiplied(0, 125, 186, 60),
+            );
+            p.text(
+                schermo.center(),
+                Align2::CENTER_CENTER,
+                "Rilascia per aggiungere",
+                stile(RILASCIO).resolve(ui.style()),
+                Color32::WHITE,
+            );
         }
     }
 
@@ -2164,13 +2472,24 @@ mod test {
     fn documento_rilegge_il_tiff_modificato() {
         let file = file::FileTemporaneo::nuovo("tiff");
         let scrivi = |pagine, larghezza, altezza| {
-            let mut encoder = tiff::encoder::TiffEncoder::new(std::fs::File::create(file.percorso()).unwrap()).unwrap();
+            let mut encoder =
+                tiff::encoder::TiffEncoder::new(std::fs::File::create(file.percorso()).unwrap())
+                    .unwrap();
             for _ in 0..pagine {
-                encoder.write_image::<tiff::encoder::colortype::RGB8>(larghezza, altezza, &vec![100; larghezza as usize * altezza as usize * 3]).unwrap();
+                encoder
+                    .write_image::<tiff::encoder::colortype::RGB8>(
+                        larghezza,
+                        altezza,
+                        &vec![100; larghezza as usize * altezza as usize * 3],
+                    )
+                    .unwrap();
             }
         };
         scrivi(1, 100, 200);
-        let lav = Lavorazione { scala: Scala::Percentuale { x: 150.0, y: 150.0 }, ..Default::default() };
+        let lav = Lavorazione {
+            scala: Scala::Percentuale { x: 150.0, y: 150.0 },
+            ..Default::default()
+        };
         let mut d = Documento {
             id: 1,
             percorso: file.percorso().to_path_buf(),

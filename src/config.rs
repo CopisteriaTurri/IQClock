@@ -58,18 +58,26 @@ fn percorso() -> Option<PathBuf> {
 
 /// Valore booleano di una chiave: "1", "true" e "sì" accendono, il resto spegne.
 fn booleano(v: &str) -> bool {
-    matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "si" | "sì")
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "si" | "sì"
+    )
 }
 
 /// Pixel di una misura della finestra: fuori intervallo vale il default, che
 /// tiene la finestra usabile anche su schermi piccoli.
 fn px_accettabili(v: &str, min: u32, max: u32) -> Option<u32> {
-    v.trim().parse::<u32>().ok().filter(|px| (min..=max).contains(px))
+    v.trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|px| (min..=max).contains(px))
 }
 
 impl Config {
     pub fn carica() -> Self {
-        let Some(p) = percorso() else { return Config::default() };
+        let Some(p) = percorso() else {
+            return Config::default();
+        };
         Self::carica_da(&p)
     }
 
@@ -82,12 +90,16 @@ impl Config {
     /// i valori predefiniti. Ignora le chiavi sconosciute.
     fn carica_da(p: &Path) -> Self {
         let mut c = Config::default();
-        let Ok(testo) = std::fs::read_to_string(p) else { return c };
+        let Ok(testo) = std::fs::read_to_string(p) else {
+            return c;
+        };
         for (k, v) in testo.lines().filter_map(|r| r.split_once('=')) {
             match k.trim() {
                 "host" => c.host = v.trim().to_string(),
                 "porta" => c.porta = v.trim().parse().unwrap_or(c.porta),
-                "rotolo_mm" => c.larghezza_rotolo_mm = v.trim().parse().unwrap_or(c.larghezza_rotolo_mm),
+                "rotolo_mm" => {
+                    c.larghezza_rotolo_mm = v.trim().parse().unwrap_or(c.larghezza_rotolo_mm)
+                }
                 "margine_mm" => c.margine_mm = v.trim().parse().unwrap_or(c.margine_mm),
                 "soglia_dpi" => {
                     // Una soglia nulla o negativa avviserebbe sempre: vale il default.
@@ -151,9 +163,18 @@ impl Config {
             p,
             format!(
                 "host={}\nporta={}\nrotolo_mm={}\nmargine_mm={}\nsoglia_dpi={}\ncornice_distanza_mm={}\ncornice_spessore_mm={}\nnesting={}\nnesting_ruota={}\nnesting_distanza_mm={}\nfinestra_larghezza_px={}\nfinestra_altezza_px={}\n",
-                self.host, self.porta, self.larghezza_rotolo_mm, self.margine_mm, self.soglia_dpi,
-                self.cornice_distanza_mm, self.cornice_spessore_mm, self.nesting, self.nesting_ruota,
-                self.nesting_distanza_mm, self.finestra_larghezza_px, self.finestra_altezza_px
+                self.host,
+                self.porta,
+                self.larghezza_rotolo_mm,
+                self.margine_mm,
+                self.soglia_dpi,
+                self.cornice_distanza_mm,
+                self.cornice_spessore_mm,
+                self.nesting,
+                self.nesting_ruota,
+                self.nesting_distanza_mm,
+                self.finestra_larghezza_px,
+                self.finestra_altezza_px
             ),
         );
     }
@@ -165,8 +186,7 @@ mod test {
 
     /// Percorso isolato per test, mai la config reale.
     fn temporanea(nome: &str) -> PathBuf {
-        std::env::temp_dir()
-            .join(format!("iqclock-config-test-{}-{nome}", std::process::id()))
+        std::env::temp_dir().join(format!("iqclock-config-test-{}-{nome}", std::process::id()))
     }
 
     #[test]
@@ -180,7 +200,11 @@ mod test {
     #[test]
     fn valori_corrotti_tengono_i_default() {
         let p = temporanea("corrotta");
-        std::fs::write(&p, "spazzatura senza uguale\nhost = 10.0.0.5\nporta = abc\nrotolo_mm =\nchiave_ignota=1\n").unwrap();
+        std::fs::write(
+            &p,
+            "spazzatura senza uguale\nhost = 10.0.0.5\nporta = abc\nrotolo_mm =\nchiave_ignota=1\n",
+        )
+        .unwrap();
         let c = Config::carica_da(&p);
         std::fs::remove_file(&p).unwrap();
         let d = Config::default();

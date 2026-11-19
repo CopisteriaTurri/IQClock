@@ -156,12 +156,21 @@ pub fn intestazione(opz: &OpzioniJob, formato: Formato) -> Vec<u8> {
     if let Some(v) = opz.sorgente.valore_pjl() {
         let _ = write!(s, "@PJL SET MEDIASOURCE={v}\r\n");
     }
-    let resa = if opz.scala_di_grigi { "GRAYSCALE" } else { "COLOR" };
+    let resa = if opz.scala_di_grigi {
+        "GRAYSCALE"
+    } else {
+        "COLOR"
+    };
     let _ = write!(s, "@PJL SET RENDERMODE={resa}\r\n");
     if let Some(t) = opz.taglierina {
         let _ = write!(s, "@PJL SET CUTTER={}\r\n", if t { "ON" } else { "OFF" });
     }
-    for riga in opz.extra.lines().map(str::trim).filter(|r| r.starts_with("@PJL")) {
+    for riga in opz
+        .extra
+        .lines()
+        .map(str::trim)
+        .filter(|r| r.starts_with("@PJL"))
+    {
         let _ = write!(s, "{riga}\r\n");
     }
     if let Some(lingua) = formato.linguaggio_pjl() {
@@ -205,9 +214,7 @@ mod test {
             Sorgente::Auto => s += "@PJL SET MEDIASOURCE=AUTO\r\n",
             Sorgente::Rotolo1 => s += "@PJL SET MEDIASOURCE=ROLL1\r\n",
             Sorgente::Rotolo2 => s += "@PJL SET MEDIASOURCE=ROLL2\r\n",
-            Sorgente::Foglio => {
-                s += &format!("@PJL SET MEDIASOURCE={MEDIASOURCE_FOGLIO}\r\n")
-            }
+            Sorgente::Foglio => s += &format!("@PJL SET MEDIASOURCE={MEDIASOURCE_FOGLIO}\r\n"),
         }
         s += if opz.scala_di_grigi {
             "@PJL SET RENDERMODE=GRAYSCALE\r\n"
@@ -219,7 +226,12 @@ mod test {
             Some(true) => s += "@PJL SET CUTTER=ON\r\n",
             Some(false) => s += "@PJL SET CUTTER=OFF\r\n",
         }
-        for riga in opz.extra.lines().map(str::trim).filter(|r| r.starts_with("@PJL")) {
+        for riga in opz
+            .extra
+            .lines()
+            .map(str::trim)
+            .filter(|r| r.starts_with("@PJL"))
+        {
             s += &format!("{riga}\r\n");
         }
         match formato {
@@ -257,7 +269,10 @@ mod test {
 
     #[test]
     fn intestazione_pdf_minima() {
-        let opz = OpzioniJob { nome: "tavola \"A1\"".into(), ..Default::default() };
+        let opz = OpzioniJob {
+            nome: "tavola \"A1\"".into(),
+            ..Default::default()
+        };
         assert_eq!(
             testo(intestazione(&opz, Formato::Pdf)),
             "\x1b%-12345X@PJL JOB NAME=\"tavola A1\"\r\n\
@@ -366,7 +381,10 @@ mod test {
 
     #[test]
     fn copie_zero_diventa_uno() {
-        let opz = OpzioniJob { copie: 0, ..Default::default() };
+        let opz = OpzioniJob {
+            copie: 0,
+            ..Default::default()
+        };
         assert!(testo(intestazione(&opz, Formato::Pdf)).contains("@PJL SET COPIES=1\r\n"));
     }
 
@@ -389,7 +407,10 @@ mod test {
                 None => String::new(),
             };
             assert!(h.ends_with(&atteso), "{formato:?}");
-            assert_eq!(h.matches("ENTER LANGUAGE").count(), usize::from(!atteso.is_empty()));
+            assert_eq!(
+                h.matches("ENTER LANGUAGE").count(),
+                usize::from(!atteso.is_empty())
+            );
         }
     }
 
@@ -411,25 +432,40 @@ mod test {
     #[test]
     fn nome_job_troncato_a_80_caratteri() {
         let h = testo(intestazione(
-            &OpzioniJob { nome: "x".repeat(120), ..Default::default() },
+            &OpzioniJob {
+                nome: "x".repeat(120),
+                ..Default::default()
+            },
             Formato::Pdf,
         ));
-        assert!(h.contains(&format!("@PJL JOB NAME=\"{}\"\r\n", "x".repeat(80))), "{h:?}");
+        assert!(
+            h.contains(&format!("@PJL JOB NAME=\"{}\"\r\n", "x".repeat(80))),
+            "{h:?}"
+        );
         assert!(!h.contains("x".repeat(81).as_str()));
     }
 
     #[test]
     fn nome_job_multibyte_troncato_per_caratteri() {
         let h = testo(intestazione(
-            &OpzioniJob { nome: "\u{e0}".repeat(100), ..Default::default() },
+            &OpzioniJob {
+                nome: "\u{e0}".repeat(100),
+                ..Default::default()
+            },
             Formato::Pdf,
         ));
-        assert!(h.contains(&format!("@PJL JOB NAME=\"{}\"\r\n", "\u{e0}".repeat(80))), "{h:?}");
+        assert!(
+            h.contains(&format!("@PJL JOB NAME=\"{}\"\r\n", "\u{e0}".repeat(80))),
+            "{h:?}"
+        );
     }
 
     #[test]
     fn chiusura_byte_per_byte() {
-        let opz = OpzioniJob { nome: "disegno \"1\".pdf".into(), ..Default::default() };
+        let opz = OpzioniJob {
+            nome: "disegno \"1\".pdf".into(),
+            ..Default::default()
+        };
         assert_eq!(
             testo(chiusura(&opz)),
             "\x1b%-12345X@PJL EOJ NAME=\"disegno 1.pdf\"\r\n\x1b%-12345X"
@@ -449,7 +485,10 @@ mod test {
             lavorazione: Lavorazione::default(),
         };
         assert_eq!(testo(chiusura(&opz)), attesa_chiusura("x.pdf"));
-        let solo_nome = OpzioniJob { nome: "x.pdf".into(), ..Default::default() };
+        let solo_nome = OpzioniJob {
+            nome: "x.pdf".into(),
+            ..Default::default()
+        };
         assert_eq!(chiusura(&opz), chiusura(&solo_nome));
     }
 

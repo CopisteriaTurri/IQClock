@@ -87,7 +87,10 @@ fn avvia_gui(file: Vec<PathBuf>) -> Result<()> {
     if let Some(icona) = icona_finestra() {
         finestra = finestra.with_icon(icona);
     }
-    let opzioni = eframe::NativeOptions { viewport: finestra, ..Default::default() };
+    let opzioni = eframe::NativeOptions {
+        viewport: finestra,
+        ..Default::default()
+    };
     eframe::run_native(
         "IQClock",
         opzioni,
@@ -101,16 +104,20 @@ const ICONA: &[u8] = include_bytes!("../assets/iqclock.png");
 /// Icona della finestra e della taskbar: la stessa immagine che `build.rs`
 /// incorpora nell'exe come `.ico`, così le due non divergono.
 fn icona_finestra() -> Option<eframe::egui::IconData> {
-    let img = image::load_from_memory(ICONA)
-        .ok()?
-        .to_rgba8();
+    let img = image::load_from_memory(ICONA).ok()?.to_rgba8();
     let (width, height) = img.dimensions();
-    Some(eframe::egui::IconData { rgba: img.into_raw(), width, height })
+    Some(eframe::egui::IconData {
+        rgba: img.into_raw(),
+        width,
+        height,
+    })
 }
 
 /// Toglie `--nome valore` dagli argomenti e restituisce il valore.
 fn prendi(args: &mut Vec<String>, nome: &str) -> Result<Option<String>> {
-    let Some(i) = args.iter().position(|a| a == nome) else { return Ok(None) };
+    let Some(i) = args.iter().position(|a| a == nome) else {
+        return Ok(None);
+    };
     if i + 1 >= args.len() {
         bail!("manca il valore di {nome}");
     }
@@ -134,7 +141,11 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
     if let Some(h) = prendi(&mut args, "--host")? {
         config.host = h;
     }
-    let copie = prendi(&mut args, "--copie")?.map(|c| c.parse()).transpose().context("--copie")?.unwrap_or(1);
+    let copie = prendi(&mut args, "--copie")?
+        .map(|c| c.parse())
+        .transpose()
+        .context("--copie")?
+        .unwrap_or(1);
     let sorgente = match prendi(&mut args, "--rotolo")?.as_deref() {
         None => Sorgente::Stampante,
         Some("1") => Sorgente::Rotolo1,
@@ -150,10 +161,15 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
         Some(a) => Allineamento::da_testo(&a)
             .with_context(|| format!("--allinea vuole sinistra, centro o destra (non {a})"))?,
     };
-    let larghezza_rotolo: Option<f64> =
-        prendi(&mut args, "--larghezza-rotolo")?.map(|m| m.parse()).transpose().context("--larghezza-rotolo")?;
-    let margine_mm =
-        prendi(&mut args, "--margine")?.map(|m| m.parse()).transpose().context("--margine")?.unwrap_or(config.margine_mm);
+    let larghezza_rotolo: Option<f64> = prendi(&mut args, "--larghezza-rotolo")?
+        .map(|m| m.parse())
+        .transpose()
+        .context("--larghezza-rotolo")?;
+    let margine_mm = prendi(&mut args, "--margine")?
+        .map(|m| m.parse())
+        .transpose()
+        .context("--margine")?
+        .unwrap_or(config.margine_mm);
     let scala = match prendi(&mut args, "--scala")? {
         None => Scala::Originale,
         Some(t) => Scala::da_testo(&t)
@@ -163,7 +179,11 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
         distanza_mm: config.cornice_distanza_mm,
         spessore_mm: config.cornice_spessore_mm,
     });
-    let lavorazione = Lavorazione { scala, cornice, ..Default::default() };
+    let lavorazione = Lavorazione {
+        scala,
+        cornice,
+        ..Default::default()
+    };
     let nesting = prendi_flag(&mut args, "--nesting");
     let distanza_mm = prendi(&mut args, "--distanza")?
         .map(|m| m.parse::<f64>())
@@ -215,9 +235,11 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
             None
         }
         (false, Allineamento::Sinistra) => None,
-        (false, allineamento) => {
-            Some(Impaginazione { allineamento, rotolo_mm: rotolo_mm.unwrap(), margine_mm })
-        }
+        (false, allineamento) => Some(Impaginazione {
+            allineamento,
+            rotolo_mm: rotolo_mm.unwrap(),
+            margine_mm,
+        }),
     };
 
     if nesting {
@@ -239,7 +261,11 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
         let info = file::analizza(&f).with_context(|| f.display().to_string())?;
         valida_scala(&f, &info, &lavorazione)?;
         let opz = OpzioniJob {
-            nome: f.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+            nome: f
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
             copie,
             sorgente,
             scala_di_grigi,
@@ -255,7 +281,13 @@ fn riga_di_comando_stampa(args: &[String]) -> Result<()> {
             }
             None => {
                 stampante::invia(&config.host, config.porta, &f, info.formato, &opz, |_| {})?;
-                println!("{} → {}:{} ({})", f.display(), config.host, config.porta, info.dettagli);
+                println!(
+                    "{} → {}:{} ({})",
+                    f.display(),
+                    config.host,
+                    config.porta,
+                    info.dettagli
+                );
             }
         }
     }
@@ -274,9 +306,14 @@ fn valida_scala(
                 "attenzione: {} è PostScript/HP-GL/2, scala e cornice non si applicano",
                 percorso.display()
             );
-        } else if info.pagine_mm.iter().flatten().copied().chain(info.mm).any(|(l, a)| {
-            lavorazione::fuori_limiti(&lavorazione.scala, l, a)
-        }) {
+        } else if info
+            .pagine_mm
+            .iter()
+            .flatten()
+            .copied()
+            .chain(info.mm)
+            .any(|(l, a)| lavorazione::fuori_limiti(&lavorazione.scala, l, a))
+        {
             bail!(
                 "{}: la scala {} supera i limiti (da 1% a 1000% della misura originale)",
                 percorso.display(),
@@ -344,7 +381,13 @@ fn stampa_annidata(
                 .first()
                 .context("nessun foglio da scrivere: nessun documento è entrato nel nesting")?;
             let mut dest = std::fs::File::create(out)?;
-            stampante::scrivi_job(&mut dest, primo.file.percorso(), Formato::Pdf, &base, |_| {})?;
+            stampante::scrivi_job(
+                &mut dest,
+                primo.file.percorso(),
+                Formato::Pdf,
+                &base,
+                |_| {},
+            )?;
             println!(
                 "primo foglio ({} documenti) → {}",
                 primo.documenti.len(),
@@ -374,7 +417,12 @@ fn stampa_annidata(
                 let d = &documenti[*id as usize];
                 let info = file::analizza(&d.percorso)?;
                 let opz = OpzioniJob {
-                    nome: d.percorso.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                    nome: d
+                        .percorso
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
                     copie,
                     sorgente,
                     scala_di_grigi,
@@ -413,7 +461,10 @@ fn riga_di_comando_stato(args: &[String]) -> Result<()> {
     println!("Modello:  {}", s.modello.as_deref().unwrap_or("?"));
     println!("Stato:    {}", s.descrizione());
     for c in &s.cartucce {
-        let p = c.percentuale.map(|p| format!("{p:>3}%")).unwrap_or_else(|| "  ?".into());
+        let p = c
+            .percentuale
+            .map(|p| format!("{p:>3}%"))
+            .unwrap_or_else(|| "  ?".into());
         println!("Inchiostro {p}  {} {}", c.colore.unwrap_or(""), c.nome);
     }
     for i in &s.ingressi {
@@ -437,7 +488,10 @@ fn riga_di_comando_snmp(args: &[String]) -> Result<()> {
     let base = snmp::oid(args.first().map(String::as_str).unwrap_or("1.3.6.1.2.1.43"));
     for (o, v) in snmp::Client::new(&config.host, "public")?.walk(&base)? {
         let o: Vec<String> = o.iter().map(u32::to_string).collect();
-        let v = v.testo().map(|t| format!("\"{t}\"")).unwrap_or_else(|| format!("{v:?}"));
+        let v = v
+            .testo()
+            .map(|t| format!("\"{t}\""))
+            .unwrap_or_else(|| format!("{v:?}"));
         println!("{} = {v}", o.join("."));
     }
     Ok(())
