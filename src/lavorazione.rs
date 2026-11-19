@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, dictionary};
 
+use crate::compatibilita;
 use crate::file::{self, FileTemporaneo};
 use crate::impagina::{self, Impaginazione};
 use crate::nesting::{self, Contenuto, Nesting, Pezzo, Sorgente};
@@ -327,9 +328,8 @@ pub fn prepara(
 ) -> Result<Option<(FileTemporaneo, Formato)>> {
     match formato {
         Formato::Pdf => {
-            if lav.nulla() && imp.is_none() {
-                return Ok(None);
-            }
+            // Anche senza lavorazioni il PDF passa da `componi_pdf`: i ritocchi
+            // di `compatibilita` servono a ogni file.
             let dati = std::fs::read(percorso)?;
             let Some(composto) = componi_pdf(&dati, lav, imp)? else {
                 return Ok(None);
@@ -346,21 +346,31 @@ pub fn prepara(
     }
 }
 
-/// Applica scala e allineamento a un PDF già letto. `None` se nessuna pagina
-/// cambia. Con la sola scala originale passa dal percorso già collaudato di
-/// `impagina`.
+/// Applica i ritocchi per la stampante (`compatibilita`), scala e allineamento
+/// a un PDF già letto. `None` se il documento non cambia. Senza lavorazioni né
+/// allineamento il file non si riscrive: i ritocchi si fanno sui byte (vedi
+/// `compatibilita`), e un PDF illeggibile o cifrato parte com'è.
 pub fn componi_pdf(
     dati: &[u8],
     lav: &Lavorazione,
     imp: Option<&Impaginazione>,
 ) -> Result<Option<impagina::PdfComposto>> {
-    if lav.nulla() {
-        return match imp {
-            Some(imp) => impagina::componi_pdf(dati, imp),
-            None => Ok(None),
-        };
+    if lav.nulla() && imp.is_none() {
+        return Ok(compatibilita::ritocca_byte(dati).map(|dati| impagina::PdfComposto {
+            dati,
+            // Pagine al loro posto e senza scala, come il file originale.
+            posizioni: Vec::new(),
+            fattori_scala: Vec::new(),
+        }));
     }
     let mut doc = Document::load_mem(dati).context("apertura del PDF")?;
+    // Senza lavorazioni qui c'è per forza un allineamento.
+    if doc.is_encrypted()
+        && lav.nulla()
+        && let Some(imp) = imp
+    {
+        return impagina::componi_pdf(dati, imp);
+    }
     if doc.is_encrypted() {
         // Le misure delle pagine sono numeri, non stringhe cifrate: se si
         // leggono anche senza password e la scala non cambierebbe niente (es.
@@ -386,14 +396,20 @@ pub fn componi_pdf(
             None => Ok(None),
         };
     }
+    // Prima di tutto: scala e allineamento misurano comunque la parte visibile,
+    // che resta la stessa.
+    let mut cambiato = compatibilita::applica(&mut doc)?;
     // Conserva la decisione prima di modificare box e contenuti: l'anteprima
     // deve misurare i DPI con la stessa scala che viene mandata in stampa.
-    let fattori_scala = doc
-        .get_pages()
-        .into_values()
-        .map(|id| scala_pagina(&doc, id, lav).map_or((1.0, 1.0), |p| p.fattori))
-        .collect();
-    let mut cambiato = applica_scala(&mut doc, lav)?;
+    let fattori_scala = if lav.nulla() {
+        Vec::new()
+    } else {
+        doc.get_pages()
+            .into_values()
+            .map(|id| scala_pagina(&doc, id, lav).map_or((1.0, 1.0), |p| p.fattori))
+            .collect()
+    };
+    cambiato |= applica_scala(&mut doc, lav)?;
     if let Some(cornice) = &lav.cornice {
         cambiato |= applica_cornice(&mut doc, cornice)?;
     }

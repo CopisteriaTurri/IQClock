@@ -522,7 +522,7 @@ pub(crate) fn unita_utente(doc: &lopdf::Document, pagina: lopdf::ObjectId) -> f6
 }
 
 /// Riquadro `[x0, y0, x1, y1]` normalizzato (x0 < x1, y0 < y1) da un array PDF.
-fn riquadro(o: &lopdf::Object) -> Option<[f64; 4]> {
+pub(crate) fn riquadro(o: &lopdf::Object) -> Option<[f64; 4]> {
     let v: Vec<f64> = o.as_array().ok()?.iter().filter_map(|o| o.as_float().ok().map(f64::from)).collect();
     if v.len() != 4 {
         return None;
