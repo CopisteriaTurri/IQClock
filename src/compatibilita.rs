@@ -53,7 +53,9 @@ pub(crate) fn ritocca_byte(dati: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     if metadati(&doc).into_iter().any(|id| xmp_compresso_con_hp(&doc, id)) {
-        applica(&mut doc).ok()?;
+        if !applica(&mut doc).ok()? {
+            return None;
+        }
         let mut out = Vec::new();
         doc.save_to(&mut out).ok()?;
         return Some(out);
@@ -90,7 +92,7 @@ fn xmp_compresso_con_hp(doc: &Document, id: ObjectId) -> bool {
     stream.dict.has(b"Filter")
         && stream
             .decompressed_content_with_limit(XMP_MASSIMO)
-            .is_ok_and(|xmp| trova(&xmp, HP_METADATA).is_some())
+            .is_ok_and(|mut xmp| sbianca_hp_metadata(&mut xmp))
 }
 
 /// Dove sta nel file il contenuto dello stream non compresso `id`: solo se
@@ -146,10 +148,11 @@ fn sbianca_hp_metadata(dati: &mut [u8]) -> bool {
             b'<' => fine_elemento(dati, inizio, da),
             _ => fine_attributo(dati, da),
         };
-        // Un commento XML a metà dell'intervallo: sbiancarlo romperebbe l'XML.
+        // Un commento o una sezione CDATA a metà dell'intervallo: la fine trovata
+        // potrebbe non essere quella vera, e sbiancare romperebbe l'XML.
         let fine = fine.filter(|&f| {
             let tratto = &dati[inizio..f];
-            trova(tratto, b"<!--").is_none() && trova(tratto, b"-->").is_none()
+            [&b"<!--"[..], b"-->", b"<![CDATA[", b"]]>"].iter().all(|m| trova(tratto, m).is_none())
         });
         if let Some(fine) = fine {
             dati[inizio..fine].fill(b' ');
@@ -241,32 +244,7 @@ fn media_box_al_suo_posto(doc: &Document, id: ObjectId, dati: &mut [u8]) -> bool
         return false;
     }
     let Some(fine) = trova(oggetto, b"endobj") else { return false };
-    // Una sola `/MediaBox` nell'oggetto: un'altra in un commento, in una stringa
-    // o in un dizionario annidato renderebbe incerto quale sia quella vera.
-    let Some(chiave) = trova(&oggetto[..fine], b"/MediaBox") else { return false };
-    if trova(&oggetto[chiave + 1..fine], b"/MediaBox").is_some() {
-        return false;
-    }
-    let mut a = chiave + b"/MediaBox".len();
-    while oggetto[a].is_ascii_whitespace() {
-        a += 1;
-    }
-    if oggetto[a] != b'[' {
-        return false;
-    }
-    let Some(b) = oggetto[a..fine].iter().position(|&c| c == b']').map(|p| a + p) else { return false };
-    // Un commento potrebbe contenere la `]` trovata: meglio non toccare niente.
-    if oggetto[a..b].contains(&b'%') {
-        return false;
-    }
-    // E l'array trovato deve dire proprio quello che ha letto lopdf.
-    let letti: Option<Vec<f64>> = std::str::from_utf8(&oggetto[a + 1..b])
-        .ok()
-        .and_then(|t| t.split_ascii_whitespace().map(|n| n.parse().ok()).collect());
-    let Some([x0, y0, x1, y1]) = letti.and_then(|v| <[f64; 4]>::try_from(v).ok()) else { return false };
-    if !uguali([x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)], media) {
-        return false;
-    }
+    let Some((a, b)) = array_media_box(&oggetto[..fine], media) else { return false };
     let nuovo = format!("[{}]", visibile.map(numero).join(" "));
     let spazio = b + 1 - a;
     if nuovo.len() > spazio {
@@ -277,6 +255,43 @@ fn media_box_al_suo_posto(doc: &Document, id: ObjectId, dati: &mut [u8]) -> bool
     posto[nuovo.len() - 1..spazio - 1].fill(b' ');
     posto[spazio - 1] = b']';
     true
+}
+
+/// Posizione di `[` e `]` dell'array MediaBox nel testo dell'oggetto pagina,
+/// solo se non ci sono dubbi che sia quello che ha letto lopdf (`media`).
+fn array_media_box(oggetto: &[u8], media: [f64; 4]) -> Option<(usize, usize)> {
+    // Con stringhe letterali o nomi con `#` (`/Media#42ox` vale `/MediaBox`)
+    // la `/MediaBox` trovata nei byte potrebbe non essere la chiave vera: in
+    // una pagina sono rari, e senza non serve un vero lexer PDF.
+    if oggetto.iter().any(|&c| c == b'(' || c == b'#') {
+        return None;
+    }
+    // Una sola `/MediaBox` nell'oggetto: un'altra in un commento o in un
+    // dizionario annidato renderebbe incerto quale sia quella vera.
+    let chiave = trova(oggetto, b"/MediaBox")?;
+    if trova(&oggetto[chiave + 1..], b"/MediaBox").is_some() {
+        return None;
+    }
+    let mut a = chiave + b"/MediaBox".len();
+    while oggetto.get(a)?.is_ascii_whitespace() {
+        a += 1;
+    }
+    if oggetto[a] != b'[' {
+        return None;
+    }
+    let b = a + oggetto[a..].iter().position(|&c| c == b']')?;
+    // Un commento potrebbe contenere la `]` trovata: meglio non toccare niente.
+    if oggetto[a..b].contains(&b'%') {
+        return None;
+    }
+    // E l'array trovato deve dire proprio quello che ha letto lopdf.
+    let letti: Vec<f64> = std::str::from_utf8(&oggetto[a + 1..b])
+        .ok()?
+        .split_ascii_whitespace()
+        .map(|n| n.parse().ok())
+        .collect::<Option<_>>()?;
+    let [x0, y0, x1, y1] = <[f64; 4]>::try_from(letti).ok()?;
+    uguali([x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)], media).then_some((a, b))
 }
 
 fn uguali(a: [f64; 4], b: [f64; 4]) -> bool {
@@ -415,6 +430,8 @@ mod test {
         assert!(sbianca_hp_metadata(&mut x));
         let atteso = format!("<r><!-- <pdfx:HpMetadata> --><t>T</t>{}</r>", " ".repeat("<pdfx:HpMetadata>X</pdfx:HpMetadata>".len()));
         assert_eq!(String::from_utf8(x).unwrap(), atteso);
+        let mut x = b"<pdfx:HpMetadata><![CDATA[</pdfx:HpMetadata>]]></pdfx:HpMetadata>".to_vec();
+        assert!(!sbianca_hp_metadata(&mut x));
     }
 
     #[test]
@@ -473,6 +490,35 @@ mod test {
         let xmp = doc.get_object(id).unwrap().as_stream().unwrap().get_plain_content().unwrap();
         assert!(trova(&xmp, HP_METADATA).is_none());
         assert!(trova(&xmp, b"rdf:Description").is_some());
+    }
+
+    #[test]
+    fn byte_xmp_compresso_senza_elementi_da_togliere_resta() {
+        // Abbastanza lungo perché lopdf lo comprima davvero.
+        let xmp = [&b"<rdf:Description pdfx:HpMetadataX=\"v\"/>"[..], &[b' '; 200]].concat();
+        let originale = salva(pdf([0.0, 0.0, 595.0, 842.0], None, Some(&xmp), true));
+        assert!(ritocca_byte(&originale).is_none());
+    }
+
+    #[test]
+    fn array_media_box_solo_senza_dubbi() {
+        let m = [0.0, 0.0, 900.0, 900.0];
+        let semplice = b"17 0 obj\n<</Type/Page/MediaBox [0 0 900 900]/Parent 2 0 R>>\n";
+        assert_eq!(array_media_box(semplice, m), Some((31, 43)));
+        for dubbio in [
+            // La chiave vera è `/Media#42ox`, la stringa ne contiene una finta.
+            &b"<</Media#42ox[0 0 1 1]/P(/MediaBox[0 0 900 900])>>"[..],
+            // Due `/MediaBox`, una in un dizionario annidato.
+            b"<</MediaBox[0 0 900 900]/X<</MediaBox[0 0 900 900]>>>>",
+            // Numeri diversi da quelli letti da lopdf.
+            b"<</MediaBox[0 0 900 901]>>",
+            // Commento con dentro la `]`.
+            b"<</MediaBox[0 0 %]\n900 900]>>",
+            // Non è un array.
+            b"<</MediaBox 5 0 R>>",
+        ] {
+            assert_eq!(array_media_box(dubbio, m), None, "{}", String::from_utf8_lossy(dubbio));
+        }
     }
 
     #[test]

@@ -396,9 +396,6 @@ pub fn componi_pdf(
             None => Ok(None),
         };
     }
-    // Prima di tutto: scala e allineamento misurano comunque la parte visibile,
-    // che resta la stessa.
-    let mut cambiato = compatibilita::applica(&mut doc)?;
     // Conserva la decisione prima di modificare box e contenuti: l'anteprima
     // deve misurare i DPI con la stessa scala che viene mandata in stampa.
     let fattori_scala = if lav.nulla() {
@@ -409,7 +406,7 @@ pub fn componi_pdf(
             .map(|id| scala_pagina(&doc, id, lav).map_or((1.0, 1.0), |p| p.fattori))
             .collect()
     };
-    cambiato |= applica_scala(&mut doc, lav)?;
+    let mut cambiato = applica_scala(&mut doc, lav)?;
     if let Some(cornice) = &lav.cornice {
         cambiato |= applica_cornice(&mut doc, cornice)?;
     }
@@ -422,8 +419,16 @@ pub fn componi_pdf(
         None => vec![None; doc.get_pages().len()],
     };
     if !cambiato {
-        return Ok(None);
+        // Scala, cornice e allineamento non cambiano niente: il file non si
+        // riscrive, come quando non c'è nessuna lavorazione.
+        return Ok(compatibilita::ritocca_byte(dati).map(|dati| impagina::PdfComposto {
+            dati,
+            posizioni,
+            fattori_scala,
+        }));
     }
+    // Dopo gli altri passi, che misurano comunque la parte visibile.
+    compatibilita::applica(&mut doc)?;
     let mut out = Vec::new();
     doc.save_to(&mut out)
         .context("scrittura del PDF ridimensionato")?;
@@ -1556,6 +1561,25 @@ mod test {
         let (doc, id) = pagina(&composto.dati);
         let ([_, _, x1, y1], _) = file::box_e_rotazione(&doc, id).unwrap();
         assert!((x1 - l * 0.5).abs() < 0.01 && (y1 - a * 0.5).abs() < 0.01, "{x1} {y1}");
+    }
+
+    /// Una scala che non cambia niente non deve far riscrivere il PDF da lopdf:
+    /// restano solo i ritocchi sui byte (vedi `compatibilita`).
+    #[test]
+    fn scala_che_non_cambia_niente_non_riscrive_il_pdf() {
+        let mut doc = Document::load_mem(&pdf_a4_con_annotazione()).unwrap();
+        let id = *doc.get_pages().values().next().unwrap();
+        let (l, a) = (pt(210.0), pt(297.0));
+        let dizionario = doc.get_dictionary_mut(id).unwrap();
+        dizionario.set("MediaBox", vec![(-pt(3.0)).into(), (-pt(3.0)).into(), (l + pt(3.0)).into(), (a + pt(3.0)).into()]);
+        dizionario.set("CropBox", vec![0.into(), 0.into(), l.into(), a.into()]);
+        let mut dati = Vec::new();
+        doc.save_to(&mut dati).unwrap();
+        let lav = Lavorazione { scala: Scala::Formato(FormatoIso::A4), ..Default::default() };
+        assert!(!lav.nulla());
+        let composto = componi_pdf(&dati, &lav, None).unwrap().unwrap();
+        assert_eq!(composto.dati.len(), dati.len());
+        assert_eq!(Some(composto.dati), compatibilita::ritocca_byte(&dati));
     }
 
     /// Verifica che una scala del 100% lasci passare anche un PDF illeggibile
