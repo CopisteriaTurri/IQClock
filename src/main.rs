@@ -87,16 +87,71 @@ fn avvia_gui(file: Vec<PathBuf>) -> Result<()> {
     if let Some(icona) = icona_finestra() {
         finestra = finestra.with_icon(icona);
     }
-    let opzioni = eframe::NativeOptions {
+    #[allow(unused_mut)]
+    let mut opzioni = eframe::NativeOptions {
         viewport: finestra,
         ..Default::default()
     };
+    #[cfg(target_os = "linux")]
+    if preferisci_x11() {
+        opzioni.event_loop_builder = Some(Box::new(|builder| {
+            use winit::platform::x11::EventLoopBuilderExtX11;
+            builder.with_x11();
+        }));
+    }
     eframe::run_native(
         "IQClock",
         opzioni,
         Box::new(move |cc| Ok(Box::new(gui::App::new(cc, config, file)))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// winit 0.30 non consegna i file trascinati su Wayland nativo (#57): in una
+/// sessione Wayland con XWayland disponibile usiamo X11, dove il drag & drop
+/// funziona, comunque venga avviata l'app (menu, terminale, file manager).
+/// `IQCLOCK_WAYLAND=1` mantiene Wayland nativo. Se il server X di `DISPLAY` non
+/// risponde (es. un `DISPLAY` rimasto nell'ambiente) restiamo su Wayland: con
+/// X11 forzato e irraggiungibile la finestra non si aprirebbe.
+#[cfg(target_os = "linux")]
+fn preferisci_x11() -> bool {
+    let impostata = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
+    if !impostata("WAYLAND_DISPLAY") || impostata("IQCLOCK_WAYLAND") {
+        return false;
+    }
+    std::env::var("DISPLAY")
+        .ok()
+        .and_then(|d| numero_display(&d))
+        .is_some_and(server_x11_risponde)
+}
+
+/// Prova il socket locale del server X: quello astratto (usato anche quando `/tmp`
+/// è privato) e quello nel filesystem, come fa libxcb.
+#[cfg(target_os = "linux")]
+fn server_x11_risponde(numero: u32) -> bool {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixStream};
+    let percorso = format!("/tmp/.X11-unix/X{numero}");
+    SocketAddr::from_abstract_name(percorso.as_bytes())
+        .and_then(|a| UnixStream::connect_addr(&a))
+        .is_ok()
+        || UnixStream::connect(&percorso).is_ok()
+}
+
+/// Numero del display locale in `DISPLAY` (`:0`, `:0.0`, `unix:1`, `unix/:0`).
+/// `None` per i display remoti (`host:0`), che non sono XWayland.
+#[cfg(target_os = "linux")]
+fn numero_display(display: &str) -> Option<u32> {
+    let display = display.strip_prefix("unix/").unwrap_or(display);
+    let (host, resto) = display.split_once(':')?;
+    if !(host.is_empty() || host == "unix") {
+        return None;
+    }
+    let numero = resto.split('.').next()?;
+    if numero.is_empty() || !numero.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    numero.parse().ok()
 }
 
 const ICONA: &[u8] = include_bytes!("../assets/iqclock.png");
@@ -499,6 +554,22 @@ fn riga_di_comando_snmp(args: &[String]) -> Result<()> {
 
 #[cfg(test)]
 mod test {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn numero_display_solo_per_display_locali() {
+        use super::numero_display;
+        assert_eq!(numero_display(":0"), Some(0));
+        assert_eq!(numero_display(":00"), Some(0));
+        assert_eq!(numero_display(":1.0"), Some(1));
+        assert_eq!(numero_display("unix:12"), Some(12));
+        assert_eq!(numero_display("unix/:0"), Some(0));
+        assert_eq!(numero_display("host:0"), None);
+        assert_eq!(numero_display("localhost:10.0"), None);
+        assert_eq!(numero_display(":"), None);
+        assert_eq!(numero_display("0"), None);
+        assert_eq!(numero_display(":99999999999"), None);
+    }
+
     use super::*;
 
     #[test]
