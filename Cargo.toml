@@ -15,6 +15,11 @@ pdfium-render = "0.9.4"
 rfd = "0.17.2"
 tiff = "0.11"
 
+# Solo per scegliere X11 nelle sessioni Wayland: winit 0.30 non gestisce il
+# drag & drop dei file su Wayland nativo (#57). È la stessa versione di eframe.
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["x11"] }
+
 [features]
 # Include pdfium nell'eseguibile (serve prima `scarica-pdfium.sh`); usata per le release.
 pdfium-incluso = []

@@ -87,16 +87,34 @@ fn avvia_gui(file: Vec<PathBuf>) -> Result<()> {
     if let Some(icona) = icona_finestra() {
         finestra = finestra.with_icon(icona);
     }
-    let opzioni = eframe::NativeOptions {
+    #[allow(unused_mut)]
+    let mut opzioni = eframe::NativeOptions {
         viewport: finestra,
         ..Default::default()
     };
+    #[cfg(target_os = "linux")]
+    if preferisci_x11() {
+        opzioni.event_loop_builder = Some(Box::new(|builder| {
+            use winit::platform::x11::EventLoopBuilderExtX11;
+            builder.with_x11();
+        }));
+    }
     eframe::run_native(
         "IQClock",
         opzioni,
         Box::new(move |cc| Ok(Box::new(gui::App::new(cc, config, file)))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// winit 0.30 non consegna i file trascinati su Wayland nativo (#57): in una
+/// sessione Wayland con XWayland disponibile usiamo X11, dove il drag & drop
+/// funziona, comunque venga avviata l'app (menu, terminale, file manager).
+/// `IQCLOCK_WAYLAND=1` mantiene Wayland nativo.
+#[cfg(target_os = "linux")]
+fn preferisci_x11() -> bool {
+    let impostata = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
+    impostata("WAYLAND_DISPLAY") && impostata("DISPLAY") && !impostata("IQCLOCK_WAYLAND")
 }
 
 const ICONA: &[u8] = include_bytes!("../assets/iqclock.png");
